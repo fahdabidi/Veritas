@@ -15,8 +15,8 @@ This document tracks the step-by-step execution roadmap to upgrade the `gbn-prot
 - `[x]` In `crates/gbn-protocol/`, define the core Telescopic Wire formats: `RelayExtend` (carry Noise handshake), `RelayData` (carry encrypted chunks), `RelayHeartbeat`.
 
 ## Step 2: Snow Protocol Wrappers (Crypto)
-- `[ ]` In `crates/mcn-crypto/`, implement `noise.rs` wrappers around the `snow` crate.
-- `[ ]` Define a `ClientInitiator` workflow and a `RelayResponder` workflow to establish `Noise_XX` handshakes.
+- `[x]` In `crates/mcn-crypto/`, implement `noise.rs` wrappers around the `snow` crate.
+- `[x]` Define a `ClientInitiator` workflow and a `RelayResponder` workflow to establish `Noise_XX` handshakes.
 
 ## Step 3: Swarm and DHT Foundation (Router Sim)
 - `[ ]` In `crates/mcn-router-sim/`, implement the libp2p `Swarm` logic.

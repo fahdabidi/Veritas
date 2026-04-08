@@ -7,6 +7,8 @@
 //! - `MultipathRouter`: Manages multiple circuits and distributes traffic
 //!   round-robin to simulate multipath routing.
 
+pub mod swarm;
+
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},

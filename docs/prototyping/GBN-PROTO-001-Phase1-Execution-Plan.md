@@ -10,9 +10,9 @@ This document tracks the step-by-step execution roadmap to upgrade the `gbn-prot
 ---
 
 ## Step 1: Workspace Dependencies & Protocol Schemas
-- `[ ]` Add `snow` and `libp2p` (with `kad` feature) to the workspace `Cargo.toml`.
-- `[ ]` In `crates/gbn-protocol/`, define `RelayDescriptor` structs wrapping Ed25519 Public Keys, IPs, and Signatures.
-- `[ ]` In `crates/gbn-protocol/`, define the core Telescopic Wire formats: `RelayExtend` (carry Noise handshake), `RelayData` (carry encrypted chunks), `RelayHeartbeat`.
+- `[x]` Add `snow` and `libp2p` (with `kad` feature) to the workspace `Cargo.toml`.
+- `[x]` In `crates/gbn-protocol/`, define `RelayDescriptor` structs wrapping Ed25519 Public Keys, IPs, and Signatures.
+- `[x]` In `crates/gbn-protocol/`, define the core Telescopic Wire formats: `RelayExtend` (carry Noise handshake), `RelayData` (carry encrypted chunks), `RelayHeartbeat`.
 
 ## Step 2: Snow Protocol Wrappers (Crypto)
 - `[ ]` In `crates/mcn-crypto/`, implement `noise.rs` wrappers around the `snow` crate.

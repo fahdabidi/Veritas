@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# run-tests.sh — Execute the full Phase 1 test suite across the AWS infrastructure.
+# run-tests.sh — Execute the full Phase 1 Zero-Trust test suite on AWS.
 #
 # Usage: ./run-tests.sh <creator-ip> <publisher-ip> <relay1-ip> <relay2-ip> <relay3-ip> <relay4-ip> [ssh-key-path]
 #
 # This script:
-#   1. Starts relay processes on all relay instances
-#   2. Starts the publisher receiver on the publisher instance
-#   3. SSHs into the Creator instance and runs the full pipeline
-#   4. Verifies SHA-256 match on the Publisher instance
-#   5. Collects timing metrics and test results
-#   6. Stops all relay and publisher processes
+#   1. Collects relay identity public keys from DHT-announced nodes
+#   2. Starts the Publisher receiver
+#   3. Runs the full 500MB pipeline (sanitize → chunk → encrypt → onion-route → reconstruct)
+#   4. Triggers S1.9: kills a relay mid-transmission, validates recovery
+#   5. Verifies SHA-256 integrity of the reassembled video
+#   6. Reports timing metrics and pass/fail summary
 
 set -euo pipefail
 
@@ -29,86 +29,138 @@ SSH_USER="ec2-user"
 REMOTE_DIR="/home/$SSH_USER/gbn-proto"
 
 SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no"
+RESULTS_LOG="/tmp/gbn-phase1-results.log"
 
 echo "============================================"
-echo "  GBN Phase 1 — Full Test Suite"
+echo "  GBN Phase 1 — Zero-Trust Test Suite"
 echo "  Creator:   $CREATOR_IP"
-echo "  Publisher:  $PUBLISHER_IP"
-echo "  Relays:     $RELAY1_IP, $RELAY2_IP, $RELAY3_IP, $RELAY4_IP"
+echo "  Publisher: $PUBLISHER_IP"
+echo "  Relays:    $RELAY1_IP, $RELAY2_IP, $RELAY3_IP, $RELAY4_IP"
 echo "============================================"
 echo ""
 
-# ─────────────────────────── Step 1: Start Relays ───────────────────────────
-echo "[Step 1/5] Starting relay processes..."
+# ─── Step 1: Collect relay identity public keys ──────────────────────────────
+echo "[Step 1/6] Collecting relay identity public keys..."
 
-# Path 1: Creator → Relay1 → Relay2 → Publisher
-ssh $SSH_OPTS "$SSH_USER@$RELAY1_IP" \
-    "nohup $REMOTE_DIR/gbn-proto relay --listen 0.0.0.0:9000 --forward $RELAY2_IP:9000 > /tmp/relay.log 2>&1 &"
-echo "  Relay 1 ($RELAY1_IP:9000) → Relay 2 ($RELAY2_IP:9000)"
+RELAY_IPS=("$RELAY1_IP" "$RELAY2_IP" "$RELAY3_IP" "$RELAY4_IP")
+RELAY_PUBKEYS=()
 
-ssh $SSH_OPTS "$SSH_USER@$RELAY2_IP" \
-    "nohup $REMOTE_DIR/gbn-proto relay --listen 0.0.0.0:9000 --forward $PUBLISHER_IP:9000 > /tmp/relay.log 2>&1 &"
-echo "  Relay 2 ($RELAY2_IP:9000) → Publisher ($PUBLISHER_IP:9000)"
+for IP in "${RELAY_IPS[@]}"; do
+    PUB=$(ssh $SSH_OPTS "$SSH_USER@$IP" "cat $REMOTE_DIR/identity/identity.pub")
+    RELAY_PUBKEYS+=("$PUB")
+    echo "  $IP → ${PUB:0:16}..."
+done
 
-# Path 2: Creator → Relay3 → Publisher
-ssh $SSH_OPTS "$SSH_USER@$RELAY3_IP" \
-    "nohup $REMOTE_DIR/gbn-proto relay --listen 0.0.0.0:9001 --forward $PUBLISHER_IP:9001 > /tmp/relay.log 2>&1 &"
-echo "  Relay 3 ($RELAY3_IP:9001) → Publisher ($PUBLISHER_IP:9001)"
+# Write keys to a topology file on the Creator so it can build circuits
+ssh $SSH_OPTS "$SSH_USER@$CREATOR_IP" "mkdir -p $REMOTE_DIR/topology"
+for i in "${!RELAY_IPS[@]}"; do
+    echo "${RELAY_IPS[$i]}:$((9000 + i)) ${RELAY_PUBKEYS[$i]}" | \
+    ssh $SSH_OPTS "$SSH_USER@$CREATOR_IP" \
+        "cat >> $REMOTE_DIR/topology/relay-nodes.txt"
+done
+echo "  Topology written to Creator."
 
-# Path 3: Creator → Relay4 → Publisher
-ssh $SSH_OPTS "$SSH_USER@$RELAY4_IP" \
-    "nohup $REMOTE_DIR/gbn-proto relay --listen 0.0.0.0:9002 --forward $PUBLISHER_IP:9002 > /tmp/relay.log 2>&1 &"
-echo "  Relay 4 ($RELAY4_IP:9002) → Publisher ($PUBLISHER_IP:9002)"
-
-sleep 2
-
-# ─────────────────────────── Step 2: Start Publisher ───────────────────────────
+# ─── Step 2: Start Publisher receiver ────────────────────────────────────────
 echo ""
-echo "[Step 2/5] Starting publisher receiver..."
+echo "[Step 2/6] Starting publisher onion receiver..."
 
 ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
     "nohup $REMOTE_DIR/gbn-proto receive \
         --listen-ports 9000,9001,9002 \
         --output-dir $REMOTE_DIR/reassembled/ \
         > /tmp/publisher.log 2>&1 &"
-echo "  Publisher listening on ports 9000, 9001, 9002"
-
+echo "  Publisher listening on ports 9000, 9001, 9002."
 sleep 2
 
-# ─────────────────────────── Step 3: Run Pipeline ───────────────────────────
+# ─── Step 3: Full pipeline (normal transmission) ─────────────────────────────
 echo ""
-echo "[Step 3/5] Executing MCN pipeline on Creator..."
+echo "[Step 3/6] Running full 500MB pipeline with Telescopic Onion Routing..."
 
 ssh $SSH_OPTS "$SSH_USER@$CREATOR_IP" \
     "$REMOTE_DIR/gbn-proto upload \
         --input $REMOTE_DIR/test-vectors/*.mp4 \
-        --paths $RELAY1_IP:9000,$RELAY3_IP:9001,$RELAY4_IP:9002 \
-        --publisher-ip $PUBLISHER_IP \
-        2>&1" | tee /tmp/gbn-phase1-results.log
+        --publisher-key $(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" "cat $REMOTE_DIR/identity/identity.pub") \
+        --relay-topology $REMOTE_DIR/topology/relay-nodes.txt \
+        --dht-seed $RELAY1_IP:9100 \
+        --paths 3 --hops 3 \
+        2>&1" | tee "$RESULTS_LOG"
 
-# ─────────────────────────── Step 4: Verify ───────────────────────────
 echo ""
-echo "[Step 4/5] Verifying reassembly on Publisher..."
+echo "  ✅ Normal pipeline complete."
 
-RESULT=$(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
+# ─── Step 4: S1.9 — Mid-Transmission Node Failure Test ───────────────────────
+echo ""
+echo "[Step 4/6] S1.9 — Simulating Guard node failure DURING transmission..."
+
+# Reset Publisher for a fresh session
+ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" "pkill -f 'gbn-proto receive' || true"
+sleep 1
+ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
+    "nohup $REMOTE_DIR/gbn-proto receive \
+        --listen-ports 9000,9001,9002 \
+        --output-dir $REMOTE_DIR/reassembled-s19/ \
+        > /tmp/publisher-s19.log 2>&1 &"
+sleep 1
+
+# Start a *background* upload — we will interrupt it mid-flight
+ssh $SSH_OPTS "$SSH_USER@$CREATOR_IP" \
+    "$REMOTE_DIR/gbn-proto upload \
+        --input $REMOTE_DIR/test-vectors/*.mp4 \
+        --publisher-key $(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" "cat $REMOTE_DIR/identity/identity.pub") \
+        --relay-topology $REMOTE_DIR/topology/relay-nodes.txt \
+        --dht-seed $RELAY1_IP:9100 \
+        --paths 3 --hops 3 \
+        2>&1 &"
+
+# Wait for transfer to be partially in-flight
+echo "  Upload started. Waiting 15 seconds for partial transmission..."
+sleep 15
+
+# Kill Relay1 (the Guard for the first circuit) — simulates Spot instance preemption
+echo "  Terminating Relay 1 ($RELAY1_IP) mid-transmission (S1.9)..."
+ssh $SSH_OPTS "$SSH_USER@$RELAY1_IP" "pkill -f 'gbn-proto onion-relay' || true"
+
+# Wait for the Creator's heartbeat to detect the failure and rebuild circuit
+echo "  Waiting 20s for Circuit Manager heartbeat timeout and route rebuild..."
+sleep 20
+
+# Wait for upload to complete on the Creator
+echo "  Waiting for Creator to complete re-routed transmission..."
+wait 2>/dev/null || true
+sleep 10
+
+# ─── Step 5: Verify SHA-256 integrity ────────────────────────────────────────
+echo ""
+echo "[Step 5/6] Verifying SHA-256 integrity on Publisher..."
+
+VERIFY_RESULT=$(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
     "$REMOTE_DIR/gbn-proto verify \
         --reassembled $REMOTE_DIR/reassembled/*.mp4 \
         2>&1")
+echo "$VERIFY_RESULT"
 
-echo "$RESULT"
+S19_RESULT=$(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
+    "$REMOTE_DIR/gbn-proto verify \
+        --reassembled $REMOTE_DIR/reassembled-s19/*.mp4 \
+        2>&1" || echo "S1.9 REASSEMBLY INCOMPLETE — FAIL")
+echo "S1.9 result: $S19_RESULT"
 
-# ─────────────────────────── Step 5: Cleanup ───────────────────────────
+# ─── Step 6: Cleanup ─────────────────────────────────────────────────────────
 echo ""
-echo "[Step 5/5] Stopping all remote processes..."
+echo "[Step 6/6] Stopping all remote processes..."
 
-for IP in "$RELAY1_IP" "$RELAY2_IP" "$RELAY3_IP" "$RELAY4_IP" "$PUBLISHER_IP"; do
+ALL_IPS=("$RELAY1_IP" "$RELAY2_IP" "$RELAY3_IP" "$RELAY4_IP" "$PUBLISHER_IP")
+for IP in "${ALL_IPS[@]}"; do
     ssh $SSH_OPTS "$SSH_USER@$IP" "pkill -f gbn-proto || true" 2>/dev/null
 done
 
 echo ""
 echo "============================================"
-echo "  Phase 1 Test Suite Complete"
-echo "  Results saved to: /tmp/gbn-phase1-results.log"
+echo "  Phase 1 Test Suite Results"
+echo "  Full log: $RESULTS_LOG"
 echo "============================================"
 echo ""
-echo "NEXT STEP: If tests passed, run teardown.sh to destroy the stack and stop billing."
+echo "$VERIFY_RESULT" | grep -q "PASS" && echo "✅ Normal pipeline: PASS" || echo "❌ Normal pipeline: FAIL"
+echo "$S19_RESULT"    | grep -q "PASS" && echo "✅ S1.9 Node Recovery: PASS" || echo "❌ S1.9 Node Recovery: FAIL"
+echo ""
+echo "NEXT STEP: Run teardown.sh to destroy the CloudFormation stack and stop billing."

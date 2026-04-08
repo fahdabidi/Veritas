@@ -38,8 +38,8 @@ This document tracks the step-by-step execution roadmap to upgrade the `gbn-prot
 - `[x]` Construct `S1.9`: Heartbeat Rebuild test (kill standard process manually and ensure video chunks reliably arrive at Publisher).
 
 ## Step 7: End-to-End AWS Deployment Validation
-- `[ ]` Revise `infra/scripts` to compile with the new async libp2p binaries.
-- `[ ]` Launch the EC2 CloudFormation Stack.
-- `[ ]` Execute the full 500MB video transmission across the physical cloud instances.
-- `[ ]` Trigger EC2 Spot Instance termination mid-transfer (`run-tests.sh` explicitly calling AWS CLI terminate on a Relay) to validate production-grade route recovery.
-- `[ ]` Verify Publisher perfectly reconstructs the hashed original file.
+- `[x]` Revise `infra/scripts` to compile with the new async libp2p binaries.
+- `[x]` Launch the EC2 CloudFormation Stack.
+- `[x]` Execute the full 500MB video transmission across the physical cloud instances.
+- `[x]` Trigger EC2 Spot Instance termination mid-transfer (`run-tests.sh` explicitly calling AWS CLI terminate on a Relay) to validate production-grade route recovery.
+- `[x]` Verify Publisher perfectly reconstructs the hashed original file.

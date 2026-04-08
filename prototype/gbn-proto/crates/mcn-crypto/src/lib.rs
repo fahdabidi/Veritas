@@ -22,6 +22,8 @@
 //! - Per-chunk error isolation (one corrupted chunk doesn't invalidate the rest)
 //! - Streaming encryption on memory-constrained devices (no full-file buffering)
 
+pub mod noise;
+
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,

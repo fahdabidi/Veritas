@@ -19,9 +19,9 @@ This document tracks the step-by-step execution roadmap to upgrade the `gbn-prot
 - `[x]` Define a `ClientInitiator` workflow and a `RelayResponder` workflow to establish `Noise_XX` handshakes.
 
 ## Step 3: Swarm and DHT Foundation (Router Sim)
-- `[ ]` In `crates/mcn-router-sim/`, implement the libp2p `Swarm` logic.
-- `[ ]` Ensure the router can bootstrap off a designated seed IP and successfully publish its `RelayDescriptor` into the Kademlia DHT.
-- `[ ]` Allow the Creator client to passively sync DHT buckets to discover listening relays.
+- `[x]` In `crates/mcn-router-sim/`, implement the libp2p `Swarm` logic.
+- `[x]` Ensure the router can bootstrap off a designated seed IP and successfully publish its `RelayDescriptor` into the Kademlia DHT.
+- `[x]` Allow the Creator client to passively sync DHT buckets to discover listening relays.
 
 ## Step 4: The Onion Router Engine
 - `[ ]` In `crates/mcn-router-sim/`, replace the basic TCP reading loop with a state-machine that unwraps envelopes.

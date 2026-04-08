@@ -26,6 +26,10 @@ sha2 = "0.10"
 blake3 = "1"
 zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
+snow = "0.9"
+
+# Peer-to-Peer
+libp2p = { version = "0.52", features = ["tokio", "kad", "tcp", "noise", "yamux", "macros"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

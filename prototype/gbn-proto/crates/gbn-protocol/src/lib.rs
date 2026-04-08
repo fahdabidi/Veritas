@@ -14,6 +14,8 @@ pub mod chunk;
 pub mod crypto;
 pub mod manifest;
 pub mod error;
+pub mod dht;
+pub mod onion;
 
 /// Protocol version constant. Nodes exchange this during handshake
 /// and must agree on a compatible version to communicate.

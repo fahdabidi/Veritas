@@ -122,6 +122,8 @@ The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline
               +-------------------+
 ```
 
+> **The Root of Trust:** The user journey strictly begins prior to recording the video. The Creator must first establish cryptographic trust by scanning the Publisher's Public Key via a QR code (or by downloading a pre-seeded Sovereign Publisher App). This ensures the MCN encrypts data specifically for that Publisher and structurally prevents adversary traffic interception.
+
 ### What each participant can observe
 
 ```text

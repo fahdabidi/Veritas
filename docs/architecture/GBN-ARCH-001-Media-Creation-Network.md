@@ -76,28 +76,34 @@ The Media Creation Network (MCN) architecture is designed around a single guidin
 
 ### 3.1 Pre-Processing Pipeline
 
-```mermaid
-sequenceDiagram
-    participant UI as Creator UI
-    participant San as Sanitizer
-    participant Chunker as Chunker
-    participant Enc as Encryptor
-    participant KeyMgr as Key Manager
-
-    UI->>San: Raw video file path
-    San->>San: Strip EXIF/metadata (FFmpeg -map_metadata -1)
-    San->>San: Re-encode container headers (remove encoder strings)
-    San->>San: Normalize timestamp to epoch 0
-    San-->>UI: Preview sanitized video (optional)
-    UI->>KeyMgr: Request new session keys
-    KeyMgr->>KeyMgr: Generate ephemeral X25519 keypair
-    KeyMgr->>KeyMgr: ECDH with Publisher's public key
-    KeyMgr->>KeyMgr: Derive per-session AES key via HKDF-SHA256
-    KeyMgr-->>Enc: Session key (AES-256-GCM key + nonce base)
-    San->>Chunker: Sanitized video bytes (streaming)
-    Chunker->>Chunker: Split into 1MB chunks
-    Chunker->>Chunker: Compute BLAKE3(chunk_plaintext) per chunk
-    Chunker->>Enc: (chunk_index, plaintext_bytes, blake3_hash)
+```
+  Creator UI       Sanitizer          Chunker        Encryptor      Key Manager
+      │                │                  │               │               │
+      │──Raw video ───▶│                  │               │               │
+      │    file path    │                  │               │               │
+      │                 ├─ Strip EXIF/metadata (FFmpeg -map_metadata -1)   │
+      │                 ├─ Re-encode container headers (remove encoder)    │
+      │                 ├─ Normalize timestamp to epoch 0                  │
+      │                 │                  │               │               │
+      │◀ ─ ─ Preview ─ ┤ (optional)       │               │               │
+      │                 │                  │               │               │
+      │──Request new session keys─────────────────────────────────────────▶│
+      │                 │                  │               │    Gen X25519 │
+      │                 │                  │               │    ECDH w/Pub │
+      │                 │                  │               │    Derive AES │
+      │                 │                  │               │◀──Session key─┤
+      │                 │                  │               │  (AES-256-GCM │
+      │                 │                  │               │   + nonce base)
+      │                 │                  │               │               │
+      │                 │──Sanitized video─▶               │               │
+      │                 │    bytes (stream) │               │               │
+      │                 │                  ├─ Split into 1MB chunks        │
+      │                 │                  ├─ BLAKE3(chunk_plaintext)      │
+      │                 │                  │               │               │
+      │                 │                  │──(chunk_idx,─▶│               │
+      │                 │                  │   plaintext,   │               │
+      │                 │                  │   blake3_hash) │               │
+      │                 │                  │               │               │
 ```
 
 ### 3.2 Encryption & Packet Build
@@ -128,40 +134,39 @@ Onion Wrapping (per relay hop):
 
 ### 3.3 Circuit Construction & Upload
 
-```mermaid
-sequenceDiagram
-    participant CM as Circuit Manager
-    participant DHT as BON DHT
-    participant R1 as Guard Relay
-    participant R2 as Middle Relay
-    participant R3 as Exit Relay
-    participant Pub as Publisher
-
-    CM->>DHT: Query: available relay nodes (exclude guard pool)
-    DHT-->>CM: List of relay node addresses
-    CM->>CM: Select guard from trusted guard pool
-    CM->>CM: Select middle randomly by reputation
-    CM->>CM: Select exit node in free/diverse jurisdiction
-    CM->>R1: EXTEND circuit (Noise_XX handshake)
-    R1->>R2: EXTEND (relayed)
-    R2->>R3: EXTEND (relayed)
-    R3->>Pub: EXTEND to Publisher endpoint
-    CM-->>CM: Circuit established
-
-    Note over CM,Pub: Multipath Routing: Chunks are dispersed across multiple independent circuits
-    loop For each chunk (e.g., routed via Circuit A)
-        CM->>R1: Onion-encrypted chunk packet
-        R1->>R2: Peel outer layer, forward
-        R2->>R3: Peel middle, forward
-        R3->>Pub: Deliver plaintext chunk packet
-    end
-
-    CM->>R1: Manifest packet (separate circuit)
-    Note over Pub: Receives all chunks + manifest
-    Pub-->>R3: Signed ACK
-    R3-->>R2: ACK forwarded
-    R2-->>R1: ACK forwarded
-    R1-->>CM: ACK delivered
+```
+  Circuit Mgr    BON DHT     Guard (R1)   Middle (R2)   Exit (R3)    Publisher
+      │             │             │             │             │           │
+      │──Query ────▶│             │             │             │           │
+      │  avail relays│             │             │             │           │
+      │◀──relay list─┤             │             │             │           │
+      │              │             │             │             │           │
+      ├─ Select guard from trusted pool          │             │           │
+      ├─ Select middle by reputation             │             │           │
+      ├─ Select exit (diverse jurisdiction)      │             │           │
+      │              │             │             │             │           │
+      │──EXTEND (Noise_XX)───────▶│             │             │           │
+      │              │             │──EXTEND────▶│             │           │
+      │              │             │             │──EXTEND────▶│           │
+      │              │             │             │             │──EXTEND──▶│
+      │  Circuit established       │             │             │           │
+      │              │             │             │             │           │
+      │   ┌──── Multipath: chunks dispersed across independent circuits ──┐
+      │   │          │             │             │             │           │
+      │   │ ──onion chunk────────▶│             │             │           │
+      │   │          │             │──peel/fwd──▶│             │           │
+      │   │          │             │             │──peel/fwd──▶│           │
+      │   │          │             │             │             │──chunk───▶│
+      │   │          │             │             │             │           │
+      │   └──── (repeat for each chunk, across multiple circuits) ────────┘
+      │              │             │             │             │           │
+      │──Manifest packet (separate circuit)───────────────────────────────▶│
+      │              │             │             │             │           │
+      │              │             │             │             │◀─Signed──┤
+      │              │             │             │◀──ACK fwd───┤   ACK    │
+      │              │             │◀──ACK fwd───┤             │           │
+      │◀─────ACK delivered─────────┤             │             │           │
+      │              │             │             │             │           │
 ```
 
 ---

@@ -62,6 +62,11 @@ impl PublisherSecret {
         Self { seed }
     }
 
+    /// Extract the raw seed bytes (e.g., for saving to disk).
+    pub fn to_seed(&self) -> [u8; 32] {
+        self.seed
+    }
+
     /// Derive the X25519 static secret from the seed.
     fn x25519_secret(&self) -> StaticSecret {
         StaticSecret::from(self.seed)

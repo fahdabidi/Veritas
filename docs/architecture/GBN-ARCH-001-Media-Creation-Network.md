@@ -172,6 +172,13 @@ Onion Wrapping (per relay hop):
       │              │             │             │             │           │
 ```
 
+### 3.4 Telescopic Circuit Validation & Root of Trust
+
+The entire multi-hop MCN path relies heavily on Zero-Trust cryptographic validation:
+1. **The Root of Trust:** The Creator establishes the true destination by validating the Publisher DHT descriptor strictly against the Publisher's out-of-band standard Ed25519 Public Key.
+2. **Telescopic Handshakes:** MCN circuits are built sequentially (Guard -> Middle -> Exit). The `EXTEND` phase packages a `Noise_XX` handshake meant for the subsequent node *inside* the encryption envelope of the preceding node.
+3. **Anti-Sinkhole Guarantee:** Because intermediate nodes lack the private key of the downstream node, they are mathematically incapable of forging the handshake reply. The MCN client will instantly destroy circuits if a Guard attempts to blackhole traffic by faking downstream reachability.
+
 ---
 
 ## 4. Protocol Specification

@@ -277,10 +277,10 @@ No node has a complete view of the network. Each node only knows its immediate n
 
 ### 5.3 Node Discovery Mechanism
 
-1. **Bootstrap**: App ships with a small list of hardcoded bootstrap nodes (minimally centralized)
-2. **Gossip Round**: On startup, app requests peer lists from 3 bootstrap nodes
-3. **HyParView Protocol**: Active view (a few direct connections) + Passive view (larger backup list)
-4. **IP Renegotiation**: When a node's IP changes (mobile handoff), it broadcasts a signed update message to its active view peers, who propagate it further
+1. **Bootstrap**: App ships with a small list of hardcoded bootstrap nodes (minimally centralized).
+2. **The Kademlia DHT (Relay Directory)**: Volunteer relay nodes announce their availability by publishing `RelayDescriptors` (containing NodeID, IP, Transport mechanism) to the distributed hash table.
+3. **Passive Syncing**: Creators act strictly as read-only "ghosts." They never publish their IP to the DHT. Instead, they passively bulk-download DHT buckets in the background to build a local network map, preventing an adversary from isolating their activity via Query Correlation.
+4. **Pre-Flight Reachability Checks**: Relays must mathematically prove outbound global connectivity before announcing themselves to the DHT, automatically pruning nodes trapped behind domestic firewalls and naturally defeating "Blackhole" and sinkhole attempts.
 
 ---
 
@@ -445,6 +445,9 @@ Even if one layer is stripped or compromised, the remaining layers protect conte
 |---|---|---|
 | Traffic Correlation | Cover traffic + timing jitter | Multi-hop routing (min 3 hops) |
 | Sybil Attack on DHT | Proof-of-work node registration | Trust-weighted peer selection |
+| Telescopic Sinkholes | Layered Cryptographic Handshakes (Node must possess private key to reply) | Pre-flight reachability checks |
+| Publisher Identity Spoofing | DHT descriptors strictly validated via Ed25519 PubKey Signatures | Root of Trust established via out-of-band UX (QR Codes / visual hash) |
+| Social Engineering (Fake Apps/QR) | UI/UX Visual "Publisher Fingerprints" | Sovereign Software Supply Chain (M-of-N signing) |
 | Chunk Poisoning | BLAKE3 per-chunk integrity check | Multi-source chunk downloading |
 | Publisher Key Compromise | Key rotation with signed transition cert | Revocation via DHT announcement |
 | CSAM Distribution | PhotoDNA hash matching at storage nodes | Publisher screening process |

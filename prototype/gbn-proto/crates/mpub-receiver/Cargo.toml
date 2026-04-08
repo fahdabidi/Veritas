@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 gbn-protocol = { path = "../gbn-protocol" }
 mcn-crypto = { path = "../mcn-crypto" }
+mcn-chunker = { path = "../mcn-chunker" }
 tokio = { workspace = true }
 blake3 = { workspace = true }
 anyhow = { workspace = true }

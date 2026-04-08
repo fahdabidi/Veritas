@@ -654,6 +654,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "gbn-protocol",
+ "mcn-chunker",
  "mcn-crypto",
  "serde",
  "serde_json",

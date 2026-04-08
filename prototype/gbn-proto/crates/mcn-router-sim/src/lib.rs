@@ -8,6 +8,7 @@
 //!   round-robin to simulate multipath routing.
 
 pub mod swarm;
+pub mod relay_engine;
 
 use std::{
     net::SocketAddr,

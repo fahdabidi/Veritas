@@ -118,10 +118,11 @@ The MCN operates on the principle of **zero-knowledge transit**: relay nodes in 
 |---|---|---|
 | MCN-NFR-001 | A 500MB video SHALL complete upload within 30 minutes over a 1Mbps uplink under typical relay conditions | **Should** |
 | MCN-NFR-002 | Pre-processing (metadata strip + chunk + encrypt) SHALL complete within 60 seconds for a 500MB file | **Should** |
-| MCN-NFR-003 | The MCN Client SHALL function on Android 8.0+ and desktop environments (Linux, macOS, Windows) | **Must** |
+| MCN-NFR-003 | The MCN Client SHALL function natively on Android 8.0+ (via Kotlin/Rust FFI) and desktop environments (Linux, macOS, Windows) | **Must** |
 | MCN-NFR-004 | The MCN Client SHALL consume no more than 500MB RAM during upload of a 4GB file (streaming chunks, not loading all into memory) | **Must** |
 | MCN-NFR-005 | The MCN Client SHALL clearly communicate to the Creator when a Publisher is unreachable, rather than silently failing | **Must** |
 | MCN-NFR-006 | The MCN SHALL never write unencrypted video chunks to disk; chunking and encryption SHALL happen in-memory | **Must** |
+| MCN-NFR-007 | The MCN Client SHALL support decentralized distribution mechanisms (e.g., direct APK sideloading, F-Droid) to bypass centralized App Store censorship. Platforms that strictly prohibit sideloading or P2P app distribution (e.g., iOS) SHALL be out of scope for full MCN node deployment. | **Must** |
 
 ---
 

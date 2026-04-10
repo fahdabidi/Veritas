@@ -34,10 +34,17 @@ If a hostile ISP attempts to disable the MCN by blocking its servers, they will 
 
 Additionally, if an Exit Node inherits the geo-fencing of a hostile region (meaning the Exit Node itself cannot reach the Publisher), the MCN Circuit Manager automatically detects the destination-unreachable error, tears down the circuit, and dynamically constructs a new circuit through an Exit Node in a free jurisdiction.
 
-### 3.2 Resistance to Anonymity Circumvention
+### 3.2 Resistance to App Store Takedowns (Distribution Censorship)
+Authoritarian regimes frequently coerce centralized gatekeepers (Google/Apple) into removing dissenting applications from their regional stores. 
+
+The GBN defends against this by utilizing Android's open ecosystem. The application (a Kotlin UI wrapping the Rust core) is designed to be distributed entirely outside of corporate app stores. Users can sideload the APK, download it from independent repositories like F-Droid, or distribute it directly device-to-device via local Bluetooth sharing and compressed QR codes.
+
+iOS inherently fails this threat model. An Apple App Store takedown represents a global, unmitigated "Whiteout" of the app for users in that region (though regional mandates like the EU's Digital Markets Act and AltStore provide highly localized exceptions). Because of this centralized gatekeeping, iOS devices cannot serve as a reliable foundation for the censorship-resistant relay network.
+
+### 3.3 Resistance to Anonymity Circumvention
 An adversary attempting to deanonymize the Creator by running their own relay node will fail due to the onion routing. If the adversary controls the Middle node, they see only encrypted traffic from the Guard going to the Exit. Furthermore, the MCN injects randomized timing jitter (50–500ms) between chunk transmissions. This defends against an adversary trying to match packet volumes and timing at the Creator's ISP with packets arriving at the Publisher.
 
-### 3.3 Resistance to Temporal Rebuild Correlation
+### 3.4 Resistance to Temporal Rebuild Correlation
 If an adversary intentionally drops traffic at a node they control (or observes a node dropping offline), they might attempt to correlate the dropped circuit with a newly rebuilt circuit if both use the same Guard node simultaneously. The **Circuit Manager** prevents this by guaranteeing that any replacement circuit dialed to recover dropped chunks uses an entirely distinct path, strictly avoiding the re-use of the previous Guard node.
 
 ---

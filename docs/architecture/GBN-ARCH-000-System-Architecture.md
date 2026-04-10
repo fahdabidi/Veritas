@@ -347,7 +347,7 @@ Storage Chunk Key Lifecycle:
 | Component | Language | Rationale |
 |---|---|---|
 | **BON Router / MCN Client core** | Rust | Memory safety; no GC; excellent async I/O; used by Tor (Arti) |
-| **Mobile App (VPA)** | Kotlin (Android) / Swift (iOS) with Rust FFI core | Native performance; Rust core shared across platforms |
+| **Mobile App (VPA)** | Kotlin (Android) / Swift (iOS) with Rust FFI core | Native performance; Rust core shared across platforms. Core heavy-lifting (DHT, onion routing, AES) is compiled from Rust into a shared library. Android integrates this via JNI using a native Kotlin wrapper. |
 | **Publisher Node** | Rust / Go | Go for rapid development; Rust for crypto-critical paths |
 | **Content Provider API** | Node.js / Go | Standard web API; high ecosystem availability |
 | **Storage Node Daemon** | Rust / Go | Long-running daemon; low overhead critical |
@@ -400,10 +400,11 @@ Tier 4: APP NODES
 
 | Constraint | Impact | Mitigation |
 |---|---|---|
-| **iOS Background Execution Limits** | Cannot run persistent server | Use background fetch + push notification wakeups; limit server role on iOS |
+| **iOS Background Execution Limits** | Apple strictly limits persistent background TCP connections | iOS devices cannot act as reliable relay/DHT nodes without being killed by the OS. iOS is strictly viewer-only in Phase 1. |
 | **CGNAT on Cellular** | No incoming connections without TURN | Mandatory TURN relay registration on mobile startup |
 | **Battery Life** | Continuous keep-alives drain battery | Adaptive keep-alive intervals; WiFi-only mode for heavy operations |
-| **App Store Policies** | iOS App Store may reject P2P/relay features | Android (sideload + F-Droid) as primary; iOS as viewer-only initially |
+| **App Store Policies (iOS)** | Apple historically bans BitTorrent-style P2P distribution and relay apps | iOS must remain viewer-only to comply with App Store rules. |
+| **No Global iOS Sideloading** | Lack of global sideloading prevents censorship-resistant app distribution on iOS | Android (sideload + F-Droid + share-to-install) is the primary target. Alternative iOS distribution (e.g., AltStore in the EU) offers limited fallback, but cannot support global resistance. |
 
 ### 8.3 Network Diagram
 

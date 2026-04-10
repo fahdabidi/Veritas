@@ -267,6 +267,17 @@ Creator Device (Android / Desktop)
 
 **Key constraint**: All pre-processing happens on-device. No component of the MCN pipelines runs in the cloud. The creation of a network connection happens only after the video is fully sanitized and chunked.
 
+### 6.1 Android Deployment (Kotlin Wrapper)
+The primary mobile deployment target is Android. It uses a Kotlin-based application shell that interfaces with the Rust Core Library via Foreign Function Interface (FFI/JNI). The Kotlin layer manages the native UI, camera access, file selection, and OS-level permissions, while the Rust core handles all metadata stripping, chunking, cryptography, and multi-hop circuit management.
+
+### 6.2 iOS Exclusion (Phase 1)
+Due to severe OS and policy constraints, iOS devices cannot securely host the full MCN pipeline and act as active network participants in Phase 1:
+* **Background Execution Limits:** Apple strictly limits persistent background TCP connections, making it impossible for an iPhone to act as a reliable relay/DHT node without being terminated by the OS.
+* **App Store Policies:** Apple's App Store Review Guidelines historically ban BitTorrent-style P2P distribution and relay apps.
+* **No Global Sideloading:** The inability to easily sideload apps outside the EU (where AltStore provides a limited exception) makes iOS highly vulnerable to state-ordered App Store takedowns. 
+
+Therefore, iOS will initially be targeted as a "viewer-only" platform using Swift FFI bindings for decryption and playback, but will not participate in the MCN or relay network.
+
 ---
 
 ## 7. Security Architecture

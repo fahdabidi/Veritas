@@ -297,8 +297,8 @@ services:
 ---
 
 ## Step 6: Containerization & CI/CD
-- `[ ]` Write `Dockerfile.relay` and `Dockerfile.publisher` using multi-stage builds.
-- `[ ]` Write a `build-and-push.sh` CI/CD script that builds images, tags them with the git SHA, and pushes to Amazon ECR.
+- `[x]` Write `Dockerfile.relay` and `Dockerfile.publisher` using multi-stage builds.
+- `[x]` Write a `build-and-push.sh` CI/CD script that builds images, tags them with the git SHA, and pushes to Amazon ECR.
 
 ### Implementation Context
 

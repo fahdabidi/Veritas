@@ -451,9 +451,12 @@ pub async fn build_circuits_speculative(
     // Explicitly cancel unfinished speculative dials once target is reached (or no more useful work remains).
     joins.abort_all();
 
+    if winners.is_empty() {
+        anyhow::bail!("Speculative dialing produced zero successful circuits");
+    }
     if winners.len() < target_count {
-        anyhow::bail!(
-            "Insufficient speculative circuit successes: got {}, need {}",
+        tracing::warn!(
+            "Speculative dialing: got {}/{} circuits (partial success)",
             winners.len(),
             target_count
         );

@@ -31,6 +31,7 @@ pub struct GossipRuntime {
     pub metrics: Option<MetricsReporter>,
     pub last_gossip_bytes_published: u64,
     pub last_gossip_publish: Instant,
+    pub last_gossip_expiry: Instant,
 }
 
 pub fn gossip_config_from_env() -> (usize, usize) {
@@ -62,6 +63,7 @@ impl GossipRuntime {
             metrics,
             last_gossip_bytes_published: 0,
             last_gossip_publish: Instant::now(),
+            last_gossip_expiry: Instant::now(),
         }
     }
 }
@@ -95,8 +97,13 @@ pub async fn build_swarm(local_key: identity::Keypair) -> Result<Swarm<RouterBeh
 
     let added = bootstrap_from_cloudmap(&mut swarm).await?;
     tokio::spawn(async move {
-        if let Ok(reporter) = MetricsReporter::from_env().await {
-            let _ = reporter.publish_bootstrap_result(added > 0).await;
+        match MetricsReporter::from_env().await {
+            Ok(reporter) => {
+                if let Err(e) = reporter.publish_bootstrap_result(added > 0).await {
+                    tracing::warn!("CloudWatch publish BootstrapResult failed: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("CloudWatch MetricsReporter init failed: {e}"),
         }
     });
     let _ = register_with_cloudmap(&swarm).await;
@@ -182,6 +189,12 @@ pub async fn drive_swarm_once(
         }
         runtime.last_gossip_bytes_published = total;
         runtime.last_gossip_publish = Instant::now();
+    }
+
+    // Periodically expire stale IWant requests to prevent unbounded growth.
+    if runtime.last_gossip_expiry.elapsed() >= Duration::from_secs(60) {
+        runtime.engine.state.expire_missing_older_than(Duration::from_secs(300));
+        runtime.last_gossip_expiry = Instant::now();
     }
 
     Ok(())

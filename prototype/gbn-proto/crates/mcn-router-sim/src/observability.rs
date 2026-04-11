@@ -82,16 +82,24 @@ impl MetricsReporter {
 }
 
 pub async fn publish_bootstrap_result_from_env(active: bool) {
-    if let Ok(reporter) = MetricsReporter::from_env().await {
-        let _ = reporter.publish_bootstrap_result(active).await;
+    match MetricsReporter::from_env().await {
+        Ok(reporter) => {
+            if let Err(e) = reporter.publish_bootstrap_result(active).await {
+                tracing::warn!("CloudWatch publish BootstrapResult failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("CloudWatch MetricsReporter init failed: {e}"),
     }
 }
 
 pub async fn publish_circuit_build_result_from_env(success: bool, latency_ms: u128) {
-    if let Ok(reporter) = MetricsReporter::from_env().await {
-        let _ = reporter
-            .publish_circuit_build_result(success, latency_ms)
-            .await;
+    match MetricsReporter::from_env().await {
+        Ok(reporter) => {
+            if let Err(e) = reporter.publish_circuit_build_result(success, latency_ms).await {
+                tracing::warn!("CloudWatch publish CircuitBuildResult failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("CloudWatch MetricsReporter init failed: {e}"),
     }
 }
 

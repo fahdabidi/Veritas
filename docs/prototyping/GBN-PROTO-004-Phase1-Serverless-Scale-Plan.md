@@ -340,10 +340,10 @@ docker push "${ECR_URI}/gbn-relay:latest"
 ---
 
 ## Step 7: Infrastructure as Code
-- `[ ]` Define VPC, partitioned subnets (`Hostile` vs `Free`), and strict Security Groups in CloudFormation.
-- `[ ]` Define ECS Fargate Cluster and Task Definitions parameterized for scale.
-- `[ ]` Define CloudWatch Dashboards for Protocol Metrics (Goodput, Blackholes) and **Test Harness Health** (ECS API success, Lambda errors).
-- `[ ]` **Cost Guardrails:** Add a CloudFormation stack policy with a $50 billing alarm and a maximum test duration parameter (e.g., 2 hours).
+- `[x]` Define VPC, partitioned subnets (`Hostile` vs `Free`), and strict Security Groups in CloudFormation.
+- `[x]` Define ECS Fargate Cluster and Task Definitions parameterized for scale.
+- `[x]` Define CloudWatch Dashboards for Protocol Metrics (Goodput, Blackholes) and **Test Harness Health** (ECS API success, Lambda errors).
+- `[x]` **Cost Guardrails:** Add a CloudFormation stack policy with a $50 billing alarm and a maximum test duration parameter (e.g., 2 hours).
 
 ### Implementation Context
 

@@ -1,0 +1,609 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GBN Phase 1 Serverless Scale Test stack.
+  Provisions VPC subnet partitioning (Hostile/Free), ECS Fargate services,
+  Cloud Map discovery, CloudWatch dashboards, and cost guardrails.
+
+Parameters:
+  ScaleTarget:
+    Type: Number
+    Default: 100
+    AllowedValues: [100, 500, 1000]
+    Description: Total relay target for the scale test.
+
+  ContainerImageRelay:
+    Type: String
+    Default: ''
+    Description: Optional full relay image URI (e.g. <acct>.dkr.ecr.<region>.amazonaws.com/gbn-phase1/gbn-relay:latest).
+
+  ContainerImagePublisher:
+    Type: String
+    Default: ''
+    Description: Optional full publisher image URI.
+
+  MaxTestDurationHours:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 12
+    Description: Maximum intended lifetime of this test stack (hours). Used for TTL tagging/guardrails.
+
+  BudgetAlarmUsd:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    Description: EstimatedCharges threshold in USD for billing alarm.
+
+Mappings:
+  ScaleConfig:
+    '100':
+      HostileDesired: '90'
+      FreeDesired: '10'
+    '500':
+      HostileDesired: '450'
+      FreeDesired: '50'
+    '1000':
+      HostileDesired: '900'
+      FreeDesired: '100'
+
+Conditions:
+  HasRelayImageOverride: !Not [!Equals [!Ref ContainerImageRelay, '']]
+  HasPublisherImageOverride: !Not [!Equals [!Ref ContainerImagePublisher, '']]
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+        - Key: TTLHours
+          Value: !Ref MaxTestDurationHours
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt'
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  HostileSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/23
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-hostile-subnet'
+        - Key: SubnetClass
+          Value: HostileSubnet
+
+  FreeSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-free-subnet'
+        - Key: SubnetClass
+          Value: FreeSubnet
+
+  HostileSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref HostileSubnet
+
+  FreeSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref FreeSubnet
+
+  RelaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Relay/Creator east-west traffic within test VPC
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9100
+          CidrIp: 10.0.0.0/16
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-relay-sg'
+
+  PublisherSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Publisher ingress restricted to FreeSubnet only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9100
+          CidrIp: 10.0.3.0/24
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-publisher-sg'
+
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${AWS::StackName}/gbn-phase1'
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 50 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 50
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  CloudMapNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: gbn.local
+      Vpc: !Ref VPC
+      Description: Private DNS namespace for GBN scale-test relays
+
+  RelayDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: relay
+      NamespaceId: !Ref CloudMapNamespace
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - Type: A
+            TTL: 30
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: TTLHours
+          Value: !Ref MaxTestDurationHours
+
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${AWS::StackName}/gbn'
+      RetentionInDays: 14
+
+  EcsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GbnScaleTaskPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - servicediscovery:DiscoverInstances
+                  - servicediscovery:GetNamespace
+                  - servicediscovery:GetService
+                Resource: '*'
+
+  CreatorTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-creator'
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt EcsExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: creator
+          Image: !If
+            - HasRelayImageOverride
+            - !Ref ContainerImageRelay
+            - !Sub '${EcrRepository.RepositoryUri}/gbn-relay:latest'
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: creator
+          Environment:
+            - Name: GBN_ROLE
+              Value: creator
+            - Name: GBN_SUBNET_TAG
+              Value: HostileSubnet
+            - Name: GBN_DISCOVERY_MODE
+              Value: cloudmap
+            - Name: GBN_CLOUDMAP_NAMESPACE
+              Value: gbn.local
+            - Name: GBN_CLOUDMAP_SERVICE
+              Value: relay
+
+  PublisherTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-publisher'
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt EcsExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: publisher
+          Image: !If
+            - HasPublisherImageOverride
+            - !Ref ContainerImagePublisher
+            - !Sub '${EcrRepository.RepositoryUri}/gbn-publisher:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 9000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: publisher
+          Environment:
+            - Name: GBN_ROLE
+              Value: publisher
+            - Name: GBN_SUBNET_TAG
+              Value: FreeSubnet
+
+  RelayTaskDefinitionHostile:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-relay-hostile'
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt EcsExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: relay
+          Image: !If
+            - HasRelayImageOverride
+            - !Ref ContainerImageRelay
+            - !Sub '${EcrRepository.RepositoryUri}/gbn-relay:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 9000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: relay-hostile
+          Environment:
+            - Name: GBN_ROLE
+              Value: relay
+            - Name: GBN_SUBNET_TAG
+              Value: HostileSubnet
+            - Name: GBN_DISCOVERY_MODE
+              Value: cloudmap
+            - Name: GBN_CLOUDMAP_NAMESPACE
+              Value: gbn.local
+            - Name: GBN_CLOUDMAP_SERVICE
+              Value: relay
+
+  RelayTaskDefinitionFree:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-relay-free'
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt EcsExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: relay
+          Image: !If
+            - HasRelayImageOverride
+            - !Ref ContainerImageRelay
+            - !Sub '${EcrRepository.RepositoryUri}/gbn-relay:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 9000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: relay-free
+          Environment:
+            - Name: GBN_ROLE
+              Value: relay
+            - Name: GBN_SUBNET_TAG
+              Value: FreeSubnet
+            - Name: GBN_DISCOVERY_MODE
+              Value: cloudmap
+            - Name: GBN_CLOUDMAP_NAMESPACE
+              Value: gbn.local
+            - Name: GBN_CLOUDMAP_SERVICE
+              Value: relay
+
+  HostileRelayService:
+    Type: AWS::ECS::Service
+    DependsOn: RelayDiscoveryService
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      TaskDefinition: !Ref RelayTaskDefinitionHostile
+      DesiredCount: !FindInMap [ScaleConfig, !Ref ScaleTarget, HostileDesired]
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref HostileSubnet]
+          SecurityGroups: [!Ref RelaySecurityGroup]
+      ServiceRegistries:
+        - RegistryArn: !GetAtt RelayDiscoveryService.Arn
+
+  FreeRelayService:
+    Type: AWS::ECS::Service
+    DependsOn: RelayDiscoveryService
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      TaskDefinition: !Ref RelayTaskDefinitionFree
+      DesiredCount: !FindInMap [ScaleConfig, !Ref ScaleTarget, FreeDesired]
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref FreeSubnet]
+          SecurityGroups: [!Ref RelaySecurityGroup]
+      ServiceRegistries:
+        - RegistryArn: !GetAtt RelayDiscoveryService.Arn
+
+  CreatorService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      TaskDefinition: !Ref CreatorTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref HostileSubnet]
+          SecurityGroups: [!Ref RelaySecurityGroup]
+
+  PublisherService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      TaskDefinition: !Ref PublisherTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref FreeSubnet]
+          SecurityGroups: [!Ref PublisherSecurityGroup]
+
+  BillingAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub '${AWS::StackName} Billing Alerts'
+
+  BillingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-estimated-charges'
+      AlarmDescription: !Sub 'Estimated charges exceeded $${BudgetAlarmUsd} for scale test stack.'
+      Namespace: AWS/Billing
+      MetricName: EstimatedCharges
+      Dimensions:
+        - Name: Currency
+          Value: USD
+      Statistic: Maximum
+      Period: 21600
+      EvaluationPeriods: 1
+      Threshold: !Ref BudgetAlarmUsd
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BillingAlarmTopic
+
+  ProtocolMetricsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-protocol-metrics'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "BootstrapResult (Blackhole/Active)",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "metrics": [["GBN/ScaleTest","BootstrapResult"]]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "GossipBandwidthBytes",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "metrics": [["GBN/ScaleTest","GossipBandwidthBytes"]]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "CircuitBuildResult",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "metrics": [["GBN/ScaleTest","CircuitBuildResult"]]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "ChunksDelivered",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "metrics": [["GBN/ScaleTest","ChunksDelivered"]]
+              }
+            }
+          ]
+        }
+
+  HarnessHealthDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-harness-health'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "ECS Running Tasks",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "metrics": [["AWS/ECS","RunningTaskCount","ClusterName","${ECSCluster}"]]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "ECS Pending Tasks",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "metrics": [["AWS/ECS","PendingTaskCount","ClusterName","${ECSCluster}"]]
+              }
+            }
+          ]
+        }
+
+Outputs:
+  VpcId:
+    Description: VPC for phase1 scale test
+    Value: !Ref VPC
+
+  HostileSubnetId:
+    Description: Hostile subnet ID
+    Value: !Ref HostileSubnet
+
+  FreeSubnetId:
+    Description: Free subnet ID
+    Value: !Ref FreeSubnet
+
+  ECSClusterName:
+    Description: ECS cluster name
+    Value: !Ref ECSCluster
+
+  ECRUri:
+    Description: ECR repository base URI (used by build-and-push.sh)
+    Value: !GetAtt EcrRepository.RepositoryUri
+
+  RelayDiscoveryServiceId:
+    Description: Cloud Map relay service ID
+    Value: !Ref RelayDiscoveryService
+
+  BillingAlarmName:
+    Description: Billing alarm name
+    Value: !Ref BillingAlarm
+
+  CostGuardrailNote:
+    Description: Reminder for stack policy/TTL enforcement
+    Value: !Sub 'Apply a stack policy on create/update and tear down within ${MaxTestDurationHours}h.'

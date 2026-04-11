@@ -433,10 +433,10 @@ Alternatively, use an AWS Step Functions Express Workflow with a 30-second `Wait
 ---
 
 ## Step 9: Orchestration Scripts
-- `[ ]` Write `deploy-scale-test.sh`: Deploy stack, boot initial 33% SeedFleet.
-- `[ ]` Add **Stabilization Gate 1**: Poll CloudWatch metrics until >90% of SeedFleet reports `ACTIVE` before scaling to 100%.
-- `[ ]` Write `run-chaos-upload.sh`: Add **Stabilization Gate 2** before enabling the Chaos Engine EventBridge rule. Shell into Creator container and trigger upload.
-- `[ ]` Write `teardown-scale-test.sh`: Disable Chaos Engine, dump metrics, delete stack.
+- `[x]` Write `deploy-scale-test.sh`: Deploy stack, boot initial 33% SeedFleet.
+- `[x]` Add **Stabilization Gate 1**: Poll CloudWatch metrics until >90% of SeedFleet reports `ACTIVE` before scaling to 100%.
+- `[x]` Write `run-chaos-upload.sh`: Add **Stabilization Gate 2** before enabling the Chaos Engine EventBridge rule. Shell into Creator container and trigger upload.
+- `[x]` Write `teardown-scale-test.sh`: Disable Chaos Engine, dump metrics, delete stack.
 
 ### Implementation Context
 

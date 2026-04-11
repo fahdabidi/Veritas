@@ -34,6 +34,16 @@ Parameters:
     MinValue: 1
     Description: EstimatedCharges threshold in USD for billing alarm.
 
+  ChaosLambdaS3Bucket:
+    Type: String
+    Default: ''
+    Description: Optional S3 bucket containing chaos-controller.zip.
+
+  ChaosLambdaS3Key:
+    Type: String
+    Default: ''
+    Description: Optional S3 key for chaos-controller.zip.
+
 Mappings:
   ScaleConfig:
     '100':
@@ -49,6 +59,9 @@ Mappings:
 Conditions:
   HasRelayImageOverride: !Not [!Equals [!Ref ContainerImageRelay, '']]
   HasPublisherImageOverride: !Not [!Equals [!Ref ContainerImagePublisher, '']]
+  HasChaosLambdaS3: !And
+    - !Not [!Equals [!Ref ChaosLambdaS3Bucket, '']]
+    - !Not [!Equals [!Ref ChaosLambdaS3Key, '']]
 
 Resources:
   VPC:
@@ -265,6 +278,139 @@ Resources:
                   - servicediscovery:GetNamespace
                   - servicediscovery:GetService
                 Resource: '*'
+
+  ChaosLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ChaosEngineEcsControl
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:ListTasks
+                  - ecs:DescribeTasks
+                  - ecs:StopTask
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-chaos-controller'
+
+  ChaosControllerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-chaos-controller'
+      Runtime: python3.12
+      Handler: chaos-controller.handler
+      Role: !GetAtt ChaosLambdaRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Code: !If
+        - HasChaosLambdaS3
+        - S3Bucket: !Ref ChaosLambdaS3Bucket
+          S3Key: !Ref ChaosLambdaS3Key
+        - ZipFile: |
+            import json
+            import os
+            import random
+            import time
+            import boto3
+
+            ecs = boto3.client("ecs")
+            lambda_client = boto3.client("lambda")
+
+            def _env_float(name, default):
+                try:
+                    return float(os.environ.get(name, str(default)))
+                except (TypeError, ValueError):
+                    return default
+
+            def _targets_for_service(cluster_name, service_name, churn_rate):
+                task_arns = ecs.list_tasks(cluster=cluster_name, serviceName=service_name).get("taskArns", [])
+                if not task_arns:
+                    return []
+                churn_rate = max(0.0, min(1.0, churn_rate))
+                kill_count = int(len(task_arns) * churn_rate)
+                if kill_count <= 0:
+                    return []
+                return random.sample(task_arns, k=min(kill_count, len(task_arns)))
+
+            def _apply_churn(cluster_name, hostile_service, free_service, hostile_rate, free_rate):
+                stopped = {"hostile": [], "free": []}
+                for arn in _targets_for_service(cluster_name, hostile_service, hostile_rate):
+                    ecs.stop_task(cluster=cluster_name, task=arn, reason="ChaosEngine-Hostile")
+                    stopped["hostile"].append(arn)
+                for arn in _targets_for_service(cluster_name, free_service, free_rate):
+                    ecs.stop_task(cluster=cluster_name, task=arn, reason="ChaosEngine-Free")
+                    stopped["free"].append(arn)
+                return stopped
+
+            def handler(event, context):
+                event = event or {}
+                cluster_name = os.environ["CLUSTER_NAME"]
+                hostile_service = os.environ.get("HOSTILE_SERVICE_NAME", "HostileRelayService")
+                free_service = os.environ.get("FREE_SERVICE_NAME", "FreeRelayService")
+                hostile_rate = _env_float("HOSTILE_CHURN_RATE", 0.4)
+                free_rate = _env_float("FREE_CHURN_RATE", 0.2)
+                delay_seconds = int(os.environ.get("DELAY_SECONDS", "30"))
+                is_delayed = bool(event.get("delayed", False))
+
+                if is_delayed:
+                    time.sleep(max(0, delay_seconds))
+
+                stopped = _apply_churn(cluster_name, hostile_service, free_service, hostile_rate, free_rate)
+
+                if not is_delayed:
+                    lambda_client.invoke(
+                        FunctionName=context.invoked_function_arn,
+                        InvocationType="Event",
+                        Payload=json.dumps({"delayed": True}).encode("utf-8"),
+                    )
+
+                return {
+                    "ok": True,
+                    "mode": "delayed" if is_delayed else "scheduled",
+                    "hostile_stopped": len(stopped["hostile"]),
+                    "free_stopped": len(stopped["free"]),
+                }
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Ref ECSCluster
+          HOSTILE_SERVICE_NAME: !GetAtt HostileRelayService.Name
+          FREE_SERVICE_NAME: !GetAtt FreeRelayService.Name
+          HOSTILE_CHURN_RATE: '0.4'
+          FREE_CHURN_RATE: '0.2'
+          DELAY_SECONDS: '30'
+
+  ChaosEngineRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-chaos-engine'
+      Description: GBN chaos-engine scheduler (disabled by default)
+      ScheduleExpression: rate(1 minute)
+      State: DISABLED
+      Targets:
+        - Arn: !GetAtt ChaosControllerLambda.Arn
+          Id: ChaosControllerLambdaTarget
+
+  ChaosEngineRuleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ChaosControllerLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ChaosEngineRule.Arn
 
   CreatorTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -603,6 +749,14 @@ Outputs:
   BillingAlarmName:
     Description: Billing alarm name
     Value: !Ref BillingAlarm
+
+  ChaosLambdaName:
+    Description: Chaos controller lambda function name
+    Value: !Ref ChaosControllerLambda
+
+  ChaosEngineRuleName:
+    Description: EventBridge rule name for chaos engine (disabled by default)
+    Value: !Ref ChaosEngineRule
 
   CostGuardrailNote:
     Description: Reminder for stack policy/TTL enforcement

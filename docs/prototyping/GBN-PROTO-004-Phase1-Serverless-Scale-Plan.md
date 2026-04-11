@@ -393,9 +393,9 @@ Also add a `TTL` tag to the stack resource (`Value: !Sub "${AWS::StackName}-expi
 ---
 
 ## Step 8: The Chaos Engine
-- `[ ]` Write the Chaos Engine Lambda function (Python/Boto3).
-- `[ ]` Implement **Subnet-Aware Churn**: Target different ECS task tags to apply independent churn rates (e.g., 40% Hostile, 20% Free).
-- `[ ]` Deregister killed tasks from Cloud Map. Trigger via EventBridge every 30 seconds.
+- `[x]` Write the Chaos Engine Lambda function (Python/Boto3).
+- `[x]` Implement **Subnet-Aware Churn**: Target different ECS task tags to apply independent churn rates (e.g., 40% Hostile, 20% Free).
+- `[x]` Deregister killed tasks from Cloud Map. Trigger via EventBridge every 30 seconds.
 
 ### Implementation Context
 

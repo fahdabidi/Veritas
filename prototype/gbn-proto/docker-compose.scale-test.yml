@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  creator:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    environment:
+      GBN_ROLE: creator
+      GBN_SUBNET_TAG: HostileSubnet
+      GBN_DISCOVERY_MODE: docker-dns
+      GBN_P2P_PORT: 4001
+      GBN_GOSSIP_BPS: "1572864" # 15 Mbps in bits per second
+      GBN_MAX_TRACKED_PEERS: "1000"
+      RUST_LOG: "info,mcn_router_sim=debug"
+    networks:
+      - gbn-scale-net
+    deploy:
+      replicas: 1
+
+  publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile.publisher
+    environment:
+      GBN_ROLE: publisher
+      GBN_SUBNET_TAG: FreeSubnet
+      GBN_DISCOVERY_MODE: docker-dns
+      GBN_P2P_PORT: 4001
+      GBN_GOSSIP_BPS: "1572864"
+      GBN_MAX_TRACKED_PEERS: "1000"
+      RUST_LOG: "info,mcn_router_sim=debug"
+    networks:
+      - gbn-scale-net
+    deploy:
+      replicas: 1
+
+  relay-hostile:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    environment:
+      GBN_ROLE: relay
+      GBN_SUBNET_TAG: HostileSubnet
+      GBN_DISCOVERY_MODE: docker-dns
+      GBN_P2P_PORT: 4001
+      GBN_GOSSIP_BPS: "1572864"
+      GBN_MAX_TRACKED_PEERS: "1000"
+      RUST_LOG: "info,mcn_router_sim=debug"
+    networks:
+      - gbn-scale-net
+    deploy:
+      replicas: 18
+
+  relay-free:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    environment:
+      GBN_ROLE: relay
+      GBN_SUBNET_TAG: FreeSubnet
+      GBN_DISCOVERY_MODE: docker-dns
+      GBN_P2P_PORT: 4001
+      GBN_GOSSIP_BPS: "1572864"
+      GBN_MAX_TRACKED_PEERS: "1000"
+      RUST_LOG: "info,mcn_router_sim=debug"
+    networks:
+      - gbn-scale-net
+    deploy:
+      replicas: 2
+
+networks:
+  gbn-scale-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16

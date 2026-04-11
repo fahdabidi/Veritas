@@ -35,7 +35,9 @@ use tokio::{
     sync::{mpsc, Mutex},
     time::timeout,
 };
+use tokio::time::Instant;
 
+use crate::observability::publish_circuit_build_result_from_env;
 use crate::relay_engine::{recv_cell, send_cell};
 
 // ─────────────────────────── Types ─────────────────────────────────────────
@@ -92,104 +94,112 @@ pub async fn build_circuit(
     middle: &RelayNode,
     exit: &RelayNode,
 ) -> Result<OnionCircuit> {
-    // ── Step 1: Connect and handshake with Guard ───────────────────────────
-    tracing::info!("Building circuit: connecting to Guard {}", guard.addr);
-    let mut guard_stream = timeout(Duration::from_secs(10), TcpStream::connect(guard.addr))
-        .await
-        .context("Timeout connecting to Guard")?
-        .context("Failed to connect to Guard")?;
-
-    let guard_hs = build_initiator(creator_priv_key, &guard.identity_pub)
-        .context("Failed to build initiator HS for Guard")?;
-    let guard_transport = complete_handshake(&mut guard_stream, guard_hs, true)
-        .await
-        .context("Noise_XX handshake with Guard failed")?;
-    tracing::debug!("Guard handshake complete");
-
-    // ── Step 2: Extend to Middle through Guard ────────────────────────────
-    tracing::info!("Extending circuit to Middle {}", middle.addr);
-    let middle_hs = build_initiator(creator_priv_key, &middle.identity_pub)
-        .context("Failed to build initiator HS for Middle")?;
-
-    // Capture the first handshake message to embed in RelayExtend
-    let mut hs_buf = vec![0u8; 65535];
-    let mut middle_hs = middle_hs; // rebind as mut
-    let hs_len = middle_hs.write_message(&[], &mut hs_buf)?;
-    let initial_hs_payload = hs_buf[..hs_len].to_vec();
-
-    send_cell(
-        &mut guard_stream,
-        &OnionCell::RelayExtend(ExtendPayload {
-            next_hop: middle.addr,
-            next_identity_key: middle.identity_pub,
-            handshake_payload: initial_hs_payload,
-        }),
-    )
-    .await
-    .context("Failed to send RelayExtend(Middle) to Guard")?;
-
-    let response = timeout(Duration::from_secs(10), recv_cell(&mut guard_stream))
-        .await
-        .context("Timeout waiting for RelayExtended(Middle)")?
-        .context("Failed to read RelayExtended(Middle)")?;
-
-    let ExtendedPayload {
-        handshake_response: middle_hs_response,
-    } = match response {
-        OnionCell::RelayExtended(p) => p,
-        other => anyhow::bail!("Expected RelayExtended for Middle, got {:?}", other),
-    };
-    tracing::debug!("Middle extension confirmed; remote static: {} bytes", middle_hs_response.len());
-
-    // Complete the Middle handshake state (remaining turns after initial message)
-    let middle_transport =
-        complete_handshake(&mut guard_stream, middle_hs, false)
+    let started = Instant::now();
+    let result: Result<OnionCircuit> = async {
+        // ── Step 1: Connect and handshake with Guard ───────────────────────────
+        tracing::info!("Building circuit: connecting to Guard {}", guard.addr);
+        let mut guard_stream = timeout(Duration::from_secs(10), TcpStream::connect(guard.addr))
             .await
-            .context("Noise_XX handshake continuation for Middle failed")?;
+            .context("Timeout connecting to Guard")?
+            .context("Failed to connect to Guard")?;
 
-    // ── Step 3: Extend to Exit through Guard→Middle ───────────────────────
-    tracing::info!("Extending circuit to Exit {}", exit.addr);
-    let exit_hs = build_initiator(creator_priv_key, &exit.identity_pub)
-        .context("Failed to build initiator HS for Exit")?;
-    let mut exit_hs = exit_hs;
-    let hs_len = exit_hs.write_message(&[], &mut hs_buf)?;
-    let initial_exit_payload = hs_buf[..hs_len].to_vec();
+        let guard_hs = build_initiator(creator_priv_key, &guard.identity_pub)
+            .context("Failed to build initiator HS for Guard")?;
+        let guard_transport = complete_handshake(&mut guard_stream, guard_hs, true)
+            .await
+            .context("Noise_XX handshake with Guard failed")?;
+        tracing::debug!("Guard handshake complete");
 
-    send_cell(
-        &mut guard_stream,
-        &OnionCell::RelayExtend(ExtendPayload {
-            next_hop: exit.addr,
-            next_identity_key: exit.identity_pub,
-            handshake_payload: initial_exit_payload,
-        }),
-    )
-    .await
-    .context("Failed to send RelayExtend(Exit) through Guard")?;
+        // ── Step 2: Extend to Middle through Guard ────────────────────────────
+        tracing::info!("Extending circuit to Middle {}", middle.addr);
+        let middle_hs = build_initiator(creator_priv_key, &middle.identity_pub)
+            .context("Failed to build initiator HS for Middle")?;
 
-    let response = timeout(Duration::from_secs(10), recv_cell(&mut guard_stream))
+        // Capture the first handshake message to embed in RelayExtend
+        let mut hs_buf = vec![0u8; 65535];
+        let mut middle_hs = middle_hs; // rebind as mut
+        let hs_len = middle_hs.write_message(&[], &mut hs_buf)?;
+        let initial_hs_payload = hs_buf[..hs_len].to_vec();
+
+        send_cell(
+            &mut guard_stream,
+            &OnionCell::RelayExtend(ExtendPayload {
+                next_hop: middle.addr,
+                next_identity_key: middle.identity_pub,
+                handshake_payload: initial_hs_payload,
+            }),
+        )
         .await
-        .context("Timeout waiting for RelayExtended(Exit)")?
-        .context("Failed to read RelayExtended(Exit)")?;
+        .context("Failed to send RelayExtend(Middle) to Guard")?;
 
-    match response {
-        OnionCell::RelayExtended(_) => {}
-        other => anyhow::bail!("Expected RelayExtended for Exit, got {:?}", other),
-    };
+        let response = timeout(Duration::from_secs(10), recv_cell(&mut guard_stream))
+            .await
+            .context("Timeout waiting for RelayExtended(Middle)")?
+            .context("Failed to read RelayExtended(Middle)")?;
 
-    let exit_transport = complete_handshake(&mut guard_stream, exit_hs, false)
+        let ExtendedPayload {
+            handshake_response: middle_hs_response,
+        } = match response {
+            OnionCell::RelayExtended(p) => p,
+            other => anyhow::bail!("Expected RelayExtended for Middle, got {:?}", other),
+        };
+        tracing::debug!("Middle extension confirmed; remote static: {} bytes", middle_hs_response.len());
+
+        // Complete the Middle handshake state (remaining turns after initial message)
+        let middle_transport =
+            complete_handshake(&mut guard_stream, middle_hs, false)
+                .await
+                .context("Noise_XX handshake continuation for Middle failed")?;
+
+        // ── Step 3: Extend to Exit through Guard→Middle ───────────────────────
+        tracing::info!("Extending circuit to Exit {}", exit.addr);
+        let exit_hs = build_initiator(creator_priv_key, &exit.identity_pub)
+            .context("Failed to build initiator HS for Exit")?;
+        let mut exit_hs = exit_hs;
+        let hs_len = exit_hs.write_message(&[], &mut hs_buf)?;
+        let initial_exit_payload = hs_buf[..hs_len].to_vec();
+
+        send_cell(
+            &mut guard_stream,
+            &OnionCell::RelayExtend(ExtendPayload {
+                next_hop: exit.addr,
+                next_identity_key: exit.identity_pub,
+                handshake_payload: initial_exit_payload,
+            }),
+        )
         .await
-        .context("Noise_XX handshake continuation for Exit failed")?;
+        .context("Failed to send RelayExtend(Exit) through Guard")?;
 
-    tracing::info!(
-        "Circuit built: {} → {} → {}",
-        guard.addr, middle.addr, exit.addr
-    );
+        let response = timeout(Duration::from_secs(10), recv_cell(&mut guard_stream))
+            .await
+            .context("Timeout waiting for RelayExtended(Exit)")?
+            .context("Failed to read RelayExtended(Exit)")?;
 
-    Ok(OnionCircuit {
-        guard_stream,
-        transports: vec![guard_transport, middle_transport, exit_transport],
-        guard_addr: guard.addr,
-    })
+        match response {
+            OnionCell::RelayExtended(_) => {}
+            other => anyhow::bail!("Expected RelayExtended for Exit, got {:?}", other),
+        };
+
+        let exit_transport = complete_handshake(&mut guard_stream, exit_hs, false)
+            .await
+            .context("Noise_XX handshake continuation for Exit failed")?;
+
+        tracing::info!(
+            "Circuit built: {} → {} → {}",
+            guard.addr, middle.addr, exit.addr
+        );
+
+        Ok(OnionCircuit {
+            guard_stream,
+            transports: vec![guard_transport, middle_transport, exit_transport],
+            guard_addr: guard.addr,
+        })
+    }
+    .await;
+
+    let latency_ms = started.elapsed().as_millis();
+    publish_circuit_build_result_from_env(result.is_ok(), latency_ms).await;
+    result
 }
 
 // ─────────────────────────── Circuit Manager ───────────────────────────────

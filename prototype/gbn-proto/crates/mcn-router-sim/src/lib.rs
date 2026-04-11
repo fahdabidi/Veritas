@@ -11,6 +11,7 @@ pub mod swarm;
 pub mod gossip;
 pub mod relay_engine;
 pub mod circuit_manager;
+pub mod observability;
 
 pub use gossip::{GossipRequest, PlumTreeBehaviour};
 

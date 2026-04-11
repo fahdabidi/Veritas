@@ -1,5 +1,6 @@
 use anyhow::Result;
 use aws_sdk_servicediscovery::types::HealthStatusFilter;
+use crate::observability::MetricsReporter;
 use crate::gossip::{
     new_plumtree_behaviour, GossipRequest, GossipResponse, OutboundGossip, PlumTreeBehaviour,
     PlumTreeEngine,
@@ -16,6 +17,7 @@ use libp2p::{
 };
 use std::{collections::HashMap, env, net::IpAddr};
 use std::time::Duration;
+use tokio::time::Instant;
 
 #[derive(NetworkBehaviour)]
 pub struct RouterBehaviour {
@@ -26,6 +28,9 @@ pub struct RouterBehaviour {
 #[derive(Debug, Clone)]
 pub struct GossipRuntime {
     pub engine: PlumTreeEngine,
+    pub metrics: Option<MetricsReporter>,
+    pub last_gossip_bytes_published: u64,
+    pub last_gossip_publish: Instant,
 }
 
 pub fn gossip_config_from_env() -> (usize, usize) {
@@ -49,10 +54,14 @@ pub fn max_tracked_peers_from_env() -> usize {
 }
 
 impl GossipRuntime {
-    pub fn from_env() -> Self {
+    pub async fn from_env() -> Self {
         let (gossip_bps, max_tracked_messages) = gossip_config_from_env();
+        let metrics = MetricsReporter::from_env().await.ok();
         Self {
             engine: PlumTreeEngine::new(gossip_bps, max_tracked_messages),
+            metrics,
+            last_gossip_bytes_published: 0,
+            last_gossip_publish: Instant::now(),
         }
     }
 }
@@ -84,7 +93,12 @@ pub async fn build_swarm(local_key: identity::Keypair) -> Result<Swarm<RouterBeh
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
-    bootstrap_from_cloudmap(&mut swarm).await?;
+    let added = bootstrap_from_cloudmap(&mut swarm).await?;
+    tokio::spawn(async move {
+        if let Ok(reporter) = MetricsReporter::from_env().await {
+            let _ = reporter.publish_bootstrap_result(added > 0).await;
+        }
+    });
     let _ = register_with_cloudmap(&swarm).await;
 
     Ok(swarm)
@@ -159,10 +173,28 @@ pub async fn drive_swarm_once(
             _ => {}
         }
     }
+
+    if runtime.last_gossip_publish.elapsed() >= Duration::from_secs(10) {
+        let total = runtime.engine.state.bytes_sent_total();
+        let delta = total.saturating_sub(runtime.last_gossip_bytes_published);
+        if let Some(metrics) = &runtime.metrics {
+            let _ = metrics.publish_gossip_bandwidth_bytes(delta).await;
+        }
+        runtime.last_gossip_bytes_published = total;
+        runtime.last_gossip_publish = Instant::now();
+    }
+
     Ok(())
 }
 
 pub async fn bootstrap_from_cloudmap(swarm: &mut Swarm<RouterBehaviour>) -> Result<usize> {
+    // Check for Docker DNS fallback mode
+    if let Ok(mode) = env::var("GBN_DISCOVERY_MODE") {
+        if mode == "docker-dns" {
+            return bootstrap_from_docker_dns(swarm).await;
+        }
+    }
+    
     let namespace = match env::var("GBN_CLOUDMAP_NAMESPACE") {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(0),
@@ -207,6 +239,44 @@ pub async fn bootstrap_from_cloudmap(swarm: &mut Swarm<RouterBehaviour>) -> Resu
         let _ = swarm.dial(addr);
     }
 
+    Ok(added)
+}
+
+/// Docker DNS fallback discovery for local testing
+async fn bootstrap_from_docker_dns(swarm: &mut Swarm<RouterBehaviour>) -> Result<usize> {
+    use std::net::ToSocketAddrs;
+    
+    let p2p_port = env::var("GBN_P2P_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(4001);
+    
+    // Docker Compose service names that run relay nodes
+    let service_names = ["relay-hostile", "relay-free", "creator", "publisher"];
+    let mut added = 0usize;
+    
+    for name in service_names.iter() {
+        // Resolve service name to IP addresses via Docker's internal DNS
+        let host_port = format!("{}:{}", name, p2p_port);
+        if let Ok(addrs) = host_port.to_socket_addrs() {
+            for addr in addrs {
+                // Docker resolves to container IPs (e.g., 172.30.x.x)
+                let ip_addr = addr.ip();
+                let mut multiaddr = libp2p::Multiaddr::empty();
+                multiaddr.push(libp2p::multiaddr::Protocol::from(ip_addr));
+                multiaddr.push(libp2p::multiaddr::Protocol::Tcp(p2p_port));
+                
+                // In Docker DNS mode we don't have peer IDs, so we just dial
+                // The swarm will exchange peer IDs upon connection
+                let _ = swarm.dial(multiaddr.clone());
+                added += 1;
+                
+                tracing::debug!("Docker DNS discovered {} -> {}", name, multiaddr);
+            }
+        }
+    }
+    
+    tracing::info!("Docker DNS bootstrap discovered {} addresses", added);
     Ok(added)
 }
 

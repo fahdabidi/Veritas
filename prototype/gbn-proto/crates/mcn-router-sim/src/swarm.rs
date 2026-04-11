@@ -14,7 +14,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Swarm, SwarmBuilder,
 };
-use std::{env, net::IpAddr};
+use std::{collections::HashMap, env, net::IpAddr};
 use std::time::Duration;
 
 #[derive(NetworkBehaviour)]
@@ -36,8 +36,16 @@ pub fn gossip_config_from_env() -> (usize, usize) {
     let max_tracked_messages = env::var("GBN_MAX_TRACKED_MESSAGES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| env::var("GBN_MAX_TRACKED_PEERS").ok().and_then(|v| v.parse::<usize>().ok()))
         .unwrap_or(10_000);
     (gossip_bps, max_tracked_messages)
+}
+
+pub fn max_tracked_peers_from_env() -> usize {
+    env::var("GBN_MAX_TRACKED_PEERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(10_000)
 }
 
 impl GossipRuntime {
@@ -62,7 +70,11 @@ pub async fn build_swarm(local_key: identity::Keypair) -> Result<Swarm<RouterBeh
             let mut kad_config = KademliaConfig::default();
             // Faster queries for the simulated environment
             kad_config.set_query_timeout(Duration::from_secs(5));
-            let store = MemoryStore::new(peer_id);
+            let mut store_config = libp2p::kad::store::MemoryStoreConfig::default();
+            let max_tracked_peers = max_tracked_peers_from_env();
+            store_config.max_records = max_tracked_peers;
+            store_config.max_provided_keys = max_tracked_peers;
+            let store = MemoryStore::with_config(peer_id, store_config);
 
             RouterBehaviour {
                 kademlia: Kademlia::with_config(peer_id, store, kad_config),
@@ -73,8 +85,27 @@ pub async fn build_swarm(local_key: identity::Keypair) -> Result<Swarm<RouterBeh
         .build();
 
     bootstrap_from_cloudmap(&mut swarm).await?;
+    let _ = register_with_cloudmap(&swarm).await;
 
     Ok(swarm)
+}
+
+pub async fn run_swarm_until_ctrl_c(
+    swarm: &mut Swarm<RouterBehaviour>,
+    runtime: &mut GossipRuntime,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                let _ = deregister_from_cloudmap().await;
+                break;
+            }
+            res = drive_swarm_once(swarm, runtime) => {
+                res?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn send_outbound(
@@ -177,4 +208,67 @@ pub async fn bootstrap_from_cloudmap(swarm: &mut Swarm<RouterBehaviour>) -> Resu
     }
 
     Ok(added)
+}
+
+pub async fn register_with_cloudmap(swarm: &Swarm<RouterBehaviour>) -> Result<()> {
+    let service_id = match env::var("GBN_CLOUDMAP_SERVICE_ID") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(()),
+    };
+
+    let instance_id = env::var("GBN_CLOUDMAP_INSTANCE_ID")
+        .or_else(|_| env::var("HOSTNAME"))
+        .unwrap_or_else(|_| swarm.local_peer_id().to_string());
+
+    let ipv4 = match env::var("GBN_INSTANCE_IPV4") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(()),
+    };
+
+    let mut attrs = HashMap::new();
+    attrs.insert("AWS_INSTANCE_IPV4".to_string(), ipv4);
+    attrs.insert("GBN_PEER_ID".to_string(), swarm.local_peer_id().to_string());
+
+    if let Ok(port) = env::var("GBN_P2P_PORT") {
+        attrs.insert("AWS_INSTANCE_PORT".to_string(), port);
+    }
+
+    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let client = aws_sdk_servicediscovery::Client::new(&config);
+
+    client
+        .register_instance()
+        .service_id(service_id)
+        .instance_id(instance_id)
+        .set_attributes(Some(attrs))
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn deregister_from_cloudmap() -> Result<()> {
+    let service_id = match env::var("GBN_CLOUDMAP_SERVICE_ID") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(()),
+    };
+
+    let instance_id = env::var("GBN_CLOUDMAP_INSTANCE_ID")
+        .or_else(|_| env::var("HOSTNAME"))
+        .unwrap_or_default();
+    if instance_id.is_empty() {
+        return Ok(());
+    }
+
+    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let client = aws_sdk_servicediscovery::Client::new(&config);
+
+    client
+        .deregister_instance()
+        .service_id(service_id)
+        .instance_id(instance_id)
+        .send()
+        .await?;
+
+    Ok(())
 }

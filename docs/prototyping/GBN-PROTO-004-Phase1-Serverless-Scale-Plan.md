@@ -10,9 +10,22 @@ This document tracks the step-by-step implementation and execution roadmap for t
 ---
 
 ## Step 0: Service Discovery Setup
-- `[ ]` Deploy an AWS Cloud Map namespace or lightweight DynamoDB table as a peer registry.
-- `[ ]` Update `mcn-router-sim` to register its IP into the registry on boot and deregister on graceful shutdown.
-- `[ ]` Update node bootstrap logic to query the registry for live peer IPs instead of relying on environment variables.
+- `[x]` Deploy an AWS Cloud Map namespace or lightweight DynamoDB table as a peer registry. *(Completed in current prototype infra: Cloud Map namespace + relay discovery service are defined in `infra/cloudformation/phase1-stack.yaml`.)*
+- `[x]` Update `mcn-router-sim` to register its IP into the registry on boot and deregister on graceful shutdown. *(Completed in code: `register_with_cloudmap(...)`, `deregister_from_cloudmap(...)`, and `run_swarm_until_ctrl_c(...)` were added in `crates/mcn-router-sim/src/swarm.rs`.)*
+- `[x]` Update node bootstrap logic to query the registry for live peer IPs instead of relying on environment variables. *(Completed in code: `bootstrap_from_cloudmap(...)` is invoked by `build_swarm(...)` and seeds Kademlia + dial attempts from Cloud Map discovery.)*
+
+### Step 0 Implementation Status Note (Current)
+
+Implemented key changes:
+- `crates/mcn-router-sim/src/swarm.rs`
+  - Cloud Map discovery bootstrap: `bootstrap_from_cloudmap(...)` called from `build_swarm(...)`.
+  - Cloud Map registration lifecycle: `register_with_cloudmap(...)` on startup and `deregister_from_cloudmap(...)` on Ctrl+C via `run_swarm_until_ctrl_c(...)`.
+  - Registry metadata support using env-driven attributes (`GBN_CLOUDMAP_SERVICE_ID`, `GBN_INSTANCE_IPV4`, `GBN_P2P_PORT`, `GBN_PEER_ID`).
+- `infra/cloudformation/phase1-stack.yaml`
+  - `AWS::ServiceDiscovery::PrivateDnsNamespace` (`gbn.local`) and `AWS::ServiceDiscovery::Service` (`relay`) present for discovery backend.
+
+Validation snapshot:
+- `cargo test --manifest-path prototype/gbn-proto/Cargo.toml -p mcn-router-sim` ✅
 
 ### Implementation Context
 
@@ -82,8 +95,24 @@ pub struct RouterBehaviour {
 ---
 
 ## Step 2: DHT & Discovery Enhancements
-- `[ ]` Modify `RelayDescriptor` schema to include a `subnet_tag: String` field. Update signing logic to cover it.
-- `[ ]` Implement `MAX_TRACKED_PEERS` config parameter in Kademlia/gossip tables to actively evict stale peers.
+- `[x]` Modify `RelayDescriptor` schema to include a `subnet_tag: String` field. Update signing logic to cover it. *(Completed: `RelayDescriptor` now includes `subnet_tag`, and descriptor signature verification includes `subnet_tag` bytes.)*
+- `[x]` Implement `MAX_TRACKED_PEERS` config parameter in Kademlia/gossip tables to actively evict stale peers. *(Completed: `GBN_MAX_TRACKED_PEERS` now bounds Kademlia `MemoryStore` (`max_records`, `max_provided_keys`) and is also used as fallback bound for gossip tracked-message window.)*
+
+### Step 2 Implementation Status Note (Current)
+
+Implemented key changes:
+- `crates/gbn-protocol/src/dht.rs`
+  - `RelayDescriptor` extended with `subnet_tag: String`.
+  - Signature verification payload now covers `identity_key + address + subnet_tag + timestamp`.
+- `tests/integration/test_dht_validation.rs`
+  - Descriptor fixture/signing updated to include `subnet_tag` bytes and field population.
+- `crates/mcn-router-sim/src/swarm.rs`
+  - Added `max_tracked_peers_from_env()` reading `GBN_MAX_TRACKED_PEERS`.
+  - Kademlia `MemoryStoreConfig` now uses `GBN_MAX_TRACKED_PEERS` for `max_records` and `max_provided_keys`.
+  - Gossip config now accepts `GBN_MAX_TRACKED_PEERS` as fallback bound for tracked-message cap.
+
+Validation snapshot:
+- `cargo test --manifest-path prototype/gbn-proto/Cargo.toml -p mcn-router-sim` ✅
 
 ### Implementation Context
 
@@ -102,9 +131,30 @@ The `MemoryStore` in `swarm.rs` (line 32) accepts a `MemoryStoreConfig` — set 
 ---
 
 ## Step 3: Circuit Manager Upgrades
-- `[/]` **Geofence Filtering:** Enforce a strict filter on DHT results when selecting the 3rd hop (Exit): `if descriptor.subnet_tag == "FreeSubnet"`. *(In progress: implemented `select_exit_candidates()` in `circuit_manager.rs` using `RelayNode.subnet_tag`; still needs wiring to real DHT `RelayDescriptor` once Step 2 schema changes land.)*
-- `[/]` **Speculative Dialing:** Modify `build_circuit` to concurrently dial up to 30 separate paths, keeping the first 10 that succeed and explicitly tearing down the rest. *(In progress: implemented `build_circuits_speculative(...)` with concurrent dialing and disjoint-guard winner selection; explicit teardown/cancellation polish for non-winners remains.)*
-- `[/]` **Circuit Rebuild Strategy:** Implement health monitoring. When a circuit breaks mid-transfer, automatically re-queue the in-flight chunk and dial a replacement circuit (max 3 retries per chunk). *(In progress: added failure-drain circuit removal + `process_failures_with_rebuild(...)` with disjoint-guard preference and retry cap tracking.)*
+- `[x]` **Geofence Filtering:** Enforce a strict filter on DHT results when selecting the 3rd hop (Exit): `if descriptor.subnet_tag == "FreeSubnet"`. *(Completed: `select_exit_candidates_from_descriptors(...)` now filters protocol-level `RelayDescriptor` records by `subnet_tag`, with conversion helpers to runtime relay nodes.)*
+- `[x]` **Speculative Dialing:** Modify `build_circuit` to concurrently dial up to 30 separate paths, keeping the first 10 that succeed and explicitly tearing down the rest. *(Completed: `build_circuits_speculative(...)` plus `build_circuits_speculative_from_descriptors(...)` provide bounded concurrent dialing, disjoint-guard winners, explicit cancellation, and strict success thresholds.)*
+- `[x]` **Circuit Rebuild Strategy:** Implement health monitoring. When a circuit breaks mid-transfer, automatically re-queue the in-flight chunk and dial a replacement circuit (max 3 retries per chunk). *(Completed: failure drain removes dead circuits, re-queues in-flight payloads, and `process_failures_with_rebuild_from_descriptors(...)` performs disjoint rebuild + max-3 retry enforcement.)*
+
+### Step 3 Implementation Status Note (Current)
+
+Implemented key changes:
+- `crates/mcn-router-sim/src/circuit_manager.rs`
+  - Added protocol-to-runtime adapter helpers: `relay_node_from_descriptor(...)`, `relay_nodes_from_descriptors(...)`.
+  - Added descriptor-native geofence API: `select_exit_candidates_from_descriptors(...)`.
+  - Added descriptor-native speculative API: `build_circuits_speculative_from_descriptors(...)`.
+  - Added descriptor-native rebuild API: `process_failures_with_rebuild_from_descriptors(...)`.
+  - Preserved Step 3 behavior guarantees: bounded speculative candidate generation, disjoint-guard winner enforcement, explicit cancellation of unfinished dials (`abort_all()`), dead-circuit removal before requeue, and max-3 retry cap per chunk.
+- `crates/gbn-protocol/src/dht.rs`
+  - `RelayDescriptor` extended with `subnet_tag: String`.
+  - Signature verification payload updated to include subnet bytes (`identity_key + address + subnet_tag + timestamp`).
+- `tests/integration/test_dht_validation.rs`
+  - Descriptor test fixture signing updated to include `subnet_tag` and populate the new field.
+- `crates/mcn-router-sim/src/circuit_manager.rs` tests
+  - Added `descriptor_geofence_filter_works` coverage for DHT-descriptor geofence path.
+
+Validation snapshot:
+- `cargo test --manifest-path prototype/gbn-proto/Cargo.toml -p mcn-router-sim` ✅
+  - Circuit manager tests: geofence (relay + descriptor), speculative constraints, rebuild-related flows compile and pass.
 
 ### Implementation Context
 

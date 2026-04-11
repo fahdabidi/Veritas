@@ -18,6 +18,7 @@
 //!    Temporal Circuit Correlation.
 
 use anyhow::{Context, Result};
+use gbn_protocol::dht::RelayDescriptor;
 use gbn_protocol::onion::{
     DataPayload, ExtendPayload, ExtendedPayload, HeartbeatPayload, OnionCell,
 };
@@ -47,6 +48,18 @@ pub struct RelayNode {
     pub addr: SocketAddr,
     pub identity_pub: [u8; 32],
     pub subnet_tag: String,
+}
+
+pub fn relay_node_from_descriptor(descriptor: &RelayDescriptor) -> RelayNode {
+    RelayNode {
+        addr: descriptor.address,
+        identity_pub: descriptor.identity_key,
+        subnet_tag: descriptor.subnet_tag.clone(),
+    }
+}
+
+pub fn relay_nodes_from_descriptors(descriptors: &[RelayDescriptor]) -> Vec<RelayNode> {
+    descriptors.iter().map(relay_node_from_descriptor).collect()
 }
 
 /// A fully built Telescopic Circuit: Guard → Middle → Exit.
@@ -363,6 +376,17 @@ impl CircuitManager {
         }
         Ok(resent)
     }
+
+    pub async fn process_failures_with_rebuild_from_descriptors(
+        &self,
+        creator_priv_key: &[u8; 32],
+        descriptors: &[RelayDescriptor],
+    ) -> Result<usize> {
+        let all_peers = relay_nodes_from_descriptors(descriptors);
+        let exit_candidates = select_exit_candidates(&all_peers);
+        self.process_failures_with_rebuild(creator_priv_key, &all_peers, &exit_candidates)
+            .await
+    }
 }
 
 pub fn select_exit_candidates(all_peers: &[RelayNode]) -> Vec<RelayNode> {
@@ -371,6 +395,13 @@ pub fn select_exit_candidates(all_peers: &[RelayNode]) -> Vec<RelayNode> {
         .filter(|p| p.subnet_tag == "FreeSubnet")
         .cloned()
         .collect()
+}
+
+pub fn select_exit_candidates_from_descriptors(
+    descriptors: &[RelayDescriptor],
+) -> Vec<RelayNode> {
+    let all_peers = relay_nodes_from_descriptors(descriptors);
+    select_exit_candidates(&all_peers)
 }
 
 pub async fn build_circuits_speculative(
@@ -386,28 +417,12 @@ pub async fn build_circuits_speculative(
         return Ok(Vec::new());
     }
 
-    let mut launched = 0usize;
+    let candidates = enumerate_speculative_candidates(all_peers, exit_candidates, max_concurrent);
     let mut joins = JoinSet::new();
-    'outer: for guard in all_peers {
-        for middle in all_peers {
-            if middle.addr == guard.addr {
-                continue;
-            }
-            for exit in exit_candidates {
-                if exit.addr == guard.addr || exit.addr == middle.addr {
-                    continue;
-                }
-                let guard = guard.clone();
-                let middle = middle.clone();
-                let exit = exit.clone();
-                let key = *creator_priv_key;
-                joins.spawn(async move { build_circuit(&key, &guard, &middle, &exit).await });
-                launched += 1;
-                if launched >= max_concurrent {
-                    break 'outer;
-                }
-            }
-        }
+
+    for (guard, middle, exit) in candidates {
+        let key = *creator_priv_key;
+        joins.spawn(async move { build_circuit(&key, &guard, &middle, &exit).await });
     }
 
     let mut winners = Vec::new();
@@ -422,10 +437,61 @@ pub async fn build_circuits_speculative(
             }
         }
     }
-    if winners.is_empty() {
-        anyhow::bail!("No speculative circuits succeeded");
+
+    // Explicitly cancel unfinished speculative dials once target is reached (or no more useful work remains).
+    joins.abort_all();
+
+    if winners.len() < target_count {
+        anyhow::bail!(
+            "Insufficient speculative circuit successes: got {}, need {}",
+            winners.len(),
+            target_count
+        );
     }
     Ok(winners)
+}
+
+pub async fn build_circuits_speculative_from_descriptors(
+    creator_priv_key: &[u8; 32],
+    descriptors: &[RelayDescriptor],
+    target_count: usize,
+    max_concurrent: usize,
+) -> Result<Vec<OnionCircuit>> {
+    let all_peers = relay_nodes_from_descriptors(descriptors);
+    let exit_candidates = select_exit_candidates(&all_peers);
+    build_circuits_speculative(
+        creator_priv_key,
+        &all_peers,
+        &exit_candidates,
+        target_count,
+        max_concurrent,
+    )
+    .await
+}
+
+fn enumerate_speculative_candidates(
+    all_peers: &[RelayNode],
+    exit_candidates: &[RelayNode],
+    max_concurrent: usize,
+) -> Vec<(RelayNode, RelayNode, RelayNode)> {
+    let mut out = Vec::new();
+    'outer: for guard in all_peers {
+        for middle in all_peers {
+            if middle.addr == guard.addr {
+                continue;
+            }
+            for exit in exit_candidates {
+                if exit.addr == guard.addr || exit.addr == middle.addr {
+                    continue;
+                }
+                out.push((guard.clone(), middle.clone(), exit.clone()));
+                if out.len() >= max_concurrent {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -441,6 +507,54 @@ mod tests {
         };
         let peers = vec![mk("HostileSubnet", 1), mk("FreeSubnet", 2), mk("FreeSubnet", 3)];
         let exits = select_exit_candidates(&peers);
+        assert_eq!(exits.len(), 2);
+        assert!(exits.iter().all(|p| p.subnet_tag == "FreeSubnet"));
+    }
+
+    #[test]
+    fn speculative_candidate_generation_respects_constraints() {
+        let mk = |tag: &str, port: u16, key: u8| RelayNode {
+            addr: format!("127.0.0.1:{}", port).parse().unwrap(),
+            identity_pub: [key; 32],
+            subnet_tag: tag.to_string(),
+        };
+        let all = vec![
+            mk("HostileSubnet", 1101, 1),
+            mk("HostileSubnet", 1102, 2),
+            mk("HostileSubnet", 1103, 3),
+            mk("FreeSubnet", 1201, 4),
+            mk("FreeSubnet", 1202, 5),
+        ];
+        let exits = select_exit_candidates(&all);
+        let candidates = enumerate_speculative_candidates(&all, &exits, 10);
+
+        assert!(!candidates.is_empty());
+        assert!(candidates.len() <= 10);
+        for (g, m, e) in candidates {
+            assert_ne!(g.addr, m.addr);
+            assert_ne!(g.addr, e.addr);
+            assert_ne!(m.addr, e.addr);
+            assert_eq!(e.subnet_tag, "FreeSubnet");
+        }
+    }
+
+    #[test]
+    fn descriptor_geofence_filter_works() {
+        let mk = |tag: &str, port: u16, key: u8| RelayDescriptor {
+            identity_key: [key; 32],
+            address: format!("127.0.0.1:{}", port).parse().unwrap(),
+            subnet_tag: tag.to_string(),
+            timestamp: 1,
+            signature: [0u8; 64],
+        };
+
+        let descriptors = vec![
+            mk("HostileSubnet", 2101, 1),
+            mk("FreeSubnet", 2201, 2),
+            mk("FreeSubnet", 2202, 3),
+        ];
+
+        let exits = select_exit_candidates_from_descriptors(&descriptors);
         assert_eq!(exits.len(), 2);
         assert!(exits.iter().all(|p| p.subnet_tag == "FreeSubnet"));
     }

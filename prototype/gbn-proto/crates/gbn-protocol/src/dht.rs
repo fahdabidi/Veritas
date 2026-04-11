@@ -19,9 +19,11 @@ pub struct RelayDescriptor {
     pub identity_key: [u8; 32],
     /// The globally reachable IP and port.
     pub address: SocketAddr,
+    /// Network/geofence tag advertised by the node (e.g. HostileSubnet/FreeSubnet).
+    pub subnet_tag: String,
     /// The timestamp when this was published (prevent replay attacks).
     pub timestamp: u64,
-    /// Signature of the (identity_key + address + timestamp) bytes.
+    /// Signature of the (identity_key + address + subnet_tag + timestamp) bytes.
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
@@ -35,6 +37,7 @@ impl RelayDescriptor {
         let mut signed_data = Vec::new();
         signed_data.extend_from_slice(&self.identity_key);
         signed_data.extend_from_slice(self.address.to_string().as_bytes());
+        signed_data.extend_from_slice(self.subnet_tag.as_bytes());
         signed_data.extend_from_slice(&self.timestamp.to_le_bytes());
 
         public_key

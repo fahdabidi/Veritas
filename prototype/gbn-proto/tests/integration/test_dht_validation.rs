@@ -24,15 +24,18 @@ use std::net::SocketAddr;
 /// Build a self-consistent `RelayDescriptor` signed with `keypair`.
 fn make_descriptor(keypair: &Keypair, addr: SocketAddr, timestamp: u64) -> RelayDescriptor {
     let identity_key = keypair.public.to_bytes();
+    let subnet_tag = "FreeSubnet".to_string();
     let mut signed_data = Vec::new();
     signed_data.extend_from_slice(&identity_key);
     signed_data.extend_from_slice(addr.to_string().as_bytes());
+    signed_data.extend_from_slice(subnet_tag.as_bytes());
     signed_data.extend_from_slice(&timestamp.to_le_bytes());
     let signature = keypair.sign(&signed_data).to_bytes();
 
     RelayDescriptor {
         identity_key,
         address: addr,
+        subnet_tag,
         timestamp,
         signature,
     }

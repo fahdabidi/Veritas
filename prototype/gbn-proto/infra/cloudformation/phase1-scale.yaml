@@ -512,7 +512,7 @@ Resources:
               Value: '20'
             # Phase 2: circuit build parameters
             - Name: GBN_CIRCUIT_DELAY_SECS
-              Value: '120'
+              Value: '60'
             - Name: GBN_CIRCUIT_PATHS
               Value: '1'
             - Name: GBN_CIRCUIT_HOPS

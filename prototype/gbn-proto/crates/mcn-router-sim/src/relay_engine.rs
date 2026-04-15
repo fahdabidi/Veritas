@@ -20,12 +20,12 @@
 //! `RelayExtended` response — doing so would require it to hold the private
 //! key of the legitimate next-hop node.
 
+use crate::observability::publish_chunks_received_from_env;
 use anyhow::{Context, Result};
 use gbn_protocol::onion::{
     DataPayload, ExtendPayload, ExtendedPayload, HeartbeatPayload, OnionCell,
 };
-use mcn_crypto::noise::{build_initiator, build_responder, complete_handshake, decrypt_frame, encrypt_frame};
-use snow::HandshakeState;
+use mcn_crypto::noise::{build_responder, complete_handshake, decrypt_frame};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -162,17 +162,15 @@ async fn handle_onion_connection(
             }) => {
                 tracing::debug!("RelayExtend → dialing {}", next_hop);
 
-                // This relay acts as Initiator toward the next hop.
-                let hs = build_initiator(&local_priv_key, &next_identity_key)
-                    .context("Failed to build Noise_XX initiator for RelayExtend")?;
+                // This relay is the responder for the next hop because it has already
+                // forwarded the creator-side initiator payload above.
+                let hs = build_responder(&local_priv_key)
+                    .context("Failed to build Noise_XX responder for RelayExtend")?;
 
-                let mut ds_stream = timeout(
-                    Duration::from_secs(10),
-                    TcpStream::connect(next_hop),
-                )
-                .await
-                .context("Timeout dialing next hop")?
-                .context("Failed to connect to next hop")?;
+                let mut ds_stream = timeout(Duration::from_secs(10), TcpStream::connect(next_hop))
+                    .await
+                    .context("Timeout dialing next hop")?
+                    .context("Failed to connect to next hop")?;
 
                 // Send the initiator's first handshake payload forwarded by the Creator.
                 ds_stream
@@ -182,13 +180,22 @@ async fn handle_onion_connection(
                 ds_stream.flush().await?;
 
                 // Complete the rest of the handshake.
-                let mut transport = complete_handshake(&mut ds_stream, hs, true).await
+                let transport = complete_handshake(&mut ds_stream, hs, false)
+                    .await
                     .context("Noise_XX handshake with next hop failed")?;
 
                 // Capture the handshake hash as proof for the reply.
-                let handshake_hash = transport.get_remote_static()
+                let handshake_hash = transport
+                    .get_remote_static()
                     .map(|k| k.to_vec())
                     .unwrap_or_default();
+                if !handshake_hash.is_empty() && handshake_hash != next_identity_key {
+                    anyhow::bail!(
+                        "RelayExtend target identity mismatch: expected {:?}, got {:?}",
+                        next_identity_key,
+                        handshake_hash
+                    );
+                }
 
                 // Reply upstream: RelayExtended carries the next-hop's public key bytes
                 // (proof the handshake really succeeded).
@@ -201,14 +208,17 @@ async fn handle_onion_connection(
                 .await?;
 
                 downstream_transport = Some((ds_stream, transport));
-                tracing::debug!("RelayExtend complete — downstream link established to {}", next_hop);
+                tracing::debug!(
+                    "RelayExtend complete — downstream link established to {}",
+                    next_hop
+                );
             }
 
             // ── RelayData: apply jitter, forward to downstream ─────────────
             OnionCell::RelayData(DataPayload { ciphertext }) => {
                 // Introduce simulated network jitter
-                let jitter = rand::random::<u64>() % (max_jitter_ms - min_jitter_ms + 1)
-                    + min_jitter_ms;
+                let jitter =
+                    rand::random::<u64>() % (max_jitter_ms - min_jitter_ms + 1) + min_jitter_ms;
                 tokio::time::sleep(Duration::from_millis(jitter)).await;
 
                 match &mut downstream_transport {
@@ -221,18 +231,49 @@ async fn handle_onion_connection(
                         let fwd_cell = OnionCell::RelayData(DataPayload {
                             ciphertext: decrypted,
                         });
-                        send_cell(ds_stream, &fwd_cell).await
+                        send_cell(ds_stream, &fwd_cell)
+                            .await
                             .context("Failed to forward RelayData to downstream")?;
                     }
                     None => {
-                        // Exit node: no downstream, this is the final payload.
-                        // Deliver the plaintext to the Publisher's listener.
-                        tracing::debug!(
-                            "Exit node received {} bytes of payload",
-                            ciphertext.len()
+                        // Exit node: all 3 Noise_XX onion layers have been peeled.
+                        // `ciphertext` is the application-encrypted EncryptedChunkPacket bytes
+                        // (still opaque to this relay — Creator→Publisher ECDH encryption).
+                        // Forward to the Publisher's mpub-receiver using 4-byte LE length prefix framing.
+
+                        let publisher_addr = crate::swarm::discover_publisher_addr_for_exit_relay()
+                            .await
+                            .context("Exit relay: could not resolve Publisher address")?;
+
+                        let mut pub_stream =
+                            timeout(Duration::from_secs(10), TcpStream::connect(publisher_addr))
+                                .await
+                                .context("Exit relay: timeout connecting to Publisher")?
+                                .context("Exit relay: TCP connect to Publisher failed")?;
+
+                        // 4-byte LE length prefix + chunk bytes
+                        // Matches mpub_receiver::recv_raw_frame() framing exactly
+                        let len = ciphertext.len() as u32;
+                        pub_stream
+                            .write_all(&len.to_le_bytes())
+                            .await
+                            .context("Exit relay: failed writing length prefix")?;
+                        pub_stream
+                            .write_all(&ciphertext)
+                            .await
+                            .context("Exit relay: failed writing chunk bytes")?;
+                        pub_stream.flush().await?;
+
+                        tracing::info!(
+                            "Exit relay: forwarded {} bytes to Publisher {}",
+                            ciphertext.len(),
+                            publisher_addr
                         );
-                        // In the prototype, we emit it to stdout / log for test capture.
-                        // The real implementation would forward to `mpub-receiver`.
+
+                        // Fire-and-forget ChunksReceived metric
+                        tokio::spawn(async move {
+                            publish_chunks_received_from_env(1).await;
+                        });
                     }
                 }
             }

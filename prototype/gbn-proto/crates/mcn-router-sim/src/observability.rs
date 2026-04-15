@@ -78,10 +78,15 @@ impl MetricsReporter {
     }
 
     pub async fn publish_chunks_delivered(&self, count: u64) -> Result<()> {
-        self.publish_metric("ChunksDelivered", count as f64, StandardUnit::Count).await
+        self.publish_metric("ChunksDelivered", count as f64, StandardUnit::Count)
+            .await
     }
 
-    pub async fn publish_circuit_build_result(&self, success: bool, latency_ms: u128) -> Result<()> {
+    pub async fn publish_circuit_build_result(
+        &self,
+        success: bool,
+        latency_ms: u128,
+    ) -> Result<()> {
         self.publish_metric(
             "CircuitBuildResult",
             if success { 1.0 } else { 0.0 },
@@ -93,6 +98,60 @@ impl MetricsReporter {
             "CircuitBuildLatencyMs",
             latency_ms as f64,
             StandardUnit::Milliseconds,
+        )
+        .await
+    }
+
+    /// Publish `ChunksReceived` — aggregate {Scale, Subnet} (no NodeId).
+    /// Published by exit relays each time they forward a chunk to the Publisher.
+    pub async fn publish_chunks_received(&self, count: u64) -> Result<()> {
+        let datum = MetricDatum::builder()
+            .metric_name("ChunksReceived")
+            .value(count as f64)
+            .unit(StandardUnit::Count)
+            .set_dimensions(Some(aggregate_dimensions()))
+            .build();
+        self.client
+            .put_metric_data()
+            .namespace(&self.namespace)
+            .metric_data(datum)
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    /// Publish `ChunksReassembled` and `HashMatchResult` — aggregate {Scale, Subnet}.
+    /// Published by Publisher after each complete session is reassembled and verified.
+    pub async fn publish_chunks_reassembled(&self, count: u64, hash_match: bool) -> Result<()> {
+        let reassembled_datum = MetricDatum::builder()
+            .metric_name("ChunksReassembled")
+            .value(count as f64)
+            .unit(StandardUnit::Count)
+            .set_dimensions(Some(aggregate_dimensions()))
+            .build();
+        let hash_datum = MetricDatum::builder()
+            .metric_name("HashMatchResult")
+            .value(if hash_match { 1.0 } else { 0.0 })
+            .unit(StandardUnit::Count)
+            .set_dimensions(Some(aggregate_dimensions()))
+            .build();
+        self.client
+            .put_metric_data()
+            .namespace(&self.namespace)
+            .metric_data(reassembled_datum)
+            .metric_data(hash_datum)
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    /// Publish `PathDiversityResult` — per-node {Scale, NodeId}.
+    /// Published by Creator after verifying all 10 circuit paths are disjoint.
+    pub async fn publish_path_diversity(&self, all_disjoint: bool) -> Result<()> {
+        self.publish_metric(
+            "PathDiversityResult",
+            if all_disjoint { 1.0 } else { 0.0 },
+            StandardUnit::Count,
         )
         .await
     }
@@ -112,8 +171,47 @@ pub async fn publish_bootstrap_result_from_env(active: bool) {
 pub async fn publish_circuit_build_result_from_env(success: bool, latency_ms: u128) {
     match MetricsReporter::from_env().await {
         Ok(reporter) => {
-            if let Err(e) = reporter.publish_circuit_build_result(success, latency_ms).await {
+            if let Err(e) = reporter
+                .publish_circuit_build_result(success, latency_ms)
+                .await
+            {
                 tracing::warn!("CloudWatch publish CircuitBuildResult failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("CloudWatch MetricsReporter init failed: {e}"),
+    }
+}
+
+/// Fire-and-forget: publish ChunksReceived metric (exit relay → Publisher hop).
+pub async fn publish_chunks_received_from_env(count: u64) {
+    match MetricsReporter::from_env().await {
+        Ok(reporter) => {
+            if let Err(e) = reporter.publish_chunks_received(count).await {
+                tracing::warn!("CloudWatch publish ChunksReceived failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("CloudWatch MetricsReporter init failed: {e}"),
+    }
+}
+
+/// Fire-and-forget: publish ChunksReassembled + HashMatchResult (Publisher).
+pub async fn publish_chunks_reassembled_from_env(count: u64, hash_match: bool) {
+    match MetricsReporter::from_env().await {
+        Ok(reporter) => {
+            if let Err(e) = reporter.publish_chunks_reassembled(count, hash_match).await {
+                tracing::warn!("CloudWatch publish ChunksReassembled failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("CloudWatch MetricsReporter init failed: {e}"),
+    }
+}
+
+/// Fire-and-forget: publish PathDiversityResult (Creator, per-node).
+pub async fn publish_path_diversity_from_env(all_disjoint: bool) {
+    match MetricsReporter::from_env().await {
+        Ok(reporter) => {
+            if let Err(e) = reporter.publish_path_diversity(all_disjoint).await {
+                tracing::warn!("CloudWatch publish PathDiversityResult failed: {e}");
             }
         }
         Err(e) => tracing::warn!("CloudWatch MetricsReporter init failed: {e}"),

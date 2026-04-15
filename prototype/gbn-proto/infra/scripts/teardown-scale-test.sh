@@ -34,10 +34,11 @@ cf_resource_id() {
 }
 
 echo "============================================"
-echo "  GBN Phase 1 — Teardown Scale Test"
+echo "  GBN Phase 2 — Teardown Scale Test"
 echo "  Stack:  $STACK_NAME"
 echo "  Region: $REGION"
 echo "============================================"
+
 
 CLUSTER_NAME="$(cf_resource_id ECSCluster)"
 CHAOS_RULE_NAME="$(cf_resource_id ChaosEngineRule)"
@@ -113,6 +114,13 @@ export BOOT_JSON="$(cw_query BootstrapResult Sum)"
 export GOSS_JSON="$(cw_query_agg GossipBandwidthBytes Sum)"
 export CIRC_JSON="$(cw_query CircuitBuildResult Sum)"
 export CHUNK_JSON="$(cw_query ChunksDelivered Sum)"
+# Phase 2 metrics
+export REASSEMBLED_JSON="$(cw_query_agg ChunksReassembled Sum)"
+export RECEIVED_JSON="$(cw_query_agg ChunksReceived Sum)"
+export DIVERSITY_JSON="$(cw_query PathDiversityResult Minimum)"
+export HASH_MATCH_JSON="$(cw_query_agg HashMatchResult Minimum)"
+export CIRC_COUNT_JSON="$(cw_query CircuitBuildResult SampleCount)"
+
 
 python3 - <<'PYEOF' > "$METRICS_FILE"
 import json, os
@@ -127,17 +135,52 @@ def load(env_key):
 
 results = []
 for label, env_key in [
-    ("bootstrap", "BOOT_JSON"),
-    ("gossipbw",  "GOSS_JSON"),
-    ("circuit",   "CIRC_JSON"),
-    ("chunks",    "CHUNK_JSON"),
+    ("bootstrap",          "BOOT_JSON"),
+    ("gossipbw",           "GOSS_JSON"),
+    ("circuit",            "CIRC_JSON"),
+    ("circuit_count",      "CIRC_COUNT_JSON"),
+    ("chunks",             "CHUNK_JSON"),
+    ("chunks_reassembled", "REASSEMBLED_JSON"),
+    ("chunks_received",    "RECEIVED_JSON"),
+    ("path_diversity",     "DIVERSITY_JSON"),
+    ("hash_match",         "HASH_MATCH_JSON"),
 ]:
     r = dict(load(env_key)[0]) if load(env_key) else {}
     r["Id"]    = label
     r["Label"] = label
     results.append(r)
 
-print(json.dumps({"MetricDataResults": results}, indent=4))
+# Compute derived pass/fail gates per test spec Section 6
+def first_sum(env_key):
+    raw = os.environ.get(env_key, '{}')
+    try:
+        d = json.loads(raw)
+        vals = d.get("MetricDataResults", [{}])[0].get("Values", [])
+        return sum(vals) if vals else 0
+    except Exception:
+        return 0
+
+circ_sum   = first_sum("CIRC_JSON")
+circ_count = first_sum("CIRC_COUNT_JSON")
+gate = {
+    "circuit_build_success_rate": round(circ_sum / circ_count, 4) if circ_count > 0 else None,
+    "circuit_build_pass":         (circ_sum / circ_count > 0.80) if circ_count > 0 else False,
+    "chunks_reassembled_sum":     first_sum("REASSEMBLED_JSON"),
+    "chunks_received_sum":        first_sum("RECEIVED_JSON"),
+    "path_diversity_min":         first_sum("DIVERSITY_JSON"),
+    "hash_match_min":             first_sum("HASH_MATCH_JSON"),
+    "gossip_nonzero":             first_sum("GOSS_JSON") > 0,
+}
+gate["phase2_pass"] = bool(
+    gate["circuit_build_pass"] and
+    gate["chunks_reassembled_sum"] >= 1 and
+    gate["path_diversity_min"] == 1.0 and
+    gate["hash_match_min"] == 1.0 and
+    gate["gossip_nonzero"]
+)
+
+print(json.dumps({"MetricDataResults": results, "Phase2Gate": gate}, indent=4))
+
 PYEOF
 
 echo "  Metrics saved: $METRICS_FILE"

@@ -7,9 +7,16 @@
 //! - `MultipathRouter`: Manages multiple circuits and distributes traffic
 //!   round-robin to simulate multipath routing.
 
-pub mod swarm;
+// Workaround for rustc 1.94.1 ICE in `check_mod_deathness` / `early_lint_checks`.
+// The ice is triggered when the lint system attempts to compute suggestion spans
+// for grouped `use {}` imports. Suppressing both lints avoids the ICE.
+// Remove once toolchain is upgraded beyond the affected version.
+#![allow(dead_code, unused_imports)]
+
 pub mod gossip;
 pub mod relay_engine;
+pub mod swarm;
+
 pub mod circuit_manager;
 pub mod observability;
 
@@ -47,7 +54,10 @@ pub enum RouterError {
 
 /// Send a packet over a TCP stream using length-prefix framing.
 /// Format: `[4-byte little-endian length][JSON serialized packet]`
-pub async fn send_packet(stream: &mut TcpStream, packet: &EncryptedChunkPacket) -> Result<(), RouterError> {
+pub async fn send_packet(
+    stream: &mut TcpStream,
+    packet: &EncryptedChunkPacket,
+) -> Result<(), RouterError> {
     let json = serde_json::to_vec(packet)?;
     let len = json.len() as u32;
     stream.write_all(&len.to_le_bytes()).await?;
@@ -98,10 +108,13 @@ pub async fn spawn_relay(
 ) -> Result<RelayHandle, RouterError> {
     let listener = TcpListener::bind(listen_addr).await?;
     let bound_addr = listener.local_addr()?;
-    
+
     tracing::debug!(
         "Relay spawned: {} -> {} (jitter: {}-{}ms)",
-        bound_addr, forward_addr, min_jitter_ms, max_jitter_ms
+        bound_addr,
+        forward_addr,
+        min_jitter_ms,
+        max_jitter_ms
     );
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -211,7 +224,8 @@ pub async fn spawn_circuit(
             next_hop,
             min_jitter_ms,
             max_jitter_ms,
-        ).await?;
+        )
+        .await?;
         next_hop = relay.listen_addr;
         relays.push(relay);
     }
@@ -261,7 +275,8 @@ impl MultipathRouter {
         let circuit = &self.circuits[circuit_idx];
         tracing::debug!(
             "Routing chunk {} via circuit entering {}",
-            packet.chunk_index, circuit.entry_addr
+            packet.chunk_index,
+            circuit.entry_addr
         );
 
         let mut stream = TcpStream::connect(circuit.entry_addr).await?;
@@ -309,7 +324,11 @@ mod tests {
     }
 
     /// Helper to spawn a dummy destination that collects received packets
-    async fn spawn_receiver() -> (SocketAddr, tokio::sync::mpsc::Receiver<EncryptedChunkPacket>, JoinHandle<()>) {
+    async fn spawn_receiver() -> (
+        SocketAddr,
+        tokio::sync::mpsc::Receiver<EncryptedChunkPacket>,
+        JoinHandle<()>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -318,7 +337,11 @@ mod tests {
             loop {
                 // Short timeout to allow clean shutdown during tests if needed,
                 // but usually we just drop it or let the test end.
-                let accept_res = tokio::time::timeout(tokio::time::Duration::from_millis(500), listener.accept()).await;
+                let accept_res = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(500),
+                    listener.accept(),
+                )
+                .await;
                 if let Ok(Ok((mut stream, _))) = accept_res {
                     if let Ok(packet) = recv_packet(&mut stream).await {
                         if tx.send(packet).await.is_err() {
@@ -337,8 +360,10 @@ mod tests {
     async fn test_single_hop_relay() {
         let (dest_addr, mut rx, _rx_handle) = spawn_receiver().await;
 
-        let relay = spawn_relay("127.0.0.1:0".parse().unwrap(), dest_addr, 10, 50).await.unwrap();
-        
+        let relay = spawn_relay("127.0.0.1:0".parse().unwrap(), dest_addr, 10, 50)
+            .await
+            .unwrap();
+
         let mut client_stream = TcpStream::connect(relay.listen_addr).await.unwrap();
         let packet = dummy_packet(42);
         send_packet(&mut client_stream, &packet).await.unwrap();
@@ -374,7 +399,9 @@ mod tests {
         let (d2, mut rx2, _) = spawn_receiver().await;
         let (d3, mut rx3, _) = spawn_receiver().await;
 
-        let router = create_multipath_router(vec![d1, d2, d3], 2, 5, 10).await.unwrap();
+        let router = create_multipath_router(vec![d1, d2, d3], 2, 5, 10)
+            .await
+            .unwrap();
         assert_eq!(router.circuits.len(), 3);
 
         // Send 6 chunks
@@ -408,6 +435,8 @@ mod tests {
 
     // Helper for test timeouts
     async fn res_timeout<T>(fut: impl std::future::Future<Output = T>) -> Option<T> {
-        tokio::time::timeout(tokio::time::Duration::from_secs(2), fut).await.ok()
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), fut)
+            .await
+            .ok()
     }
 }

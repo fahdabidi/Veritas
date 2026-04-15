@@ -61,7 +61,10 @@ fn test_lazy_repair_flow_i_have_to_i_want_to_data() {
 
     let gossip_back = sender.on_request(sender_peer, i_want[0].request.clone());
     assert_eq!(gossip_back.len(), 1);
-    assert!(matches!(gossip_back[0].request, GossipRequest::GossipData { .. }));
+    assert!(matches!(
+        gossip_back[0].request,
+        GossipRequest::GossipData { .. }
+    ));
 
     let forward = receiver.on_request(sender_peer, gossip_back[0].request.clone());
     // Fresh data is accepted and can trigger forwarding; at minimum it should be seen.

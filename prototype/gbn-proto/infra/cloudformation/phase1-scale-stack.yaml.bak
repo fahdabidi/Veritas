@@ -512,11 +512,11 @@ Resources:
               Value: '20'
             # Phase 2: circuit build parameters
             - Name: GBN_CIRCUIT_DELAY_SECS
-              Value: '120'
+              Value: '60'
             - Name: GBN_CIRCUIT_PATHS
-              Value: '1'
+              Value: '10'
             - Name: GBN_CIRCUIT_HOPS
-              Value: '1'
+              Value: '3'
             - Name: GBN_UPLOAD_SIZE_BYTES
               Value: '1048576'
             - Name: GBN_ONION_PORT
@@ -921,4 +921,3 @@ Outputs:
   CostGuardrailNote:
     Description: Reminder for stack policy/TTL enforcement
     Value: !Sub 'Apply a stack policy on create/update and tear down within ${MaxTestDurationHours}h.'
-

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# run-chaos-upload.sh — Wait for stabilization at full scale, enable chaos rule, then trigger creator upload.
+# run-chaos-upload.sh — Wait for stabilization at full scale, optionally enable chaos,
+# then trigger creator upload.
 #
 # Usage: ./run-chaos-upload.sh <stack-name> [region] [upload-command]
 
@@ -18,6 +19,8 @@ fi
 STACK_NAME="${1:?Usage: $0 <stack-name> [region] [upload-command]}"
 REGION="${2:-us-east-1}"
 UPLOAD_COMMAND="${3:-echo 'gbn-creator-healthy'}"
+ENABLE_CHAOS="${ENABLE_CHAOS:-1}"
+CHAOS_NORMALIZED="$(printf "%s" "$ENABLE_CHAOS" | tr '[:upper:]' '[:lower:]')"
 POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-10}"
 POLL_TIMEOUT_SECONDS="${POLL_TIMEOUT_SECONDS:-1200}"
 # How long to let the gossip network run under chaos before tearing down (seconds).
@@ -34,7 +37,7 @@ cf_resource_id() {
     --region "$REGION" \
     --logical-resource-id "$logical_id" \
     --query 'StackResources[0].PhysicalResourceId' \
-    --output text
+    --output text | tr -d '\r'
 }
 
 # Derive numeric scale from stack name suffix (e.g. gbn-proto-phase1-scale-n100 → 100).
@@ -80,8 +83,8 @@ PY
 
 running_sum_latest() {
   local hostile_running free_running
-  hostile_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$HOSTILE_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null || echo 0)"
-  free_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$FREE_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null || echo 0)"
+  hostile_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$HOSTILE_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null | tr -d '\r' | sed 's/[^0-9]//g' || echo 0)"
+  free_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$FREE_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null | tr -d '\r' | sed 's/[^0-9]//g' || echo 0)"
   hostile_running="${hostile_running:-0}"
   free_running="${free_running:-0}"
   echo $((hostile_running + free_running))
@@ -106,8 +109,10 @@ if [ -z "$CLUSTER_NAME" ] || [ -z "$CHAOS_RULE_NAME" ] || [ -z "$CREATOR_SERVICE
 fi
 
 echo "[2/5] Stabilization Gate 2 (ECS running tasks >90% full scale; BootstrapResult for diagnostics)..."
-HOSTILE_DESIRED="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$HOSTILE_SERVICE_NAME" --region "$REGION" --query 'services[0].desiredCount' --output text)"
-FREE_DESIRED="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$FREE_SERVICE_NAME" --region "$REGION" --query 'services[0].desiredCount' --output text)"
+HOSTILE_DESIRED="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$HOSTILE_SERVICE_NAME" --region "$REGION" --query 'services[0].desiredCount' --output text | tr -d '\r' | sed 's/[^0-9]//g')"
+FREE_DESIRED="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$FREE_SERVICE_NAME" --region "$REGION" --query 'services[0].desiredCount' --output text | tr -d '\r' | sed 's/[^0-9]//g')"
+HOSTILE_DESIRED="${HOSTILE_DESIRED:-0}"
+FREE_DESIRED="${FREE_DESIRED:-0}"
 TOTAL_DESIRED=$((HOSTILE_DESIRED + FREE_DESIRED))
 THRESHOLD=$((TOTAL_DESIRED * 90 / 100))
 if [ "$THRESHOLD" -lt 1 ]; then THRESHOLD=1; fi
@@ -146,11 +151,19 @@ while true; do
   sleep "$POLL_INTERVAL_SECONDS"
 done
 
-echo "[3/5] Enabling chaos rule: $CHAOS_RULE_NAME"
-aws events enable-rule --name "$CHAOS_RULE_NAME" --region "$REGION"
+if [ "$CHAOS_NORMALIZED" = "1" ] || [ "$CHAOS_NORMALIZED" = "true" ] || [ "$CHAOS_NORMALIZED" = "yes" ] || [ "$CHAOS_NORMALIZED" = "on" ]; then
+  echo "[3/5] Enabling chaos rule: $CHAOS_RULE_NAME"
+  aws events enable-rule --name "$CHAOS_RULE_NAME" --region "$REGION"
+else
+  echo "[3/5] Chaos disabled (ENABLE_CHAOS=$ENABLE_CHAOS) - skipping chaos engine enable"
+fi
 
-echo "[4/5] Waiting ${CHAOS_OBSERVE_SECONDS}s for chaos churn + gossip propagation..."
-sleep "$CHAOS_OBSERVE_SECONDS"
+if [ "$CHAOS_NORMALIZED" = "1" ] || [ "$CHAOS_NORMALIZED" = "true" ] || [ "$CHAOS_NORMALIZED" = "yes" ] || [ "$CHAOS_NORMALIZED" = "on" ]; then
+  echo "[4/5] Waiting ${CHAOS_OBSERVE_SECONDS}s for chaos churn + gossip propagation..."
+  sleep "$CHAOS_OBSERVE_SECONDS"
+else
+  echo "[4/5] Skipping chaos wait window (ENABLE_CHAOS=$ENABLE_CHAOS)"
+fi
 
 echo "[5/5] Executing upload command in creator task..."
 CREATOR_TASK_ARN="$(aws ecs list-tasks --cluster "$CLUSTER_NAME" --service-name "$CREATOR_SERVICE_NAME" --desired-status RUNNING --region "$REGION" --query 'taskArns[0]' --output text)"
@@ -159,16 +172,27 @@ if [ -z "$CREATOR_TASK_ARN" ] || [ "$CREATOR_TASK_ARN" = "None" ]; then
   exit 1
 fi
 
-aws ecs execute-command \
-  --cluster "$CLUSTER_NAME" \
-  --task "$CREATOR_TASK_ARN" \
-  --container creator \
-  --interactive \
-  --command "sh -lc '$UPLOAD_COMMAND'" \
-  --region "$REGION" || echo "  [WARN] execute-command failed (SSM plugin may not be installed locally; creator gossip auto-publish is unaffected)"
+if aws ecs execute-command \
+    --cluster "$CLUSTER_NAME" \
+    --task "$CREATOR_TASK_ARN" \
+    --container creator \
+    --interactive \
+    --command "sh -lc '$UPLOAD_COMMAND'" \
+    --region "$REGION"; then
+  echo "  execute-command completed."
+else
+  echo "  [WARN] execute-command unavailable (SSM plugin not installed or ECS Exec not yet ready)."
+  echo "  Falling back to a 480s wait so the creator can complete circuit build + upload..."
+  sleep 480
+fi
 
 echo ""
-echo "✅ Chaos enabled and creator upload command executed."
-echo "   Cluster: $CLUSTER_NAME"
-echo "   Chaos rule: $CHAOS_RULE_NAME"
+if [ "$CHAOS_NORMALIZED" = "1" ] || [ "$CHAOS_NORMALIZED" = "true" ] || [ "$CHAOS_NORMALIZED" = "yes" ] || [ "$CHAOS_NORMALIZED" = "on" ]; then
+  echo "✅ Chaos enabled and creator upload command executed."
+  echo "   Cluster: $CLUSTER_NAME"
+  echo "   Chaos rule: $CHAOS_RULE_NAME"
+else
+  echo "✅ Creator upload command executed in stable (no-chaos) mode."
+  echo "   Cluster: $CLUSTER_NAME"
+fi
 echo "   Creator task: $CREATOR_TASK_ARN"

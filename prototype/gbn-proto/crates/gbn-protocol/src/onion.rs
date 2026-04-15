@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 pub enum OnionCell {
     /// Request the current node to dial a new downstream hop.
     RelayExtend(ExtendPayload),
-    
+
     /// Inform the client that the extension succeeded or failed.
     RelayExtended(ExtendedPayload),
 

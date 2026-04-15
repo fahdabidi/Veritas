@@ -41,6 +41,9 @@ pub enum ChunkerError {
     #[error("Input file is empty")]
     EmptyFile,
 
+    #[error("Input data is empty")]
+    EmptyInput,
+
     #[error("Chunk index {index} out of range (expected < {total})")]
     IndexOutOfRange { index: usize, total: usize },
 
@@ -225,6 +228,88 @@ where
     })
 }
 
+// ─────────────────────────── In-Memory Chunking ──────────────────────────
+
+/// Split raw bytes into fixed-size chunks, returning all chunk data and a manifest.
+///
+/// Identical to [`chunk_file`] but operates on an in-memory `&[u8]` instead of
+/// a file path. Used in ECS where the synthetic payload is generated in memory.
+///
+/// # Arguments
+/// - `data` — raw bytes to chunk
+/// - `chunk_size` — size of each chunk in bytes (default: `DEFAULT_MCN_CHUNK_SIZE`)
+///
+/// # Returns
+/// `(chunks, manifest)` where `chunks[i]` corresponds to `manifest.chunks[i]`.
+/// All chunks are exactly `chunk_size` bytes (zero-padded); use
+/// `manifest.chunks[i].size` for actual payload length.
+pub fn chunk_bytes(
+    data: &[u8],
+    chunk_size: usize,
+) -> Result<(Vec<Vec<u8>>, ChunkManifest), ChunkerError> {
+    let chunk_size = if chunk_size == 0 {
+        DEFAULT_MCN_CHUNK_SIZE
+    } else {
+        chunk_size
+    };
+
+    if data.is_empty() {
+        return Err(ChunkerError::EmptyInput);
+    }
+
+    let mut session_id = [0u8; 16];
+    OsRng.fill_bytes(&mut session_id);
+
+    let mut chunks = Vec::new();
+    let mut chunk_infos = Vec::new();
+    let mut file_hasher = Hasher::new();
+    let mut index: u32 = 0;
+    let mut offset = 0usize;
+    let total_size = data.len() as u64;
+
+    while offset < data.len() {
+        let end = (offset + chunk_size).min(data.len());
+        let actual_size = (end - offset) as u32;
+
+        // Update whole-payload hasher with real (un-padded) data
+        file_hasher.update(&data[offset..end]);
+
+        // Zero-pad to chunk_size
+        let mut buf = vec![0u8; chunk_size];
+        buf[..actual_size as usize].copy_from_slice(&data[offset..end]);
+
+        let chunk_hash: [u8; 32] = *blake3::hash(&buf).as_bytes();
+
+        chunk_infos.push(ChunkInfo {
+            index,
+            hash: chunk_hash,
+            size: actual_size,
+        });
+        chunks.push(buf);
+        index += 1;
+        offset = end;
+    }
+
+    let content_hash: [u8; 32] = *file_hasher.finalize().as_bytes();
+
+    let manifest = ChunkManifest {
+        session_id,
+        total_chunks: index,
+        content_hash,
+        total_size,
+        chunks: chunk_infos,
+    };
+
+    Ok((chunks, manifest))
+}
+
+/// Compute BLAKE3 hash of raw bytes.
+///
+/// Equivalent to [`hash_file`] but for in-memory data.
+pub fn hash_bytes(data: &[u8]) -> [u8; 32] {
+    *blake3::hash(data).as_bytes()
+}
+
 // ─────────────────────────── Reassembly ──────────────────────────────────
 
 /// Reassemble chunks back into the original file, stripping padding from the
@@ -332,8 +417,16 @@ mod tests {
         reassemble_chunks(&chunks, &manifest, out.path()).unwrap();
 
         let reassembled = std::fs::read(out.path()).unwrap();
-        assert_eq!(reassembled.len(), content.len(), "Reassembled length mismatch");
-        assert_eq!(sha256(&reassembled), sha256(&content), "Content hash mismatch");
+        assert_eq!(
+            reassembled.len(),
+            content.len(),
+            "Reassembled length mismatch"
+        );
+        assert_eq!(
+            sha256(&reassembled),
+            sha256(&content),
+            "Content hash mismatch"
+        );
     }
 
     // T-CHUNK-2: file not divisible by chunk_size — last chunk padded, but
@@ -350,14 +443,25 @@ mod tests {
         assert_eq!(manifest.total_chunks, 3, "Expected 3 chunks");
         assert_eq!(chunks[0].len(), chunk_size, "Chunk 0 wrong size");
         assert_eq!(chunks[1].len(), chunk_size, "Chunk 1 wrong size");
-        assert_eq!(chunks[2].len(), chunk_size, "Chunk 2 should be padded to chunk_size");
-        assert_eq!(manifest.chunks[2].size, 500, "Last chunk actual size should be 500");
+        assert_eq!(
+            chunks[2].len(),
+            chunk_size,
+            "Chunk 2 should be padded to chunk_size"
+        );
+        assert_eq!(
+            manifest.chunks[2].size, 500,
+            "Last chunk actual size should be 500"
+        );
 
         let out = NamedTempFile::new().unwrap();
         reassemble_chunks(&chunks, &manifest, out.path()).unwrap();
         let reassembled = std::fs::read(out.path()).unwrap();
 
-        assert_eq!(reassembled.len(), 2500, "Reassembled should be exactly 2500 bytes");
+        assert_eq!(
+            reassembled.len(),
+            2500,
+            "Reassembled should be exactly 2500 bytes"
+        );
         assert_eq!(sha256(&reassembled), sha256(&content));
     }
 
@@ -432,7 +536,10 @@ mod tests {
 
         // Same chunk data
         for i in 0..batch_chunks.len() {
-            assert_eq!(batch_chunks[i], streaming_chunks[i], "Chunk {i} data differs");
+            assert_eq!(
+                batch_chunks[i], streaming_chunks[i],
+                "Chunk {i} data differs"
+            );
         }
     }
 

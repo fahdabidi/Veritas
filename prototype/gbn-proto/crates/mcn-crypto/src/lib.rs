@@ -82,6 +82,15 @@ impl PublisherSecret {
 
 // ─────────────────────────── Key Generation ───────────────────────────────
 
+/// Derive the X25519 public key from a 32-byte private key seed.
+///
+/// Used by relay nodes to register their Noise_XX identity in Cloud Map
+/// without requiring separate public key material. The private key is generated
+/// once per container startup (in `entrypoint.sh`) via `openssl rand -hex 32`.
+pub fn x25519_pubkey_from_privkey(privkey: &[u8; 32]) -> [u8; 32] {
+    X25519PubKey::from(&StaticSecret::from(*privkey)).to_bytes()
+}
+
 /// Generate a new Publisher keypair.
 ///
 /// Returns `(secret, x25519_public_key_bytes)`. The Publisher distributes the
@@ -270,10 +279,7 @@ mod tests {
         [0xab; 32]
     }
 
-    fn make_session(
-        publisher_pub: &X25519PublicKey,
-        chunks: u32,
-    ) -> UploadSession {
+    fn make_session(publisher_pub: &X25519PublicKey, chunks: u32) -> UploadSession {
         create_upload_session(publisher_pub, chunks, dummy_hash()).unwrap()
     }
 
@@ -313,7 +319,10 @@ mod tests {
         // Decrypt in reverse order to prove order independence
         for i in (0..num_chunks as usize).rev() {
             let decrypted = decrypt_chunk(&secret, &session.session_init, &packets[i]).unwrap();
-            assert_eq!(decrypted, chunks[i], "Chunk {i} failed to decrypt correctly");
+            assert_eq!(
+                decrypted, chunks[i],
+                "Chunk {i} failed to decrypt correctly"
+            );
         }
     }
 
@@ -365,12 +374,7 @@ mod tests {
 
         let data = vec![0u8; 64];
         let nonces: Vec<[u8; 12]> = (0..num_chunks)
-            .map(|i| {
-                session
-                    .encrypt_chunk(i, &data, dummy_hash())
-                    .unwrap()
-                    .nonce
-            })
+            .map(|i| session.encrypt_chunk(i, &data, dummy_hash()).unwrap().nonce)
             .collect();
 
         // All nonces must be distinct

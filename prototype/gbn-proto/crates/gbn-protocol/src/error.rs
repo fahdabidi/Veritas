@@ -6,10 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("Chunk integrity verification failed: expected {expected}, got {actual}")]
-    ChunkIntegrityFailure {
-        expected: String,
-        actual: String,
-    },
+    ChunkIntegrityFailure { expected: String, actual: String },
 
     #[error("AES-GCM decryption failed: authentication tag mismatch (chunk may be tampered)")]
     DecryptionAuthFailure,

@@ -31,7 +31,8 @@ pub struct RelayDescriptor {
 impl RelayDescriptor {
     /// Verify that the RelayDescriptor represents a cryptographically sound record.
     pub fn verify(&self) -> Result<(), DhtError> {
-        let public_key = VerifyingKey::from_bytes(&self.identity_key).map_err(DhtError::DalekError)?;
+        let public_key =
+            VerifyingKey::from_bytes(&self.identity_key).map_err(DhtError::DalekError)?;
         let sig = Signature::from_bytes(&self.signature);
 
         let mut signed_data = Vec::new();

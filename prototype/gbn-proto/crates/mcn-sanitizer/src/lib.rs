@@ -80,9 +80,7 @@ pub fn sanitize_video(
     let in_p = input_path.as_ref();
     let out_p = output_path.as_ref();
 
-    let input_size = std::fs::metadata(in_p)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let input_size = std::fs::metadata(in_p).map(|m| m.len()).unwrap_or(0);
 
     let start = std::time::Instant::now();
 
@@ -114,9 +112,7 @@ pub fn sanitize_video(
         ));
     }
 
-    let output_size = std::fs::metadata(out_p)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let output_size = std::fs::metadata(out_p).map(|m| m.len()).unwrap_or(0);
 
     Ok(SanitizeReport {
         input_size,
@@ -157,23 +153,27 @@ pub fn verify_sanitized(path: impl AsRef<Path>) -> Result<Vec<LeakedField>, Sani
                 let lower_key = key.to_lowercase();
                 // FFmpeg bitexact flag leaves some identifying encoder strings,
                 // and we set creation_time manually.
-                if lower_key == "encoder" || lower_key == "major_brand" || lower_key == "minor_version" || lower_key == "compatible_brands" {
-                    continue; 
+                if lower_key == "encoder"
+                    || lower_key == "major_brand"
+                    || lower_key == "minor_version"
+                    || lower_key == "compatible_brands"
+                {
+                    continue;
                 }
-                
+
                 let val_str = value.as_str().unwrap_or("unknown").to_string();
                 if lower_key == "creation_time" && !val_str.starts_with("2000-01-01") {
-                   leaked.push(LeakedField {
-                       scope: "format.tags".into(),
-                       key: key.clone(),
-                       value: val_str,
-                   });
+                    leaked.push(LeakedField {
+                        scope: "format.tags".into(),
+                        key: key.clone(),
+                        value: val_str,
+                    });
                 } else if lower_key != "creation_time" {
-                   leaked.push(LeakedField {
-                       scope: "format.tags".into(),
-                       key: key.clone(),
-                       value: val_str,
-                   });
+                    leaked.push(LeakedField {
+                        scope: "format.tags".into(),
+                        key: key.clone(),
+                        value: val_str,
+                    });
                 }
             }
         }
@@ -186,14 +186,17 @@ pub fn verify_sanitized(path: impl AsRef<Path>) -> Result<Vec<LeakedField>, Sani
                 for (key, value) in tags {
                     let lower_key = key.to_lowercase();
                     // Some basic format identifying metadata gets placed here by bitexact
-                    if lower_key == "language" || lower_key == "handler_name" || lower_key == "vendor_id" {
-                         continue;
+                    if lower_key == "language"
+                        || lower_key == "handler_name"
+                        || lower_key == "vendor_id"
+                    {
+                        continue;
                     }
                     if lower_key == "creation_time" {
-                         let val_str = value.as_str().unwrap_or("");
-                         if val_str.starts_with("2000-01-01") {
-                             continue;
-                         }
+                        let val_str = value.as_str().unwrap_or("");
+                        if val_str.starts_with("2000-01-01") {
+                            continue;
+                        }
                     }
 
                     leaked.push(LeakedField {
@@ -232,16 +235,20 @@ mod tests {
         // 1. Generate a test video containing "bad" metadata (author, gps) using ffmpeg
         let input_file = NamedTempFile::new().unwrap();
         let in_path = input_file.path().with_extension("mp4");
-        
+
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-y", "-f", "lavfi", "-i", "color=c=red:s=320x240:d=1"]);
         cmd.args(["-metadata", "author=Jane Doe Privacy Leak"]);
         cmd.args(["-metadata", "location=+37.7749-122.4194/"]);
         cmd.args(["-metadata", "title=Secret Protest Footage"]);
         cmd.arg(&in_path);
-        
+
         let gen_res = cmd.output().unwrap();
-        assert!(gen_res.status.success(), "Failed to generate test video: {}", String::from_utf8_lossy(&gen_res.stderr));
+        assert!(
+            gen_res.status.success(),
+            "Failed to generate test video: {}",
+            String::from_utf8_lossy(&gen_res.stderr)
+        );
 
         // Let's verify it actually contains leaked fields before sanitizing
         let pre_leaks = verify_sanitized(&in_path).unwrap();
@@ -252,20 +259,24 @@ mod tests {
         // 2. Sanitize the video
         let output_file = NamedTempFile::new().unwrap();
         let out_path = output_file.path().with_extension("mp4");
-        
+
         let report = sanitize_video(&in_path, &out_path).unwrap();
         assert!(report.output_size > 0);
 
         // 3. Verify sanitization
         let post_leaks = verify_sanitized(&out_path).unwrap();
-        
+
         // Output any leaked fields for debugging
         for l in &post_leaks {
             println!("LEAK: {l:?}");
         }
 
-        assert!(post_leaks.is_empty(), "Expected no leaked fields, got {} leaks", post_leaks.len());
-        
+        assert!(
+            post_leaks.is_empty(),
+            "Expected no leaked fields, got {} leaks",
+            post_leaks.len()
+        );
+
         // Clean up extensions
         let _ = std::fs::remove_file(in_path);
         let _ = std::fs::remove_file(out_path);

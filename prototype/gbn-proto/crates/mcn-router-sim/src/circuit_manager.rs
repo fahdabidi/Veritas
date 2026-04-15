@@ -23,19 +23,21 @@ use gbn_protocol::onion::{
     DataPayload, ExtendPayload, ExtendedPayload, HeartbeatPayload, OnionCell,
 };
 use mcn_crypto::noise::{build_initiator, complete_handshake, encrypt_frame};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
     time::Duration,
 };
+use tokio::time::Instant;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{mpsc, Mutex},
     time::timeout,
 };
-use tokio::time::Instant;
 
 use crate::observability::publish_circuit_build_result_from_env;
 use crate::relay_engine::{recv_cell, send_cell};
@@ -75,6 +77,10 @@ pub struct OnionCircuit {
     transports: Vec<snow::TransportState>,
     /// Address of the Guard (used for disjoint rebuild check).
     pub guard_addr: SocketAddr,
+    /// Address of the Middle relay.
+    pub middle_addr: SocketAddr,
+    /// Address of the Exit relay (FreeSubnet only).
+    pub exit_addr: SocketAddr,
 }
 
 // ─────────────────────────── Circuit Builder ───────────────────────────────
@@ -143,13 +149,15 @@ pub async fn build_circuit(
             OnionCell::RelayExtended(p) => p,
             other => anyhow::bail!("Expected RelayExtended for Middle, got {:?}", other),
         };
-        tracing::debug!("Middle extension confirmed; remote static: {} bytes", middle_hs_response.len());
+        tracing::debug!(
+            "Middle extension confirmed; remote static: {} bytes",
+            middle_hs_response.len()
+        );
 
         // Complete the Middle handshake state (remaining turns after initial message)
-        let middle_transport =
-            complete_handshake(&mut guard_stream, middle_hs, false)
-                .await
-                .context("Noise_XX handshake continuation for Middle failed")?;
+        let middle_transport = complete_handshake(&mut guard_stream, middle_hs, false)
+            .await
+            .context("Noise_XX handshake continuation for Middle failed")?;
 
         // ── Step 3: Extend to Exit through Guard→Middle ───────────────────────
         tracing::info!("Extending circuit to Exit {}", exit.addr);
@@ -186,13 +194,17 @@ pub async fn build_circuit(
 
         tracing::info!(
             "Circuit built: {} → {} → {}",
-            guard.addr, middle.addr, exit.addr
+            guard.addr,
+            middle.addr,
+            exit.addr
         );
 
         Ok(OnionCircuit {
             guard_stream,
             transports: vec![guard_transport, middle_transport, exit_transport],
             guard_addr: guard.addr,
+            middle_addr: middle.addr,
+            exit_addr: exit.addr,
         })
     }
     .await;
@@ -275,8 +287,8 @@ impl CircuitManager {
         // Wrap payload in nested encryption layers (Exit → Middle → Guard)
         let mut wrapped = payload;
         for transport in circuit.transports.iter_mut().rev() {
-            wrapped = encrypt_frame(transport, &wrapped)
-                .context("Failed to encrypt chunk layer")?;
+            wrapped =
+                encrypt_frame(transport, &wrapped).context("Failed to encrypt chunk layer")?;
         }
 
         send_cell(
@@ -295,7 +307,11 @@ impl CircuitManager {
     pub async fn ack_chunk(&self, chunk_index: u32) {
         let mut q = self.inflight_queue.lock().await;
         q.retain(|(idx, _)| *idx != chunk_index);
-        tracing::debug!("ACKed chunk {}; in-flight remaining: {}", chunk_index, q.len());
+        tracing::debug!(
+            "ACKed chunk {}; in-flight remaining: {}",
+            chunk_index,
+            q.len()
+        );
     }
 
     /// Process any pending circuit-failure signals.
@@ -308,7 +324,10 @@ impl CircuitManager {
         let mut dead = Vec::new();
 
         while let Ok(dead_idx) = rx.try_recv() {
-            tracing::warn!("Circuit {} declared dead — collecting in-flight chunks", dead_idx);
+            tracing::warn!(
+                "Circuit {} declared dead — collecting in-flight chunks",
+                dead_idx
+            );
             dead.push(dead_idx);
         }
 
@@ -407,11 +426,41 @@ pub fn select_exit_candidates(all_peers: &[RelayNode]) -> Vec<RelayNode> {
         .collect()
 }
 
-pub fn select_exit_candidates_from_descriptors(
-    descriptors: &[RelayDescriptor],
-) -> Vec<RelayNode> {
+pub fn select_exit_candidates_from_descriptors(descriptors: &[RelayDescriptor]) -> Vec<RelayNode> {
     let all_peers = relay_nodes_from_descriptors(descriptors);
     select_exit_candidates(&all_peers)
+}
+
+/// Verify that all circuits use disjoint relay sets (no relay IP appears twice).
+///
+/// Logs each circuit's hops in the format required by test-spec §5.5:
+/// `Circuit N: guard=<ip> middle=<ip> exit=<ip>`
+/// then logs `Path diversity: PASS/FAIL (unique=X / total=Y)`.
+///
+/// Returns `true` if all guard/middle/exit addresses across all circuits are unique.
+pub fn log_path_diversity(circuits: &[OnionCircuit]) -> bool {
+    let mut all_addrs: Vec<SocketAddr> = Vec::with_capacity(circuits.len() * 3);
+    for (i, c) in circuits.iter().enumerate() {
+        tracing::info!(
+            "Circuit {}: guard={} middle={} exit={}",
+            i,
+            c.guard_addr,
+            c.middle_addr,
+            c.exit_addr
+        );
+        all_addrs.push(c.guard_addr);
+        all_addrs.push(c.middle_addr);
+        all_addrs.push(c.exit_addr);
+    }
+    let unique: HashSet<_> = all_addrs.iter().collect();
+    let ok = unique.len() == all_addrs.len();
+    tracing::info!(
+        "Path diversity: {} (unique={}/{})",
+        if ok { "PASS" } else { "FAIL" },
+        unique.len(),
+        all_addrs.len()
+    );
+    ok
 }
 
 pub async fn build_circuits_speculative(
@@ -436,14 +485,20 @@ pub async fn build_circuits_speculative(
     }
 
     let mut winners = Vec::new();
-    let mut used_guards = HashSet::new();
+    let mut used_relay_addrs = HashSet::new();
     while let Some(joined) = joins.join_next().await {
         if let Ok(Ok(c)) = joined {
-            if used_guards.insert(c.guard_addr) {
-                winners.push(c);
-                if winners.len() >= target_count {
-                    break;
-                }
+            let addrs = [c.guard_addr, c.middle_addr, c.exit_addr];
+            if addrs.iter().any(|addr| used_relay_addrs.contains(addr)) {
+                continue;
+            }
+
+            for addr in &addrs {
+                used_relay_addrs.insert(*addr);
+            }
+            winners.push(c);
+            if winners.len() >= target_count {
+                break;
             }
         }
     }
@@ -488,7 +543,7 @@ fn enumerate_speculative_candidates(
     max_concurrent: usize,
 ) -> Vec<(RelayNode, RelayNode, RelayNode)> {
     let mut out = Vec::new();
-    'outer: for guard in all_peers {
+    for guard in all_peers {
         for middle in all_peers {
             if middle.addr == guard.addr {
                 continue;
@@ -498,11 +553,12 @@ fn enumerate_speculative_candidates(
                     continue;
                 }
                 out.push((guard.clone(), middle.clone(), exit.clone()));
-                if out.len() >= max_concurrent {
-                    break 'outer;
-                }
             }
         }
+    }
+    out.shuffle(&mut thread_rng());
+    if out.len() > max_concurrent {
+        out.truncate(max_concurrent);
     }
     out
 }
@@ -518,7 +574,11 @@ mod tests {
             identity_pub: [0u8; 32],
             subnet_tag: tag.to_string(),
         };
-        let peers = vec![mk("HostileSubnet", 1), mk("FreeSubnet", 2), mk("FreeSubnet", 3)];
+        let peers = vec![
+            mk("HostileSubnet", 1),
+            mk("FreeSubnet", 2),
+            mk("FreeSubnet", 3),
+        ];
         let exits = select_exit_candidates(&peers);
         assert_eq!(exits.len(), 2);
         assert!(exits.iter().all(|p| p.subnet_tag == "FreeSubnet"));

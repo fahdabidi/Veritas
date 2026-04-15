@@ -13,9 +13,16 @@ pub type PlumTreeBehaviour = request_response::cbor::Behaviour<GossipRequest, Go
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipRequest {
-    GossipData { message_id: MessageId, payload: Vec<u8> },
-    IHave { message_ids: Vec<MessageId> },
-    IWant { message_ids: Vec<MessageId> },
+    GossipData {
+        message_id: MessageId,
+        payload: Vec<u8>,
+    },
+    IHave {
+        message_ids: Vec<MessageId>,
+    },
+    IWant {
+        message_ids: Vec<MessageId>,
+    },
     Prune,
     Graft,
 }
@@ -142,13 +149,22 @@ impl PlumTreeState {
 
     pub fn expire_missing_older_than(&mut self, ttl: Duration) {
         let now = Instant::now();
-        self.missing_messages.retain(|_, t| now.duration_since(*t) <= ttl);
+        self.missing_messages
+            .retain(|_, t| now.duration_since(*t) <= ttl);
     }
 
-    pub fn bytes_sent_total(&self) -> u64 { self.bytes_sent_total }
-    pub fn messages_seen_total(&self) -> u64 { self.messages_seen_total }
-    pub fn messages_dropped_budget_total(&self) -> u64 { self.messages_dropped_budget_total }
-    pub fn lazy_repairs_total(&self) -> u64 { self.lazy_repairs_total }
+    pub fn bytes_sent_total(&self) -> u64 {
+        self.bytes_sent_total
+    }
+    pub fn messages_seen_total(&self) -> u64 {
+        self.messages_seen_total
+    }
+    pub fn messages_dropped_budget_total(&self) -> u64 {
+        self.messages_dropped_budget_total
+    }
+    pub fn lazy_repairs_total(&self) -> u64 {
+        self.lazy_repairs_total
+    }
 }
 
 impl PlumTreeEngine {
@@ -169,7 +185,11 @@ impl PlumTreeEngine {
         self.state.lazy_peers.insert(peer);
     }
 
-    pub fn publish_local(&mut self, message_id: MessageId, payload: Vec<u8>) -> Vec<OutboundGossip> {
+    pub fn publish_local(
+        &mut self,
+        message_id: MessageId,
+        payload: Vec<u8>,
+    ) -> Vec<OutboundGossip> {
         self.payloads.insert(message_id, payload.clone());
         if !self.state.register_seen(message_id) {
             return Vec::new();
@@ -179,10 +199,16 @@ impl PlumTreeEngine {
 
     pub fn on_request(&mut self, from: PeerId, request: GossipRequest) -> Vec<OutboundGossip> {
         match request {
-            GossipRequest::GossipData { message_id, payload } => {
+            GossipRequest::GossipData {
+                message_id,
+                payload,
+            } => {
                 if !self.state.register_seen(message_id) {
                     // Duplicate on eager edge -> ask sender to PRUNE us.
-                    return vec![OutboundGossip { peer: from, request: GossipRequest::Prune }];
+                    return vec![OutboundGossip {
+                        peer: from,
+                        request: GossipRequest::Prune,
+                    }];
                 }
 
                 self.payloads.insert(message_id, payload.clone());
@@ -204,7 +230,9 @@ impl PlumTreeEngine {
                     self.state.note_lazy_repair(wanted.len());
                     vec![OutboundGossip {
                         peer: from,
-                        request: GossipRequest::IWant { message_ids: wanted },
+                        request: GossipRequest::IWant {
+                            message_ids: wanted,
+                        },
                     }]
                 }
             }
@@ -215,7 +243,10 @@ impl PlumTreeEngine {
                         if self.state.try_account_send(payload.len() + 32) {
                             out.push(OutboundGossip {
                                 peer: from,
-                                request: GossipRequest::GossipData { message_id: id, payload },
+                                request: GossipRequest::GossipData {
+                                    message_id: id,
+                                    payload,
+                                },
                             });
                         }
                     }
@@ -304,7 +335,8 @@ mod tests {
     #[test]
     fn missing_expiry_works() {
         let mut s = PlumTreeState::new(1024, 10);
-        s.missing_messages.insert([3u8; 32], Instant::now() - Duration::from_secs(120));
+        s.missing_messages
+            .insert([3u8; 32], Instant::now() - Duration::from_secs(120));
         s.expire_missing_older_than(Duration::from_secs(1));
         assert!(s.missing_messages.is_empty());
     }
@@ -314,7 +346,12 @@ mod tests {
         let mut e = PlumTreeEngine::new(1024, 10);
         let from = identity::Keypair::generate_ed25519().public().to_peer_id();
         let id = [9u8; 32];
-        let out = e.on_request(from, GossipRequest::IHave { message_ids: vec![id] });
+        let out = e.on_request(
+            from,
+            GossipRequest::IHave {
+                message_ids: vec![id],
+            },
+        );
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0].request, GossipRequest::IWant { .. }));
         assert_eq!(e.state.lazy_repairs_total(), 1);

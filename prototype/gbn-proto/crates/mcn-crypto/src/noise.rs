@@ -8,10 +8,7 @@ pub const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 /// Initialize an Initiator for a Noise_XX handshake.
 /// The Initiator drives the connection, passing their local private key and the
 /// exact remote public key they expect to dial.
-pub fn build_initiator(
-    local_priv: &[u8],
-    remote_pub: &[u8],
-) -> Result<HandshakeState> {
+pub fn build_initiator(local_priv: &[u8], remote_pub: &[u8]) -> Result<HandshakeState> {
     let builder = Builder::new(NOISE_PATTERN.parse()?);
     let state = builder
         .local_private_key(local_priv)
@@ -69,7 +66,9 @@ pub async fn complete_handshake(
         {
             let len = hs.write_message(&[], &mut buf)?;
             let payload = &buf[..len];
-            stream.write_all(&(payload.len() as u32).to_le_bytes()).await?;
+            stream
+                .write_all(&(payload.len() as u32).to_le_bytes())
+                .await?;
             stream.write_all(payload).await?;
             stream.flush().await?;
         } else {

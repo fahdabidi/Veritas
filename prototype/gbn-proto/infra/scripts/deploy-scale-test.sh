@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# deploy-scale-test.sh — Deploy Phase 1 scale stack, seed at 33%, wait for bootstrap, then scale to full target.
+# deploy-scale-test.sh — Deploy Phase 1 scale stack, seed at configurable percentage,
+# wait for bootstrap, then scale to full target.
 #
 # Usage: ./deploy-scale-test.sh <stack-name> [scale-target] [region]
 
@@ -34,6 +35,12 @@ SCALE_TARGET="${2:-100}"
 REGION="${3:-us-east-1}"
 POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-10}"
 POLL_TIMEOUT_SECONDS="${POLL_TIMEOUT_SECONDS:-1200}"
+SEED_PERCENT="${SEED_PERCENT:-30}"
+
+if [ "$SEED_PERCENT" -lt 1 ] || [ "$SEED_PERCENT" -gt 99 ]; then
+  echo "ERROR: SEED_PERCENT must be between 1 and 99."
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROTO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -139,7 +146,7 @@ if [ "$ECR_IMAGE_COUNT" = "0" ] || [ "$ECR_IMAGE_COUNT" = "None" ]; then
   exit 0
 fi
 
-SEED_COUNT=$((SCALE_TARGET / 3))
+SEED_COUNT=$((SCALE_TARGET * SEED_PERCENT / 100))
 if [ "$SEED_COUNT" -lt 1 ]; then SEED_COUNT=1; fi
 HOSTILE_SEED=$((SEED_COUNT * 9 / 10))
 if [ "$HOSTILE_SEED" -lt 1 ]; then HOSTILE_SEED=1; fi
@@ -149,7 +156,7 @@ if [ "$FREE_SEED" -lt 1 ]; then FREE_SEED=1; fi
 FULL_HOSTILE=$((SCALE_TARGET * 9 / 10))
 FULL_FREE=$((SCALE_TARGET - FULL_HOSTILE))
 
-echo "[3/5] Scaling to seed fleet (33%) + creator + publisher..."
+echo "[3/5] Scaling to seed fleet (${SEED_PERCENT}%) + creator + publisher..."
 echo "  Hostile seed: $HOSTILE_SEED"
 echo "  Free seed:    $FREE_SEED"
 aws ecs update-service --cluster "$CLUSTER_NAME" --service "$HOSTILE_SERVICE_NAME" --desired-count "$HOSTILE_SEED" --region "$REGION" >/dev/null

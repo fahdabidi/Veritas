@@ -49,35 +49,36 @@ pub fn decrypt_frame(transport: &mut TransportState, ciphertext: &[u8]) -> Resul
 pub async fn complete_handshake(
     stream: &mut TcpStream,
     mut hs: HandshakeState,
-    initiator: bool,
+    _initiator: bool,
 ) -> Result<TransportState> {
     let mut buf = vec![0u8; 65535];
     let mut msg = vec![0u8; 65535];
-
-    let send_first = initiator;
 
     loop {
         if hs.is_handshake_finished() {
             break;
         }
 
-        if (send_first && hs.get_handshake_hash().len() % 2 == 0)
-            || (!send_first && hs.get_handshake_hash().len() % 2 != 0)
-        {
-            let len = hs.write_message(&[], &mut buf)?;
-            let payload = &buf[..len];
-            stream
-                .write_all(&(payload.len() as u32).to_le_bytes())
-                .await?;
-            stream.write_all(payload).await?;
-            stream.flush().await?;
-        } else {
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await?;
-            let len = u32::from_le_bytes(len_buf) as usize;
-            let raw = &mut msg[..len];
-            stream.read_exact(raw).await?;
-            hs.read_message(raw, &mut buf)?;
+        // Let the Noise state machine determine turn order.
+        // If write is attempted out of turn, Snow returns NotTurnToWrite.
+        match hs.write_message(&[], &mut buf) {
+            Ok(len) => {
+                let payload = &buf[..len];
+                stream
+                    .write_all(&(payload.len() as u32).to_le_bytes())
+                    .await?;
+                stream.write_all(payload).await?;
+                stream.flush().await?;
+            }
+            Err(e) if e.to_string().contains("NotTurnToWrite") => {
+                let mut len_buf = [0u8; 4];
+                stream.read_exact(&mut len_buf).await?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                let raw = &mut msg[..len];
+                stream.read_exact(raw).await?;
+                hs.read_message(raw, &mut buf)?;
+            }
+            Err(e) => return Err(e.into()),
         }
     }
 

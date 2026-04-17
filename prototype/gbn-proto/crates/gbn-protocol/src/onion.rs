@@ -25,6 +25,11 @@ pub struct ExtendPayload {
     pub next_identity_key: [u8; 32],
     /// The first stage of a Noise_XX handshake intended for the next hop.
     pub handshake_payload: Vec<u8>,
+    /// Distributed trace chain ID propagated from the circuit initiator.
+    /// Relays include this in their ring-buffer entries so failures on any hop
+    /// can be correlated back to the originating SendDummy / Creator operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

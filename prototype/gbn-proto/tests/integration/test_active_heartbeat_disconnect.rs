@@ -58,11 +58,11 @@ async fn test_s1_9_heartbeat_fallback_recovers_inflight_chunks() {
     let (exit_addr, exit_pub) = make_relay([0x03u8; 32]).await;
     let _sink = spawn_sink().await;
 
-    let guard1 = RelayNode { addr: guard1_addr, identity_pub: guard1_pub, subnet_tag: "HostileSubnet".into() };
-    let middle = RelayNode { addr: middle_addr, identity_pub: middle_pub, subnet_tag: "HostileSubnet".into() };
-    let exit   = RelayNode { addr: exit_addr,   identity_pub: exit_pub, subnet_tag: "FreeSubnet".into() };
+    let guard1 = RelayNode { addr: guard1_addr, identity_pub: guard1_pub, subnet_tag: "HostileSubnet".into(), last_seen_ms: 0 };
+    let middle = RelayNode { addr: middle_addr, identity_pub: middle_pub, subnet_tag: "HostileSubnet".into(), last_seen_ms: 0 };
+    let exit   = RelayNode { addr: exit_addr,   identity_pub: exit_pub,   subnet_tag: "FreeSubnet".into(),   last_seen_ms: 0 };
 
-    let circuit1 = build_circuit(&creator_key, &guard1, &middle, &exit)
+    let circuit1 = build_circuit(&creator_key, &guard1, &middle, &exit, "")
         .await
         .expect("Initial circuit build should succeed");
 
@@ -98,14 +98,14 @@ async fn test_s1_9_heartbeat_fallback_recovers_inflight_chunks() {
 
     // ── Build a REPLACEMENT circuit with a DISJOINT guard ─────────────────
     let (guard2_addr, guard2_pub) = make_relay([0x04u8; 32]).await; // different key → disjoint
-    let guard2 = RelayNode { addr: guard2_addr, identity_pub: guard2_pub, subnet_tag: "HostileSubnet".into() };
+    let guard2 = RelayNode { addr: guard2_addr, identity_pub: guard2_pub, subnet_tag: "HostileSubnet".into(), last_seen_ms: 0 };
 
     assert_ne!(
         guard2_addr, guard1_addr,
         "S1.9 FAIL: Replacement Guard must be disjoint from failed Guard"
     );
 
-    let circuit2 = build_circuit(&creator_key, &guard2, &middle, &exit)
+    let circuit2 = build_circuit(&creator_key, &guard2, &middle, &exit, "")
         .await
         .expect("Replacement circuit build should succeed");
     manager.add_circuit(circuit2).await;

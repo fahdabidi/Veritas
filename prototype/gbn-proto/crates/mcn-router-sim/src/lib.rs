@@ -13,9 +13,11 @@
 // Remove once toolchain is upgraded beyond the affected version.
 #![allow(dead_code, unused_imports)]
 
+pub mod control;
 pub mod gossip;
 pub mod relay_engine;
 pub mod swarm;
+pub mod trace;
 
 pub mod circuit_manager;
 pub mod observability;

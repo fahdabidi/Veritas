@@ -11,6 +11,18 @@ Parameters:
     AllowedValues: [100, 500, 1000]
     Description: Total relay target for the scale test.
 
+  SeedRelayNoisePrivKey:
+    Type: String
+    Description: 32-byte hex string corresponding to Noise_XX private key for SeedRelay.
+
+  PublisherPrivKeyHex:
+    Type: String
+    Description: 32-byte hex string (ed25519 seed).
+
+  PublisherPubKeyHex:
+    Type: String
+    Description: 32-byte hex string (x25519 pubkey).
+
   ContainerImageRelay:
     Type: String
     Default: ''
@@ -44,6 +56,16 @@ Parameters:
     Default: ''
     Description: Optional S3 key for chaos-controller.zip.
 
+  SeedRelayKeyName:
+    Type: String
+    Default: ''
+    Description: Optional EC2 key pair name for SSH access to SeedRelay and Publisher.
+
+  AdminCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR for SSH/control-plane access from your client.
+
 Mappings:
   ScaleConfig:
     '100':
@@ -62,6 +84,7 @@ Conditions:
   HasChaosLambdaS3: !And
     - !Not [!Equals [!Ref ChaosLambdaS3Bucket, '']]
     - !Not [!Equals [!Ref ChaosLambdaS3Key, '']]
+  HasSeedRelayKeyName: !Not [!Equals [!Ref SeedRelayKeyName, '']]
 
 Resources:
   VPC:
@@ -153,6 +176,14 @@ Resources:
           FromPort: 4001
           ToPort: 4001
           CidrIp: 10.0.0.0/16
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AdminCidr
         # Phase 2: onion relay port (VPC-internal only)
         - IpProtocol: tcp
           FromPort: 9001
@@ -175,7 +206,15 @@ Resources:
           FromPort: 4001
           ToPort: 4001
           CidrIp: 10.0.3.0/24
-        # Phase 2: mpub-receiver port — FreeSubnet exit relays only (enforces geofence)
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AdminCidr
+        # Phase 2: mpub-receiver port - FreeSubnet exit relays only (enforces geofence)
         - IpProtocol: tcp
           FromPort: 7001
           ToPort: 7001
@@ -239,25 +278,176 @@ Resources:
             ]
           }
 
-  CloudMapNamespace:
-    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+  Ec2InstanceRole:
+    Type: AWS::IAM::Role
     Properties:
-      Name: gbn.local
-      Vpc: !Ref VPC
-      Description: Private DNS namespace for GBN scale-test relays
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
 
-  RelayDiscoveryService:
-    Type: AWS::ServiceDiscovery::Service
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
     Properties:
-      Name: relay
-      NamespaceId: !Ref CloudMapNamespace
-      DnsConfig:
-        RoutingPolicy: MULTIVALUE
-        DnsRecords:
-          - Type: A
-            TTL: 30
-      HealthCheckCustomConfig:
-        FailureThreshold: 1
+      Roles:
+        - !Ref Ec2InstanceRole
+
+  SeedRelayInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.small
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64}}'
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      KeyName: !If [HasSeedRelayKeyName, !Ref SeedRelayKeyName, !Ref AWS::NoValue]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 20
+            DeleteOnTermination: true
+      SubnetId: !Ref HostileSubnet
+      PrivateIpAddress: 10.0.1.10
+      SecurityGroupIds:
+        - !Ref RelaySecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-seed-relay'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf update -y
+          dnf install -y docker awscli amazon-ssm-agent
+          systemctl daemon-reload
+          systemctl enable --now amazon-ssm-agent
+          systemctl enable --now docker
+          
+          for i in $(seq 1 10); do
+            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com && break
+            sleep 5
+          done
+
+          cat >/usr/local/bin/gbn-start-seed-relay.sh <<'EOF'
+          #!/bin/bash
+          set -euxo pipefail
+          aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          IMAGE_URI="${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}-gbn-relay:latest"
+          if [ -n "${ContainerImageRelay}" ]; then IMAGE_URI="${ContainerImageRelay}"; fi
+          docker pull "$IMAGE_URI"
+          docker rm -f gbn-seed-relay || true
+          docker run -d --restart always --name gbn-seed-relay --network host \
+            -e GBN_ROLE=relay \
+            -e GBN_P2P_PORT=4001 \
+            -e GBN_ONION_PORT=9001 \
+            -e GBN_CONTROL_PORT=5050 \
+            -e GBN_INSTANCE_IPV4=10.0.1.10 \
+            -e GBN_SUBNET_TAG=HostileSubnet \
+            -e GBN_NOISE_PRIVKEY_HEX=${SeedRelayNoisePrivKey} \
+            -e RUST_LOG=info \
+            "$IMAGE_URI"
+          EOF
+          chmod +x /usr/local/bin/gbn-start-seed-relay.sh
+
+          cat >/etc/systemd/system/gbn-seed-relay.service <<'EOF'
+          [Unit]
+          Description=GBN Seed Relay Container
+          After=network-online.target docker.service
+          Wants=network-online.target
+          Requires=docker.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/gbn-start-seed-relay.sh
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable --now gbn-seed-relay.service
+
+  PublisherInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.small
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64}}'
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      KeyName: !If [HasSeedRelayKeyName, !Ref SeedRelayKeyName, !Ref AWS::NoValue]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 20
+            DeleteOnTermination: true
+      SubnetId: !Ref FreeSubnet
+      PrivateIpAddress: 10.0.3.10
+      SecurityGroupIds:
+        - !Ref PublisherSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-publisher'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf update -y
+          dnf install -y docker awscli amazon-ssm-agent
+          systemctl daemon-reload
+          systemctl enable --now amazon-ssm-agent
+          systemctl enable --now docker
+          
+          for i in $(seq 1 10); do
+            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com && break
+            sleep 5
+          done
+
+          cat >/usr/local/bin/gbn-start-publisher.sh <<'EOF'
+          #!/bin/bash
+          set -euxo pipefail
+          aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          IMAGE_URI="${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}-gbn-relay:latest"
+          if [ -n "${ContainerImageRelay}" ]; then IMAGE_URI="${ContainerImageRelay}"; fi
+          docker pull "$IMAGE_URI"
+          docker rm -f gbn-publisher || true
+          docker run -d --restart always --name gbn-publisher --network host \
+            -e GBN_ROLE=publisher \
+            -e GBN_P2P_PORT=4001 \
+            -e GBN_MPUB_PORT=7001 \
+            -e GBN_CONTROL_PORT=5050 \
+            -e GBN_SEED_IPS=10.0.1.10:4001 \
+            -e GBN_INSTANCE_IPV4=10.0.3.10 \
+            -e GBN_SUBNET_TAG=FreeSubnet \
+            -e GBN_PUBLISHER_KEY_HEX=${PublisherPrivKeyHex} \
+            -e RUST_LOG=info \
+            "$IMAGE_URI"
+          EOF
+          chmod +x /usr/local/bin/gbn-start-publisher.sh
+
+          cat >/etc/systemd/system/gbn-publisher.service <<'EOF'
+          [Unit]
+          Description=GBN Publisher Container
+          After=network-online.target docker.service
+          Wants=network-online.target
+          Requires=docker.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/gbn-start-publisher.sh
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable --now gbn-publisher.service
 
   ECSCluster:
     Type: AWS::ECS::Cluster
@@ -319,6 +509,13 @@ Resources:
               - Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
                 Resource: '*'
               - Effect: Allow
                 Action:
@@ -497,13 +694,13 @@ Resources:
             - Name: GBN_SUBNET_TAG
               Value: HostileSubnet
             - Name: GBN_DISCOVERY_MODE
-              Value: cloudmap
-            - Name: GBN_CLOUDMAP_NAMESPACE
-              Value: gbn.local
-            - Name: GBN_CLOUDMAP_SERVICE
-              Value: relay
-            - Name: GBN_CLOUDMAP_SERVICE_ID
-              Value: !Ref RelayDiscoveryService
+              Value: static
+            - Name: GBN_SEED_IPS
+              Value: 10.0.1.10:4001
+            - Name: GBN_PUBLISHER_IP
+              Value: 10.0.3.10
+            - Name: GBN_PUBLISHER_PUBKEY_HEX
+              Value: !Ref PublisherPubKeyHex
             - Name: GBN_SCALE
               Value: !Ref ScaleTarget
             - Name: GBN_P2P_PORT
@@ -521,61 +718,6 @@ Resources:
               Value: '1048576'
             - Name: GBN_ONION_PORT
               Value: '9001'
-
-  PublisherTaskDefinition:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub '${AWS::StackName}-publisher'
-      RequiresCompatibilities: [FARGATE]
-      NetworkMode: awsvpc
-      Cpu: '256'
-      Memory: '512'
-      ExecutionRoleArn: !GetAtt EcsExecutionRole.Arn
-      TaskRoleArn: !GetAtt EcsTaskRole.Arn
-      ContainerDefinitions:
-        - Name: publisher
-          Image: !If
-            - HasPublisherImageOverride
-            - !Ref ContainerImagePublisher
-            - !Sub '${EcrRepositoryPublisher.RepositoryUri}:latest'
-          Essential: true
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-group: !Ref ECSLogGroup
-              awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: publisher
-          Environment:
-            - Name: GBN_ROLE
-              Value: publisher
-            - Name: GBN_SUBNET_TAG
-              Value: FreeSubnet
-            - Name: GBN_DISCOVERY_MODE
-              Value: cloudmap
-            - Name: GBN_CLOUDMAP_NAMESPACE
-              Value: gbn.local
-            - Name: GBN_CLOUDMAP_SERVICE
-              Value: relay
-            - Name: GBN_CLOUDMAP_SERVICE_ID
-              Value: !Ref RelayDiscoveryService
-            - Name: GBN_SCALE
-              Value: !Ref ScaleTarget
-            - Name: GBN_P2P_PORT
-              Value: '4001'
-            # Phase 2: Publisher private key (from SSM, injected by ECS secrets)
-            - Name: GBN_MPUB_PORT
-              Value: '7001'
-            - Name: GBN_UPLOAD_SIZE_BYTES
-              Value: '1048576'
-          Secrets:
-            - Name: GBN_PUBLISHER_KEY_HEX
-              ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/gbn/proto/publisher-key-hex'
-          PortMappings:
-            - ContainerPort: 4001
-              Protocol: tcp
-            # Phase 2: mpub-receiver listener
-            - ContainerPort: 7001
-              Protocol: tcp
 
   RelayTaskDefinitionHostile:
     Type: AWS::ECS::TaskDefinition
@@ -609,13 +751,9 @@ Resources:
             - Name: GBN_SUBNET_TAG
               Value: HostileSubnet
             - Name: GBN_DISCOVERY_MODE
-              Value: cloudmap
-            - Name: GBN_CLOUDMAP_NAMESPACE
-              Value: gbn.local
-            - Name: GBN_CLOUDMAP_SERVICE
-              Value: relay
-            - Name: GBN_CLOUDMAP_SERVICE_ID
-              Value: !Ref RelayDiscoveryService
+              Value: static
+            - Name: GBN_SEED_IPS
+              Value: 10.0.1.10:4001
             - Name: GBN_SCALE
               Value: !Ref ScaleTarget
             - Name: GBN_P2P_PORT
@@ -663,13 +801,9 @@ Resources:
             - Name: GBN_SUBNET_TAG
               Value: FreeSubnet
             - Name: GBN_DISCOVERY_MODE
-              Value: cloudmap
-            - Name: GBN_CLOUDMAP_NAMESPACE
-              Value: gbn.local
-            - Name: GBN_CLOUDMAP_SERVICE
-              Value: relay
-            - Name: GBN_CLOUDMAP_SERVICE_ID
-              Value: !Ref RelayDiscoveryService
+              Value: static
+            - Name: GBN_SEED_IPS
+              Value: 10.0.1.10:4001
             - Name: GBN_SCALE
               Value: !Ref ScaleTarget
             - Name: GBN_P2P_PORT
@@ -687,7 +821,6 @@ Resources:
 
   HostileRelayService:
     Type: AWS::ECS::Service
-    DependsOn: RelayDiscoveryService
     Properties:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE
@@ -702,7 +835,6 @@ Resources:
 
   FreeRelayService:
     Type: AWS::ECS::Service
-    DependsOn: RelayDiscoveryService
     Properties:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE
@@ -728,20 +860,6 @@ Resources:
           AssignPublicIp: ENABLED
           Subnets: [!Ref HostileSubnet]
           SecurityGroups: [!Ref RelaySecurityGroup]
-
-  PublisherService:
-    Type: AWS::ECS::Service
-    Properties:
-      Cluster: !Ref ECSCluster
-      LaunchType: FARGATE
-      TaskDefinition: !Ref PublisherTaskDefinition
-      DesiredCount: 0
-      EnableExecuteCommand: true
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          AssignPublicIp: ENABLED
-          Subnets: [!Ref FreeSubnet]
-          SecurityGroups: [!Ref PublisherSecurityGroup]
 
   BillingAlarmTopic:
     Type: AWS::SNS::Topic
@@ -902,9 +1020,6 @@ Outputs:
     Description: ECR URI for publisher images
     Value: !GetAtt EcrRepositoryPublisher.RepositoryUri
 
-  RelayDiscoveryServiceId:
-    Description: Cloud Map relay service ID
-    Value: !Ref RelayDiscoveryService
 
   BillingAlarmName:
     Description: Billing alarm name
@@ -921,4 +1036,6 @@ Outputs:
   CostGuardrailNote:
     Description: Reminder for stack policy/TTL enforcement
     Value: !Sub 'Apply a stack policy on create/update and tear down within ${MaxTestDurationHours}h.'
+
+
 

@@ -1,11 +1,10 @@
 use crate::circuit_manager::RelayNode;
 use crate::gossip::{
-    new_plumtree_behaviour, GossipRequest, GossipResponse, MessageId, OutboundGossip,
+    new_plumtree_behaviour, GbnGossipMsg, GossipRequest, GossipResponse, MessageId, OutboundGossip,
     PlumTreeBehaviour, PlumTreeEngine,
 };
 use crate::observability::MetricsReporter;
-use anyhow::Result;
-use aws_sdk_servicediscovery::types::HealthStatusFilter;
+use anyhow::{Context, Result};
 use libp2p::futures::StreamExt;
 use libp2p::{
     identity,
@@ -22,6 +21,7 @@ use std::{
     collections::HashMap,
     env,
     net::{IpAddr, SocketAddr},
+    sync::{Arc, RwLock},
 };
 use tokio::time::Instant;
 
@@ -44,6 +44,13 @@ pub struct GossipRuntime {
     pub creator_seq: u64,
     pub last_rebootstrap: Instant,
     pub rebootstrap_interval: Duration,
+    pub last_announce: Instant,
+    pub seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
+}
+
+pub enum SwarmControlCmd {
+    DumpDht(tokio::sync::mpsc::Sender<Vec<String>>),
+    BroadcastSeed,
 }
 
 pub fn gossip_config_from_env() -> (usize, usize) {
@@ -71,7 +78,7 @@ pub fn max_tracked_peers_from_env() -> usize {
 }
 
 impl GossipRuntime {
-    pub async fn from_env() -> Self {
+    pub async fn from_env(seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>) -> Self {
         let (gossip_bps, max_tracked_messages) = gossip_config_from_env();
         let metrics = MetricsReporter::from_env().await.ok();
         let role = env::var("GBN_ROLE").unwrap_or_else(|_| "relay".to_string());
@@ -98,6 +105,8 @@ impl GossipRuntime {
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(60),
             ),
+            last_announce: Instant::now(),
+            seed_store,
         }
     }
 }
@@ -141,31 +150,7 @@ pub async fn build_swarm(local_key: identity::Keypair) -> Result<Swarm<RouterBeh
         .expect("static multiaddr template");
     swarm.listen_on(listen_addr)?;
 
-    // Stagger startup with a random jitter FIRST to spread both Cloud Map
-    // RegisterInstance API calls AND peer-discovery bootstrapping across a
-    // 0–GBN_BOOTSTRAP_JITTER_SECS window.  Without jitter, all 100 nodes call
-    // RegisterInstance simultaneously, exceeding the 100-TPS Cloud Map limit
-    // and causing silent throttling failures for most nodes.
-    let jitter_max = env::var("GBN_BOOTSTRAP_JITTER_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(20);
-    if jitter_max > 0 {
-        let jitter = rand::thread_rng().gen_range(0..=jitter_max);
-        tracing::info!(
-            "Bootstrap jitter: sleeping {}s before registration and peer discovery",
-            jitter
-        );
-        tokio::time::sleep(Duration::from_secs(jitter)).await;
-    }
-
-    // Register AFTER jitter so API calls are spread over the jitter window
-    // rather than all hitting Cloud Map at T+0.
-    if let Err(e) = register_with_cloudmap(&swarm).await {
-        tracing::warn!("Cloud Map registration failed (will run without relay discovery): {e}");
-    }
-
-    let added = bootstrap_from_cloudmap(&mut swarm).await?;
+    let added = bootstrap_from_static_seeds(&mut swarm).await?;
     tokio::spawn(async move {
         match MetricsReporter::from_env().await {
             Ok(reporter) => {
@@ -183,12 +168,39 @@ pub async fn build_swarm(local_key: identity::Keypair) -> Result<Swarm<RouterBeh
 pub async fn run_swarm_until_ctrl_c(
     swarm: &mut Swarm<RouterBehaviour>,
     runtime: &mut GossipRuntime,
+    mut control_rx: tokio::sync::mpsc::Receiver<SwarmControlCmd>,
 ) -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                let _ = deregister_from_cloudmap().await;
                 break;
+            }
+            Some(cmd) = control_rx.recv() => {
+                match cmd {
+                    SwarmControlCmd::DumpDht(reply_tx) => {
+                        let mut peers = Vec::new();
+                        for bucket in swarm.behaviour_mut().kademlia.kbuckets() {
+                            for entry in bucket.iter() {
+                                peers.push(entry.node.key.preimage().to_string());
+                            }
+                        }
+                        let _ = reply_tx.send(peers).await;
+                    }
+                    SwarmControlCmd::BroadcastSeed => {
+                        tracing::info!("Swarm Control: Executing manual BroadcastSeed from local seed store...");
+                        let nodes: Vec<RelayNode> = runtime.seed_store.read().unwrap().values().cloned().collect();
+                        tracing::info!("Found {} nodes in local seed store for manual BroadcastSeed", nodes.len());
+                        let msg = GbnGossipMsg::DirectorySync(nodes);
+                        if let Ok(payload) = serde_json::to_vec(&msg) {
+                            let mut msg_id = [0u8; 32];
+                            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                            msg_id[0..8].copy_from_slice(&ts.to_le_bytes());
+                            msg_id[8..16].copy_from_slice(&0x5EED_5EED_u64.to_le_bytes()); 
+                            let outbound = runtime.engine.publish_local(msg_id, payload);
+                            send_outbound(swarm, outbound);
+                        }
+                    }
+                }
             }
             res = drive_swarm_once(swarm, runtime) => {
                 res?;
@@ -203,10 +215,93 @@ fn send_outbound(
     outbound: impl IntoIterator<Item = OutboundGossip>,
 ) {
     for msg in outbound {
+        let (kind, bytes) = match &msg.request {
+            GossipRequest::GossipData { payload, .. } => ("GossipData", payload.len()),
+            GossipRequest::IHave { message_ids } => ("IHave", message_ids.len() * 32),
+            GossipRequest::IWant { message_ids } => ("IWant", message_ids.len() * 32),
+            GossipRequest::Prune => ("Prune", 0),
+            GossipRequest::Graft => ("Graft", 0),
+        };
+        #[cfg(feature = "distributed-trace")]
+        let id_chain = match &msg.request {
+            GossipRequest::GossipData { trace, .. } => crate::trace::chain_to_string(&trace.chain),
+            _ => String::new(),
+        };
+        #[cfg(not(feature = "distributed-trace"))]
+        let id_chain = String::new();
+        crate::control::push_packet_meta_trace(
+            "GossipSend",
+            bytes,
+            &format!("{kind} outbound to {}", msg.peer),
+            &id_chain,
+            "outgoing",
+        );
         swarm
             .behaviour_mut()
             .gossip
             .send_request(&msg.peer, msg.request);
+    }
+}
+
+fn apply_seed_update_from_gossip_msg(
+    runtime: &mut GossipRuntime,
+    gbn_msg: GbnGossipMsg,
+    id_chain: &str,
+) {
+    match gbn_msg {
+        GbnGossipMsg::DirectorySync(nodes) => {
+            tracing::info!("Received DirectorySync with {} nodes", nodes.len());
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let mut store = runtime.seed_store.write().unwrap();
+            let mut accepted = 0usize;
+            let mut continuity_events = 0usize;
+            for node in &nodes {
+                let (was_accepted, events) = upsert_seed_store_node(&mut store, node.clone(), now_ms);
+                if was_accepted {
+                    accepted += 1;
+                }
+                continuity_events += events.len();
+                for event in events {
+                    tracing::warn!("Seed-store continuity: {}", event);
+                }
+            }
+            crate::control::push_packet_meta_trace(
+                "InternalAction",
+                accepted * 32,
+                &format!(
+                    "DHT updated: DirectorySync accepted={} continuity_events={}",
+                    accepted, continuity_events
+                ),
+                id_chain,
+                "internal",
+            );
+        }
+        GbnGossipMsg::NodeAnnounce(node) => {
+            tracing::debug!("Received NodeAnnounce from {}", node.addr);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let mut store = runtime.seed_store.write().unwrap();
+            let (was_accepted, events) = upsert_seed_store_node(&mut store, node.clone(), now_ms);
+            for event in events {
+                tracing::warn!("Seed-store continuity: {}", event);
+            }
+            crate::control::push_packet_meta_trace(
+                "InternalAction",
+                if was_accepted { 32 } else { 0 },
+                &format!(
+                    "DHT updated: NodeAnnounce {} accepted={}",
+                    node.addr, was_accepted
+                ),
+                id_chain,
+                "internal",
+            );
+        }
+        _ => {}
     }
 }
 
@@ -220,6 +315,25 @@ pub fn handle_gossip_event(
             request_response::Message::Request {
                 request, channel, ..
             } => {
+                // Peek at GossipData before engine takes ownership
+                let mut id_chain = String::new();
+                if let GossipRequest::GossipData { payload, message_id, .. } = &request {
+                    #[cfg(feature = "distributed-trace")]
+                    if let GossipRequest::GossipData { trace, .. } = &request {
+                        id_chain = crate::trace::chain_to_string(&trace.chain);
+                    }
+                    crate::control::push_packet_meta_trace(
+                        "GossipRecv",
+                        payload.len(),
+                        &format!("GossipData received message_id={}", hex::encode(message_id)),
+                        &id_chain,
+                        "incoming",
+                    );
+                    if let Ok(gbn_msg) = serde_json::from_slice::<GbnGossipMsg>(payload) {
+                        apply_seed_update_from_gossip_msg(runtime, gbn_msg, &id_chain);
+                    }
+                }
+
                 let outbound = runtime.engine.on_request(peer, request);
                 send_outbound(swarm, outbound);
                 let _ = swarm
@@ -230,6 +344,63 @@ pub fn handle_gossip_event(
             request_response::Message::Response { .. } => {}
         }
     }
+}
+
+fn short_key_fingerprint(key: &[u8; 32]) -> String {
+    let hex_key = hex::encode(key);
+    hex_key.chars().take(12).collect()
+}
+
+// Keep the seed-store coherent across relay restarts and IP churn:
+// - one identity key should map to one latest address,
+// - one address should map to the latest announced key.
+// Returns (accepted, continuity_events).
+fn upsert_seed_store_node(
+    store: &mut HashMap<SocketAddr, RelayNode>,
+    mut incoming: RelayNode,
+    now_ms: u64,
+) -> (bool, Vec<String>) {
+    let mut events = Vec::new();
+    incoming.last_seen_ms = now_ms;
+
+    if incoming.identity_pub.iter().all(|b| *b == 0) {
+        events.push(format!(
+            "reject_zero_identity addr={} subnet={}",
+            incoming.addr, incoming.subnet_tag
+        ));
+        return (false, events);
+    }
+
+    if let Some(existing) = store.get(&incoming.addr) {
+        if existing.identity_pub != incoming.identity_pub {
+            events.push(format!(
+                "addr_rekey addr={} old_fp={} new_fp={}",
+                incoming.addr,
+                short_key_fingerprint(&existing.identity_pub),
+                short_key_fingerprint(&incoming.identity_pub),
+            ));
+        }
+    }
+
+    let previous_addr_for_identity = store.iter().find_map(|(addr, node)| {
+        if *addr != incoming.addr && node.identity_pub == incoming.identity_pub {
+            Some(*addr)
+        } else {
+            None
+        }
+    });
+    if let Some(old_addr) = previous_addr_for_identity {
+        store.remove(&old_addr);
+        events.push(format!(
+            "identity_move fp={} old_addr={} new_addr={}",
+            short_key_fingerprint(&incoming.identity_pub),
+            old_addr,
+            incoming.addr
+        ));
+    }
+
+    store.insert(incoming.addr, incoming);
+    (true, events)
 }
 
 pub async fn drive_swarm_once(
@@ -293,12 +464,31 @@ pub async fn drive_swarm_once(
         runtime.engine.state.eager_peers.len() + runtime.engine.state.lazy_peers.len();
     if total_known_peers == 0 && runtime.last_rebootstrap.elapsed() >= runtime.rebootstrap_interval
     {
-        let added = bootstrap_from_cloudmap(swarm).await.unwrap_or(0);
+        let added = bootstrap_from_static_seeds(swarm).await.unwrap_or(0);
         tracing::info!(
-            "Re-bootstrap attempt: discovered {} new peers via Cloud Map",
+            "Re-bootstrap attempt: discovered {} new peers via Static Seeds",
             added
         );
         runtime.last_rebootstrap = Instant::now();
+    }
+
+    // Publish local relay node presence to the Gossip mesh (only for relays)
+    if env::var("GBN_ROLE").unwrap_or_default() == "relay" {
+        if runtime.last_announce.elapsed() >= Duration::from_secs(10) {
+            runtime.last_announce = Instant::now();
+            if let Some(local_node) = get_local_relay_node() {
+                let msg = GbnGossipMsg::NodeAnnounce(local_node);
+                if let Ok(payload) = serde_json::to_vec(&msg) {
+                    let mut msg_id = [0u8; 32];
+                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                    msg_id[0..8].copy_from_slice(&ts.to_le_bytes());
+                    // 0x414E_4E4F is "ANNO"
+                    msg_id[16..24].copy_from_slice(&0x414E_4E4F_u64.to_le_bytes()); 
+                    let outbound = runtime.engine.publish_local(msg_id, payload);
+                    send_outbound(swarm, outbound);
+                }
+            }
+        }
     }
 
     // Creator role: periodically inject a test gossip message to exercise the PlumTree network.
@@ -355,7 +545,7 @@ pub async fn drive_swarm_once(
     Ok(())
 }
 
-pub async fn bootstrap_from_cloudmap(swarm: &mut Swarm<RouterBehaviour>) -> Result<usize> {
+pub async fn bootstrap_from_static_seeds(swarm: &mut Swarm<RouterBehaviour>) -> Result<usize> {
     // Check for Docker DNS fallback mode
     if let Ok(mode) = env::var("GBN_DISCOVERY_MODE") {
         if mode == "docker-dns" {
@@ -363,60 +553,44 @@ pub async fn bootstrap_from_cloudmap(swarm: &mut Swarm<RouterBehaviour>) -> Resu
         }
     }
 
-    let namespace = match env::var("GBN_CLOUDMAP_NAMESPACE") {
+    let seed_ips_str = match env::var("GBN_SEED_IPS") {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(0),
     };
-    let service_name = env::var("GBN_CLOUDMAP_SERVICE_NAME")
-        .or_else(|_| env::var("GBN_CLOUDMAP_SERVICE"))
-        .unwrap_or_else(|_| "relay".to_string());
+
     let p2p_port = env::var("GBN_P2P_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(4001);
 
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = aws_sdk_servicediscovery::Client::new(&config);
-
-    let instances = client
-        .discover_instances()
-        .namespace_name(&namespace)
-        .service_name(&service_name)
-        // Use All rather than Healthy: instances registered via RegisterInstance (without
-        // a Cloud Map health check config) have UNKNOWN health status. The Healthy filter
-        // returns zero results for UNKNOWN-status instances, breaking peer discovery.
-        .health_status(HealthStatusFilter::All)
-        .send()
-        .await?;
-
     let mut added = 0usize;
-    for instance in instances.instances() {
-        let Some(attrs) = instance.attributes() else {
+    for ip_str in seed_ips_str.split(',') {
+        let ip_str = ip_str.trim();
+        if ip_str.is_empty() {
             continue;
-        };
-        let ip: Option<String> = attrs.get("AWS_INSTANCE_IPV4").cloned();
-        let peer_id_str: Option<String> = attrs.get("GBN_PEER_ID").cloned();
-
-        let Some(ip) = ip else { continue };
-        let Ok(ip_addr) = ip.parse::<IpAddr>() else {
-            continue;
+        }
+        
+        let ip_addr: IpAddr = match ip_str.parse() {
+            Ok(a) => a,
+            // fallback, if it includes port
+            Err(_) => {
+                if let Ok(socket_addr) = ip_str.parse::<std::net::SocketAddr>() {
+                    socket_addr.ip()
+                } else {
+                    continue;
+                }
+            }
         };
 
         let mut addr = libp2p::Multiaddr::empty();
         addr.push(Protocol::from(ip_addr));
         addr.push(Protocol::Tcp(p2p_port));
 
-        if let Some(peer_id_str) = peer_id_str {
-            if let Ok(peer_id) = peer_id_str.parse::<libp2p::PeerId>() {
-                swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .add_address(&peer_id, addr.clone());
-            }
-        }
-
-        if swarm.dial(addr).is_ok() {
+        if swarm.dial(addr.clone()).is_ok() {
             added += 1;
+            tracing::info!("Dialed static seed node: {}", addr);
+        } else {
+            tracing::warn!("Failed dialing static seed node: {}", addr);
         }
     }
 
@@ -461,289 +635,70 @@ async fn bootstrap_from_docker_dns(swarm: &mut Swarm<RouterBehaviour>) -> Result
     Ok(added)
 }
 
-pub async fn register_with_cloudmap(swarm: &Swarm<RouterBehaviour>) -> Result<()> {
-    let service_id = match env::var("GBN_CLOUDMAP_SERVICE_ID") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(()),
-    };
+// ────────────────────────── Phase 2: Onion Discovery Helpers ─────────────────────────
 
-    let instance_id = env::var("GBN_CLOUDMAP_INSTANCE_ID")
-        .or_else(|_| env::var("HOSTNAME"))
-        .unwrap_or_else(|_| swarm.local_peer_id().to_string());
+/// Constructs a RelayNode for this process by reading GBN_INSTANCE_IPV4,
+/// GBN_ONION_PORT, GBN_SUBNET_TAG, and deriving the Noise pubkey.
+pub fn get_local_relay_node() -> Option<RelayNode> {
+    let ipv4 = env::var("GBN_INSTANCE_IPV4").ok()?;
+    let onion_port: u16 = env::var("GBN_ONION_PORT").unwrap_or_else(|_| "9001".to_string()).parse().ok()?;
+    let ip_addr: IpAddr = ipv4.parse().ok()?;
 
-    let ipv4 = match env::var("GBN_INSTANCE_IPV4") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(()),
-    };
-
-    let mut attrs = HashMap::new();
-    attrs.insert("AWS_INSTANCE_IPV4".to_string(), ipv4);
-    attrs.insert("GBN_PEER_ID".to_string(), swarm.local_peer_id().to_string());
-
-    if let Ok(port) = env::var("GBN_P2P_PORT") {
-        attrs.insert("AWS_INSTANCE_PORT".to_string(), port);
-    }
-
-    // Phase 2: onion relay attributes
-    let onion_port = env::var("GBN_ONION_PORT").unwrap_or_else(|_| "9001".to_string());
-    attrs.insert("GBN_ONION_PORT".to_string(), onion_port);
-
-    // Derive and register Noise_XX public key.
-    // Prefer a pre-set GBN_NOISE_PUBKEY_HEX; fall back to deriving from the
-    // private key generated by entrypoint.sh (GBN_NOISE_PRIVKEY_HEX).
     let noise_pub_hex = if let Ok(pub_hex) = env::var("GBN_NOISE_PUBKEY_HEX") {
-        Some(pub_hex)
+        pub_hex
     } else if let Ok(priv_hex) = env::var("GBN_NOISE_PRIVKEY_HEX") {
         match hex::decode(&priv_hex) {
             Ok(bytes) if bytes.len() == 32 => {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
-                Some(hex::encode(x25519_pubkey_from_privkey(&arr)))
+                hex::encode(x25519_pubkey_from_privkey(&arr))
             }
-            _ => {
-                tracing::warn!("GBN_NOISE_PRIVKEY_HEX is not valid 32-byte hex; skipping noise pubkey registration");
-                None
-            }
+            _ => return None,
         }
     } else {
-        tracing::warn!("Neither GBN_NOISE_PUBKEY_HEX nor GBN_NOISE_PRIVKEY_HEX set; relay will not be discoverable for circuit building");
-        None
+        return None;
     };
-    if let Some(pub_hex) = noise_pub_hex {
-        attrs.insert("GBN_NOISE_PUBKEY_HEX".to_string(), pub_hex);
-    }
 
-    let role = env::var("GBN_ROLE").unwrap_or_else(|_| "relay".to_string());
+    let noise_bytes = hex::decode(&noise_pub_hex).ok()?;
+    if noise_bytes.len() != 32 {
+        return None;
+    }
+    let mut identity_pub = [0u8; 32];
+    identity_pub.copy_from_slice(&noise_bytes);
+
     let subnet_tag = env::var("GBN_SUBNET_TAG").unwrap_or_else(|_| "Unknown".to_string());
-    attrs.insert("role".to_string(), role);
-    attrs.insert("GBN_SUBNET_TAG".to_string(), subnet_tag);
 
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = aws_sdk_servicediscovery::Client::new(&config);
-
-    client
-        .register_instance()
-        .service_id(service_id)
-        .instance_id(instance_id)
-        .set_attributes(Some(attrs))
-        .send()
-        .await?;
-
-    Ok(())
+    Some(RelayNode {
+        addr: SocketAddr::new(ip_addr, onion_port),
+        identity_pub,
+        subnet_tag,
+        last_seen_ms: 0,
+    })
 }
 
-pub async fn deregister_from_cloudmap() -> Result<()> {
-    let service_id = match env::var("GBN_CLOUDMAP_SERVICE_ID") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(()),
+/// Statically resolve the Publisher's mpub-receiver address and X25519 public key.
+/// Fetches `GBN_PUBLISHER_IP` and `GBN_PUBLISHER_PUBKEY_HEX` injected into environment.
+pub async fn discover_publisher_static() -> Result<(SocketAddr, [u8; 32])> {
+    let fallback_port = env::var("GBN_MPUB_PORT").unwrap_or_else(|_| "7001".to_string());
+    
+    let ip_str = env::var("GBN_PUBLISHER_IP").context("GBN_PUBLISHER_IP not set")?;
+    let pub_key_hex = env::var("GBN_PUBLISHER_PUBKEY_HEX").context("GBN_PUBLISHER_PUBKEY_HEX not set")?;
+
+    let addr = if let Ok(socket_addr) = ip_str.parse::<SocketAddr>() {
+        socket_addr
+    } else {
+        let ip_addr: std::net::IpAddr = ip_str.parse()?;
+        let port: u16 = fallback_port.parse().unwrap_or(7001);
+        SocketAddr::new(ip_addr, port)
     };
 
-    let instance_id = env::var("GBN_CLOUDMAP_INSTANCE_ID")
-        .or_else(|_| env::var("HOSTNAME"))
-        .unwrap_or_default();
-    if instance_id.is_empty() {
-        return Ok(());
-    }
+    let key_bytes = hex::decode(&pub_key_hex)?;
+    anyhow::ensure!(key_bytes.len() == 32, "Publisher pubkey must be 32 bytes");
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&key_bytes);
 
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = aws_sdk_servicediscovery::Client::new(&config);
-
-    client
-        .deregister_instance()
-        .service_id(service_id)
-        .instance_id(instance_id)
-        .send()
-        .await?;
-
-    Ok(())
-}
-
-// ────────────────────────── Phase 2: Onion Discovery Helpers ─────────────────────────
-
-/// Discover all live relay nodes from Cloud Map, returning onion-capable `RelayNode` structs.
-///
-/// Each `RelayNode` contains:
-/// - `addr`: `<IP>:<GBN_ONION_PORT>` (the onion relay TCP listener, port 9001 by default)
-/// - `identity_pub`: 32-byte Noise_XX Curve25519 public key
-/// - `subnet_tag`: `"HostileSubnet"` or `"FreeSubnet"`
-///
-/// Skips instances that are missing any required attribute.
-pub async fn discover_relay_nodes_from_cloudmap() -> Result<Vec<RelayNode>> {
-    let namespace = match env::var("GBN_CLOUDMAP_NAMESPACE") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(Vec::new()),
-    };
-    let service_name = env::var("GBN_CLOUDMAP_SERVICE_NAME")
-        .or_else(|_| env::var("GBN_CLOUDMAP_SERVICE"))
-        .unwrap_or_else(|_| "relay".to_string());
-
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = aws_sdk_servicediscovery::Client::new(&config);
-
-    let instances = client
-        .discover_instances()
-        .namespace_name(&namespace)
-        .service_name(&service_name)
-        .health_status(HealthStatusFilter::All)
-        .send()
-        .await?;
-
-    let mut nodes = Vec::new();
-    for instance in instances.instances() {
-        let Some(attrs) = instance.attributes() else {
-            continue;
-        };
-
-        let ip = match attrs.get("AWS_INSTANCE_IPV4") {
-            Some(v) => v.clone(),
-            None => continue,
-        };
-        let onion_port_str = match attrs.get("GBN_ONION_PORT") {
-            Some(v) => v.clone(),
-            None => continue,
-        };
-        let noise_pub_hex = match attrs.get("GBN_NOISE_PUBKEY_HEX") {
-            Some(v) => v.clone(),
-            None => continue,
-        };
-        let subnet_tag = match attrs.get("GBN_SUBNET_TAG") {
-            Some(v) => v.clone(),
-            None => continue,
-        };
-        if attrs.contains_key("GBN_PUB_KEY_HEX") && attrs.contains_key("GBN_MPUB_PORT") {
-            continue;
-        }
-        // We only build circuits through dedicated relay tasks. Skip everything
-        // that explicitly registers as non-relay (publisher/creator/local helper).
-        if let Some(role) = attrs.get("role") {
-            if role != "relay" {
-                continue;
-            }
-        }
-
-        let onion_port: u16 = match onion_port_str.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let ip_addr: std::net::IpAddr = match ip.parse() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        let addr = SocketAddr::new(ip_addr, onion_port);
-
-        let noise_bytes = match hex::decode(&noise_pub_hex) {
-            Ok(b) if b.len() == 32 => b,
-            _ => continue,
-        };
-        let mut identity_pub = [0u8; 32];
-        identity_pub.copy_from_slice(&noise_bytes);
-
-        nodes.push(RelayNode {
-            addr,
-            identity_pub,
-            subnet_tag,
-        });
-    }
-
-    tracing::info!("Cloud Map: discovered {} relay nodes", nodes.len());
-    Ok(nodes)
-}
-
-/// Discover the Publisher's mpub-receiver address and X25519 public key from Cloud Map.
-///
-/// Filters Cloud Map instances by `role=publisher` attribute.
-/// Returns `(mpub_receiver_addr, x25519_pubkey_bytes)`.
-pub async fn discover_publisher_from_cloudmap() -> Result<(SocketAddr, [u8; 32])> {
-    let namespace = match env::var("GBN_CLOUDMAP_NAMESPACE") {
-        Ok(v) if !v.is_empty() => v,
-        _ => anyhow::bail!("GBN_CLOUDMAP_NAMESPACE not set"),
-    };
-    let service_name = env::var("GBN_CLOUDMAP_SERVICE_NAME")
-        .or_else(|_| env::var("GBN_CLOUDMAP_SERVICE"))
-        .unwrap_or_else(|_| "relay".to_string());
-
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = aws_sdk_servicediscovery::Client::new(&config);
-
-    let instances = client
-        .discover_instances()
-        .namespace_name(&namespace)
-        .service_name(&service_name)
-        .health_status(HealthStatusFilter::All)
-        .send()
-        .await?;
-
-    for instance in instances.instances() {
-        let Some(attrs) = instance.attributes() else {
-            continue;
-        };
-        if attrs.get("role").map(|r| r == "publisher").unwrap_or(false) {
-            let ip = match attrs.get("AWS_INSTANCE_IPV4") {
-                Some(v) => v.clone(),
-                None => continue,
-            };
-            let port_str = attrs
-                .get("GBN_MPUB_PORT")
-                .cloned()
-                .unwrap_or_else(|| "7001".to_string());
-            let pub_key_hex = match attrs.get("GBN_PUB_KEY_HEX") {
-                Some(v) => v.clone(),
-                None => continue,
-            };
-
-            let port: u16 = port_str.parse().unwrap_or(7001);
-            let ip_addr: std::net::IpAddr = ip.parse()?;
-            let addr = SocketAddr::new(ip_addr, port);
-
-            let key_bytes = hex::decode(&pub_key_hex)?;
-            anyhow::ensure!(key_bytes.len() == 32, "Publisher pubkey must be 32 bytes");
-            let mut pubkey = [0u8; 32];
-            pubkey.copy_from_slice(&key_bytes);
-
-            tracing::info!("Cloud Map: found Publisher at {}", addr);
-            return Ok((addr, pubkey));
-        }
-    }
-    anyhow::bail!("Publisher not found in Cloud Map — has it registered yet?")
-}
-
-/// Register Publisher-specific attributes in Cloud Map.
-///
-/// Called by the Publisher node on startup after deriving its X25519 keypair.
-/// Sets `GBN_PUB_KEY_HEX`, `role=publisher`, and `GBN_MPUB_PORT` attributes
-/// on the service instance (identified by `GBN_CLOUDMAP_SERVICE_ID` + hostname).
-pub async fn register_publisher_pubkey_in_cloudmap(pub_key_hex: &str) -> Result<()> {
-    let service_id = match env::var("GBN_CLOUDMAP_SERVICE_ID") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(()),
-    };
-    let instance_id = env::var("GBN_CLOUDMAP_INSTANCE_ID")
-        .or_else(|_| env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "publisher".to_string());
-    let ipv4 = match env::var("GBN_INSTANCE_IPV4") {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(()),
-    };
-    let mpub_port = env::var("GBN_MPUB_PORT").unwrap_or_else(|_| "7001".to_string());
-
-    let mut attrs = HashMap::new();
-    attrs.insert("AWS_INSTANCE_IPV4".to_string(), ipv4);
-    attrs.insert("GBN_PUB_KEY_HEX".to_string(), pub_key_hex.to_string());
-    attrs.insert("GBN_MPUB_PORT".to_string(), mpub_port);
-    attrs.insert("role".to_string(), "publisher".to_string());
-    attrs.insert("GBN_SUBNET_TAG".to_string(), "FreeSubnet".to_string());
-
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = aws_sdk_servicediscovery::Client::new(&config);
-    client
-        .register_instance()
-        .service_id(service_id)
-        .instance_id(instance_id)
-        .set_attributes(Some(attrs))
-        .send()
-        .await?;
-    tracing::info!("Publisher: registered pubkey in Cloud Map");
-    Ok(())
+    tracing::info!("Found Publisher static env at {}", addr);
+    Ok((addr, pubkey))
 }
 
 /// Cached Publisher SocketAddr for exit relays.
@@ -784,8 +739,8 @@ pub async fn discover_publisher_addr_for_exit_relay() -> Result<SocketAddr> {
         }
     }
 
-    // Refresh from Cloud Map
-    let (addr, _) = discover_publisher_from_cloudmap().await?;
+    // Refresh from static env
+    let (addr, _) = discover_publisher_static().await?;
     *cached_addr = Some(addr);
     *last_refresh = std::time::Instant::now();
     Ok(addr)

@@ -11,11 +11,30 @@ use std::{
 pub type MessageId = [u8; 32];
 pub type PlumTreeBehaviour = request_response::cbor::Behaviour<GossipRequest, GossipResponse>;
 
+use crate::circuit_manager::RelayNode;
+#[cfg(feature = "distributed-trace")]
+use crate::trace;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GbnGossipMsg {
+    TestString(String),
+    DirectorySync(Vec<RelayNode>),
+    NodeAnnounce(RelayNode),
+}
+
+#[cfg(feature = "distributed-trace")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceEnvelope {
+    pub chain: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipRequest {
     GossipData {
         message_id: MessageId,
         payload: Vec<u8>,
+        #[cfg(feature = "distributed-trace")]
+        trace: TraceEnvelope,
     },
     IHave {
         message_ids: Vec<MessageId>,
@@ -99,6 +118,8 @@ pub struct OutboundGossip {
 pub struct PlumTreeEngine {
     pub state: PlumTreeState,
     payloads: HashMap<MessageId, Vec<u8>>,
+    #[cfg(feature = "distributed-trace")]
+    trace_chains: HashMap<MessageId, Vec<String>>,
 }
 
 impl PlumTreeState {
@@ -172,6 +193,8 @@ impl PlumTreeEngine {
         Self {
             state: PlumTreeState::new(gossip_bps, max_tracked_messages),
             payloads: HashMap::new(),
+            #[cfg(feature = "distributed-trace")]
+            trace_chains: HashMap::new(),
         }
     }
 
@@ -191,6 +214,11 @@ impl PlumTreeEngine {
         payload: Vec<u8>,
     ) -> Vec<OutboundGossip> {
         self.payloads.insert(message_id, payload.clone());
+        #[cfg(feature = "distributed-trace")]
+        {
+            self.trace_chains
+                .insert(message_id, vec![trace::next_hop_id()]);
+        }
         if !self.state.register_seen(message_id) {
             return Vec::new();
         }
@@ -199,6 +227,28 @@ impl PlumTreeEngine {
 
     pub fn on_request(&mut self, from: PeerId, request: GossipRequest) -> Vec<OutboundGossip> {
         match request {
+            #[cfg(feature = "distributed-trace")]
+            GossipRequest::GossipData {
+                message_id,
+                payload,
+                trace,
+            } => {
+                let mut chain = trace.chain;
+                chain.push(trace::next_hop_id());
+                self.trace_chains.insert(message_id, chain);
+                if !self.state.register_seen(message_id) {
+                    return vec![OutboundGossip {
+                        peer: from,
+                        request: GossipRequest::Prune,
+                    }];
+                }
+
+                self.payloads.insert(message_id, payload.clone());
+                self.state.missing_messages.remove(&message_id);
+                self.add_eager_peer(from);
+                self.build_forwarding(Some(from), message_id, &payload)
+            }
+            #[cfg(not(feature = "distributed-trace"))]
             GossipRequest::GossipData {
                 message_id,
                 payload,
@@ -239,15 +289,28 @@ impl PlumTreeEngine {
             GossipRequest::IWant { message_ids } => {
                 let mut out = Vec::new();
                 for id in message_ids {
-                    if let Some(payload) = self.payloads.get(&id).cloned() {
-                        if self.state.try_account_send(payload.len() + 32) {
-                            out.push(OutboundGossip {
-                                peer: from,
-                                request: GossipRequest::GossipData {
-                                    message_id: id,
-                                    payload,
-                                },
-                            });
+                if let Some(payload) = self.payloads.get(&id).cloned() {
+                    if self.state.try_account_send(payload.len() + 32) {
+                        #[cfg(feature = "distributed-trace")]
+                        let trace_chain = self
+                            .trace_chains
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_else(|| vec![trace::next_hop_id()]);
+                        out.push(OutboundGossip {
+                            peer: from,
+                            #[cfg(feature = "distributed-trace")]
+                            request: GossipRequest::GossipData {
+                                message_id: id,
+                                payload,
+                                trace: TraceEnvelope { chain: trace_chain },
+                            },
+                            #[cfg(not(feature = "distributed-trace"))]
+                            request: GossipRequest::GossipData {
+                                message_id: id,
+                                payload,
+                            },
+                        });
                         }
                     }
                 }
@@ -271,6 +334,12 @@ impl PlumTreeEngine {
         payload: &[u8],
     ) -> Vec<OutboundGossip> {
         let mut out = Vec::new();
+        #[cfg(feature = "distributed-trace")]
+        let trace_chain = self
+            .trace_chains
+            .get(&message_id)
+            .cloned()
+            .unwrap_or_else(|| vec![trace::next_hop_id()]);
         let eager_targets: Vec<_> = self
             .state
             .eager_peers
@@ -283,6 +352,15 @@ impl PlumTreeEngine {
             if self.state.try_account_send(payload.len() + 32) {
                 out.push(OutboundGossip {
                     peer,
+                    #[cfg(feature = "distributed-trace")]
+                    request: GossipRequest::GossipData {
+                        message_id,
+                        payload: payload.to_vec(),
+                        trace: TraceEnvelope {
+                            chain: trace_chain.clone(),
+                        },
+                    },
+                    #[cfg(not(feature = "distributed-trace"))]
                     request: GossipRequest::GossipData {
                         message_id,
                         payload: payload.to_vec(),

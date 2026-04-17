@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+distributed-trace = []
+
 [dependencies]
 gbn-protocol = { path = "../gbn-protocol" }
 mcn-crypto = { path = "../mcn-crypto" }

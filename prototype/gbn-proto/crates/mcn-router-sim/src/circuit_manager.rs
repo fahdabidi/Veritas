@@ -40,18 +40,25 @@ use tokio::{
 };
 
 use crate::observability::publish_circuit_build_result_from_env;
-use crate::relay_engine::{recv_cell, send_cell};
+use crate::relay_engine::{recv_cell_secure, send_cell_secure};
 
 // ─────────────────────────── Types ─────────────────────────────────────────
 
 pub type ChunkBytes = Vec<u8>;
 
+use serde::{Deserialize, Serialize};
+
 /// A descriptor for a relay node (simplified — real impl uses DHT records).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayNode {
     pub addr: SocketAddr,
     pub identity_pub: [u8; 32],
     pub subnet_tag: String,
+    /// Unix timestamp (ms) when this node was last seen by the local seed store.
+    /// Set on every insert/update; never propagated over gossip so it reflects
+    /// local observation time, not the sender's clock.
+    #[serde(default)]
+    pub last_seen_ms: u64,
 }
 
 pub fn relay_node_from_descriptor(descriptor: &RelayDescriptor) -> RelayNode {
@@ -59,6 +66,7 @@ pub fn relay_node_from_descriptor(descriptor: &RelayDescriptor) -> RelayNode {
         addr: descriptor.address,
         identity_pub: descriptor.identity_key,
         subnet_tag: descriptor.subnet_tag.clone(),
+        last_seen_ms: 0,
     }
 }
 
@@ -99,6 +107,7 @@ pub async fn build_circuit(
     guard: &RelayNode,
     middle: &RelayNode,
     exit: &RelayNode,
+    trace_id: &str,
 ) -> Result<OnionCircuit> {
     let started = Instant::now();
     let result: Result<OnionCircuit> = async {
@@ -106,14 +115,14 @@ pub async fn build_circuit(
         tracing::info!("Building circuit: connecting to Guard {}", guard.addr);
         let mut guard_stream = timeout(Duration::from_secs(10), TcpStream::connect(guard.addr))
             .await
-            .context("Timeout connecting to Guard")?
-            .context("Failed to connect to Guard")?;
+            .context(format!("Timeout connecting to Guard {}", guard.addr))?
+            .context(format!("Failed to TCP-connect to Guard {}", guard.addr))?;
 
         let guard_hs = build_initiator(creator_priv_key, &guard.identity_pub)
-            .context("Failed to build initiator HS for Guard")?;
-        let guard_transport = complete_handshake(&mut guard_stream, guard_hs, true)
+            .context(format!("Failed to build initiator HS for Guard {}", guard.addr))?;
+        let mut guard_transport = complete_handshake(&mut guard_stream, guard_hs, true)
             .await
-            .context("Noise_XX handshake with Guard failed")?;
+            .context(format!("Noise_XX handshake with Guard {} failed", guard.addr))?;
         tracing::debug!("Guard handshake complete");
 
         // ── Step 2: Extend to Middle through Guard ────────────────────────────
@@ -127,21 +136,26 @@ pub async fn build_circuit(
         let hs_len = middle_hs.write_message(&[], &mut hs_buf)?;
         let initial_hs_payload = hs_buf[..hs_len].to_vec();
 
-        send_cell(
+        send_cell_secure(
             &mut guard_stream,
+            &mut guard_transport,
             &OnionCell::RelayExtend(ExtendPayload {
                 next_hop: middle.addr,
                 next_identity_key: middle.identity_pub,
                 handshake_payload: initial_hs_payload,
+                trace_id: if trace_id.is_empty() { None } else { Some(trace_id.to_string()) },
             }),
         )
         .await
-        .context("Failed to send RelayExtend(Middle) to Guard")?;
+        .context(format!("Failed to send RelayExtend(middle={}) to Guard {}", middle.addr, guard.addr))?;
 
-        let response = timeout(Duration::from_secs(10), recv_cell(&mut guard_stream))
+        let response = timeout(
+            Duration::from_secs(10),
+            recv_cell_secure(&mut guard_stream, &mut guard_transport),
+        )
             .await
-            .context("Timeout waiting for RelayExtended(Middle)")?
-            .context("Failed to read RelayExtended(Middle)")?;
+            .context(format!("Timeout waiting for RelayExtended(middle={}) from Guard {}", middle.addr, guard.addr))?
+            .context(format!("Failed to read RelayExtended(middle={}) from Guard {}", middle.addr, guard.addr))?;
 
         let ExtendedPayload {
             handshake_response: middle_hs_response,
@@ -157,7 +171,7 @@ pub async fn build_circuit(
         // Complete the Middle handshake state (remaining turns after initial message)
         let middle_transport = complete_handshake(&mut guard_stream, middle_hs, false)
             .await
-            .context("Noise_XX handshake continuation for Middle failed")?;
+            .context(format!("Noise_XX handshake continuation for Middle {} failed", middle.addr))?;
 
         // ── Step 3: Extend to Exit through Guard→Middle ───────────────────────
         tracing::info!("Extending circuit to Exit {}", exit.addr);
@@ -167,30 +181,35 @@ pub async fn build_circuit(
         let hs_len = exit_hs.write_message(&[], &mut hs_buf)?;
         let initial_exit_payload = hs_buf[..hs_len].to_vec();
 
-        send_cell(
+        send_cell_secure(
             &mut guard_stream,
+            &mut guard_transport,
             &OnionCell::RelayExtend(ExtendPayload {
                 next_hop: exit.addr,
                 next_identity_key: exit.identity_pub,
                 handshake_payload: initial_exit_payload,
+                trace_id: if trace_id.is_empty() { None } else { Some(trace_id.to_string()) },
             }),
         )
         .await
-        .context("Failed to send RelayExtend(Exit) through Guard")?;
+        .context(format!("Failed to send RelayExtend(exit={}) through Guard {}", exit.addr, guard.addr))?;
 
-        let response = timeout(Duration::from_secs(10), recv_cell(&mut guard_stream))
+        let response = timeout(
+            Duration::from_secs(10),
+            recv_cell_secure(&mut guard_stream, &mut guard_transport),
+        )
             .await
-            .context("Timeout waiting for RelayExtended(Exit)")?
-            .context("Failed to read RelayExtended(Exit)")?;
+            .context(format!("Timeout waiting for RelayExtended(exit={}) via Guard {}", exit.addr, guard.addr))?
+            .context(format!("Failed to read RelayExtended(exit={}) via Guard {}", exit.addr, guard.addr))?;
 
         match response {
             OnionCell::RelayExtended(_) => {}
-            other => anyhow::bail!("Expected RelayExtended for Exit, got {:?}", other),
+            other => anyhow::bail!("Expected RelayExtended for exit={}, got {:?}", exit.addr, other),
         };
 
         let exit_transport = complete_handshake(&mut guard_stream, exit_hs, false)
             .await
-            .context("Noise_XX handshake continuation for Exit failed")?;
+            .context(format!("Noise_XX handshake continuation for Exit {} failed", exit.addr))?;
 
         tracing::info!(
             "Circuit built: {} → {} → {}",
@@ -291,8 +310,13 @@ impl CircuitManager {
                 encrypt_frame(transport, &wrapped).context("Failed to encrypt chunk layer")?;
         }
 
-        send_cell(
+        let guard_link = circuit
+            .transports
+            .get_mut(0)
+            .context("Circuit transport state missing guard link")?;
+        send_cell_secure(
             &mut circuit.guard_stream,
+            guard_link,
             &OnionCell::RelayData(DataPayload {
                 ciphertext: wrapped,
             }),
@@ -383,7 +407,7 @@ impl CircuitManager {
             .cloned()
             .context("No exit candidate available for rebuild")?;
 
-        let circuit = build_circuit(creator_priv_key, guard, &middle, &exit).await?;
+        let circuit = build_circuit(creator_priv_key, guard, &middle, &exit, "").await?;
         self.add_circuit(circuit).await;
 
         let mut resent = 0usize;
@@ -481,7 +505,7 @@ pub async fn build_circuits_speculative(
 
     for (guard, middle, exit) in candidates {
         let key = *creator_priv_key;
-        joins.spawn(async move { build_circuit(&key, &guard, &middle, &exit).await });
+        joins.spawn(async move { build_circuit(&key, &guard, &middle, &exit, "").await });
     }
 
     let mut winners = Vec::new();
@@ -573,6 +597,7 @@ mod tests {
             addr: format!("127.0.0.1:{}", port).parse().unwrap(),
             identity_pub: [0u8; 32],
             subnet_tag: tag.to_string(),
+            last_seen_ms: 0,
         };
         let peers = vec![
             mk("HostileSubnet", 1),
@@ -590,6 +615,7 @@ mod tests {
             addr: format!("127.0.0.1:{}", port).parse().unwrap(),
             identity_pub: [key; 32],
             subnet_tag: tag.to_string(),
+            last_seen_ms: 0,
         };
         let all = vec![
             mk("HostileSubnet", 1101, 1),
@@ -652,14 +678,19 @@ async fn heartbeat_watchdog(
         seq_id += 1;
 
         // Send PING
-        let send_result = {
+        let send_result: Result<()> = {
             let mut locked = circuits.lock().await;
             if let Some(circuit) = locked.get_mut(circuit_idx) {
-                send_cell(
-                    &mut circuit.guard_stream,
-                    &OnionCell::RelayHeartbeat(HeartbeatPayload { seq_id }),
-                )
-                .await
+                if let Some(guard_link) = circuit.transports.get_mut(0) {
+                    send_cell_secure(
+                        &mut circuit.guard_stream,
+                        guard_link,
+                        &OnionCell::RelayHeartbeat(HeartbeatPayload { seq_id }),
+                    )
+                    .await
+                } else {
+                    Err(anyhow::anyhow!("Missing guard transport state"))
+                }
             } else {
                 // Circuit already removed
                 return;
@@ -679,7 +710,16 @@ async fn heartbeat_watchdog(
         let pong_result = {
             let mut locked = circuits.lock().await;
             if let Some(circuit) = locked.get_mut(circuit_idx) {
-                timeout(HEARTBEAT_TIMEOUT, recv_cell(&mut circuit.guard_stream)).await
+                let maybe_guard_link = circuit.transports.get_mut(0);
+                let guard_link = match maybe_guard_link {
+                    Some(t) => t,
+                    None => return,
+                };
+                timeout(
+                    HEARTBEAT_TIMEOUT,
+                    recv_cell_secure(&mut circuit.guard_stream, guard_link),
+                )
+                .await
             } else {
                 return;
             }

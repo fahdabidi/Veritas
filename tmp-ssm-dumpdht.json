@@ -1,0 +1,11 @@
+﻿{
+    "Parameters":  {
+                       "commands":  [
+                                        "sudo docker exec gbn-seed-relay sh -lc \"echo \u0027{\"cmd\":\"DumpDht\"}\u0027 | nc -w 1 127.0.0.1 5050\""
+                                    ]
+                   },
+    "DocumentName":  "AWS-RunShellScript",
+    "InstanceIds":  [
+                        "i-07f31ffd07ea72ca3"
+                    ]
+}

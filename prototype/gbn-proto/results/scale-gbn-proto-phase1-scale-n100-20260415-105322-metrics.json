@@ -1,0 +1,50 @@
+{
+    "MetricDataResults": [
+        {
+            "Id": "bootstrap",
+            "Label": "bootstrap"
+        },
+        {
+            "Id": "gossipbw",
+            "Label": "gossipbw"
+        },
+        {
+            "Id": "circuit",
+            "Label": "circuit"
+        },
+        {
+            "Id": "circuit_count",
+            "Label": "circuit_count"
+        },
+        {
+            "Id": "chunks",
+            "Label": "chunks"
+        },
+        {
+            "Id": "chunks_reassembled",
+            "Label": "chunks_reassembled"
+        },
+        {
+            "Id": "chunks_received",
+            "Label": "chunks_received"
+        },
+        {
+            "Id": "path_diversity",
+            "Label": "path_diversity"
+        },
+        {
+            "Id": "hash_match",
+            "Label": "hash_match"
+        }
+    ],
+    "Phase2Gate": {
+        "circuit_build_success_rate": null,
+        "circuit_build_pass": false,
+        "chunks_reassembled_sum": 0,
+        "chunks_received_sum": 0,
+        "path_diversity_min": 0,
+        "hash_match_min": 0,
+        "gossip_nonzero": false,
+        "phase2_pass": false
+    }
+}

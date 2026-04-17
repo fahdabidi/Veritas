@@ -2,7 +2,39 @@
   "permissions": {
     "allow": [
       "Bash(cargo check:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(grep -E \"\\\\.\\(md|txt\\)$\")",
+      "Bash(aws cloudformation:*)",
+      "Bash(aws logs:*)",
+      "Bash(MSYS_NO_PATHCONV=1 aws logs describe-log-groups --log-group-name-prefix \"/aws/ecs/gbn-proto-phase1-scale-n100\" --region us-east-1 --query 'logGroups[].logGroupName' --output text)",
+      "Bash(export MSYS_NO_PATHCONV=1)",
+      "Bash(python3 -c ':*)",
+      "Bash(python3)",
+      "Bash(python3 -c 'import subprocess; r=subprocess.run\\(['\\\\''aws'\\\\'','\\\\''logs'\\\\'','\\\\''get-log-events'\\\\'','\\\\''--log-group-name'\\\\'','\\\\''/aws/lambda/gbn-proto-phase1-scale-n100-chaos-controller'\\\\'','\\\\''--log-stream-name'\\\\'','\\\\''2026/04/13/[$LATEST]dcd8bb30173f4236bf2a0fc64f103217'\\\\'','\\\\''--region'\\\\'','\\\\''us-east-1'\\\\'','\\\\''--limit'\\\\'','\\\\''20'\\\\'','\\\\''--output'\\\\'','\\\\''json'\\\\''],capture_output=True,text=True\\); print\\(r.stdout[:2000] or r.stderr[:500]\\)')",
+      "Bash(python3 -c 'import subprocess; r=subprocess.run\\(['\\\\''aws'\\\\'','\\\\''logs'\\\\'','\\\\''get-log-events'\\\\'','\\\\''--log-group-name'\\\\'','\\\\''/aws/lambda/gbn-proto-phase1-scale-n100-chaos-controller'\\\\'','\\\\''--log-stream-name'\\\\'','\\\\''2026/04/13/[$LATEST]dcd8bb30173f4236bf2a0fc64f103217'\\\\'','\\\\''--region'\\\\'','\\\\''us-east-1'\\\\'','\\\\''--limit'\\\\'','\\\\''20'\\\\'','\\\\''--start-from-head'\\\\'','\\\\''--output'\\\\'','\\\\''json'\\\\''],capture_output=True,text=True\\); print\\(r.stdout[:2000] or r.stderr[:500]\\)')",
+      "Bash(aws ecr:*)",
+      "Bash(bash infra/scripts/build-and-push.sh gbn-proto-phase1-scale-n100 us-east-1)",
+      "Bash(bash infra/scripts/deploy-scale-test.sh gbn-proto-phase1-scale-n100 100 us-east-1)",
+      "Bash(bash infra/scripts/run-chaos-upload.sh gbn-proto-phase1-scale-n100 us-east-1)",
+      "Bash(bash infra/scripts/teardown-scale-test.sh gbn-proto-phase1-scale-n100 us-east-1)",
+      "Bash(wsl -e docker info)",
+      "Bash(wsl -e bash -c \"aws --version 2>&1 || echo 'no aws in WSL'\")",
+      "Bash(wsl -e aws sts get-caller-identity --region us-east-1)",
+      "Bash(wsl -e bash -c ':*)",
+      "Bash(wsl -e bash -c \"ps aux | grep -E 'docker|cargo|gbn|bash.*build|bash.*deploy' | grep -v grep\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(i.get\\('imageTags','?'\\), i.get\\('imagePushedAt','?'\\), i.get\\('imageSizeInBytes','?'\\)\\) for i in d.get\\('imageDetails',[]\\)]\")",
+      "Bash(wsl -e bash -c \"cd '/mnt/c/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto' && bash infra/scripts/build-and-push.sh gbn-proto-phase1-scale-n100 us-east-1\")",
+      "Bash(bash prototype/gbn-proto/infra/scripts/deploy-scale-test.sh gbn-proto-phase1-scale-n100 100 us-east-1)",
+      "Bash(bash prototype/gbn-proto/infra/scripts/build-and-push.sh gbn-proto-phase1-scale-n100 us-east-1)",
+      "Bash(bash prototype/gbn-proto/infra/scripts/run-chaos-upload.sh gbn-proto-phase1-scale-n100 us-east-1)",
+      "Bash(bash prototype/gbn-proto/infra/scripts/teardown-scale-test.sh gbn-proto-phase1-scale-n100 us-east-1)",
+      "Bash(python3 -c \"import subprocess, json; r = subprocess.run\\(['aws', 'logs', 'describe-log-groups', '--log-group-name-prefix', '/aws/ecs/gbn-proto-phase1-scale-n100', '--region', 'us-east-1', '--query', 'logGroups[].logGroupName', '--output', 'json'], capture_output=True, text=True\\); print\\(r.stdout\\); print\\(r.stderr\\)\")",
+      "Bash(python3 -)",
+      "Bash(aws cloudwatch:*)",
+      "Bash(grep -v \"^$\")",
+      "Bash(bash -n \"c:/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto/infra/scripts/relay-control-interactive.sh\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d['Status']\\); [print\\(o['OutputKey'],o['OutputValue']\\) for o in \\(d.get\\('Outputs'\\) or []\\)]\")",
+      "Bash(aws ec2 *)"
     ]
   }
 }

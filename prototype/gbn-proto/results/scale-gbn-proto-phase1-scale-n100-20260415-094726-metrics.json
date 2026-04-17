@@ -1,0 +1,89 @@
+{
+    "MetricDataResults": [
+        {
+            "Id": "bootstrap",
+            "Label": "bootstrap",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "PartialData",
+            "Messages": [
+                {
+                    "Code": "PartialData",
+                    "Value": "The expression may contain partial data as one or more metrics have StatusCode 'Paginated'"
+                }
+            ]
+        },
+        {
+            "Id": "gossipbw",
+            "Label": "gossipbw",
+            "Timestamps": [
+                "2026-04-15T09:45:00-07:00",
+                "2026-04-15T09:46:00-07:00"
+            ],
+            "Values": [
+                0.0,
+                0.0
+            ],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "circuit",
+            "Label": "circuit",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "circuit_count",
+            "Label": "circuit_count",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "chunks",
+            "Label": "chunks",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "chunks_reassembled",
+            "Label": "chunks_reassembled",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "chunks_received",
+            "Label": "chunks_received",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "path_diversity",
+            "Label": "path_diversity",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "hash_match",
+            "Label": "hash_match",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        }
+    ],
+    "Phase2Gate": {
+        "circuit_build_success_rate": null,
+        "circuit_build_pass": false,
+        "chunks_reassembled_sum": 0,
+        "chunks_received_sum": 0,
+        "path_diversity_min": 0,
+        "hash_match_min": 0,
+        "gossip_nonzero": false,
+        "phase2_pass": false
+    }
+}

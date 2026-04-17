@@ -1,0 +1,23 @@
+{
+    "Parameters":  {
+                       "commands":  [
+                                        "set -e",
+                                        "echo HOST:$(hostname)",
+                                        "docker ps --format \"{{.ID}} {{.Names}} {{.Image}}\"",
+                                        "echo ---ENV---",
+                                        "docker inspect gbn-seed-relay --format \"{{range .Config.Env}}{{println .}}{{end}}\"",
+                                        "echo ---CMD---",
+                                        "docker inspect gbn-seed-relay --format \"{{json .Config.Cmd}}\"",
+                                        "echo ---ENTRYPOINT---",
+                                        "docker inspect gbn-seed-relay --format \"{{json .Config.Entrypoint}}\"",
+                                        "echo ---PORTS---",
+                                        "ss -ltnp | egrep \"(:4001|:9001|:5050)\" || true",
+                                        "echo ---LOGS---",
+                                        "docker logs --tail 160 gbn-seed-relay"
+                                    ]
+                   },
+    "DocumentName":  "AWS-RunShellScript",
+    "InstanceIds":  [
+                        "i-08ec6402d9bdee34c"
+                    ]
+}

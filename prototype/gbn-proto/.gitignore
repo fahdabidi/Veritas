@@ -21,3 +21,21 @@ infra/gbn-proto-key.pem
 # OS
 .DS_Store
 Thumbs.db
+
+# Accidental shell artifacts (symlinks / stray files from bad commands)
+/Program
+/=*
+*.key
+*.pub
+/publisher.key
+/publisher.pub
+
+# Temp scripts and result dumps
+tmp_*.sh
+tmp_*.ps1
+tmp-ssm-*.json
+results/
+run_smoke_probe.sh
+probe_creator_to_relay.sh
+tmp_debug_info.sh
+/; done

@@ -168,7 +168,7 @@ pub async fn spawn_control_server(
                                     if line.trim().is_empty() {
                                         continue;
                                     }
-                                    let req_res: Result<ControlRequest, _> = serde_json::from_str(&line);
+                                    let req_res: Result<ControlRequest, _> = serde_json::from_str(line.trim());
                                     match req_res {
                                         Ok(req) => {
                                             let resp = handle_request(req, &seed_store, &swarm_tx, priv_key).await;

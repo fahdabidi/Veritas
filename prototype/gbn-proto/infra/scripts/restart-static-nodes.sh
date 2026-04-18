@@ -81,7 +81,7 @@ JSON
   local cmd_id
   cmd_id="$(aws ssm send-command \
     --region "$REGION" \
-    --cli-input-json "file://$cmd_json_file" \
+    --cli-input-json "$(<"$cmd_json_file")" \
     --query 'Command.CommandId' \
     --output text)"
 

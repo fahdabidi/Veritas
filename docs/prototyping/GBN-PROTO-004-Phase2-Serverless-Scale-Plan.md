@@ -866,7 +866,7 @@ aws ecs execute-command --cluster gbn-proto-phase1-scale-n100-cluster --task  ar
 
 #Connecting to EC2 Instances running the GBN Containers in Docker environment using system session manager
 #Step1 : user the instance ID to start the session
-aws ssm start-session --target i-07f31ffd07ea72ca3 --region us-east-1
+aws ssm start-session --target i-08ec6402d9bdee34c --region us-east-1
 
 #Step2 : connect to the container environmet
 sudo -i
@@ -937,3 +937,17 @@ for C in ce0da5f8-8728-4d0b-9598-9658428e3a5b f88687b7-2c82-4eb3-ade9-e58f63187a
     --query '{Status:Status,StdOut:StandardOutputContent,StdErr:StandardErrorContent}' \
     --output json
 done
+
+
+CMD_ID=$(aws ssm send-command \
+  --region us-east-1 \
+  --instance-ids i-08ec6402d9bdee34c \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=["sudo docker ps","sudo docker exec -i gbn-seed-relay sh -c \"echo '\''{\"cmd\":\"DumpDht\"}'\'' | nc -w 1 127.0.0.1 5050\""]' \
+  --query 'Command.CommandId' \
+  --output text)
+
+aws ssm get-command-invocation \
+  --region us-east-1 \
+  --command-id "$CMD_ID" \
+  --instance-id i-08ec6402d9bdee34c

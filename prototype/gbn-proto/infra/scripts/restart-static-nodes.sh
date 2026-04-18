@@ -136,6 +136,16 @@ if [ -z "$PUBLISHER_INSTANCE_ID" ] || [ "$PUBLISHER_INSTANCE_ID" = "None" ]; the
   exit 1
 fi
 
+SEED_RELAY_PRIVATE_IP="$(aws ec2 describe-instances \
+  --instance-ids "$SEED_RELAY_INSTANCE_ID" \
+  --region "$REGION" \
+  --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+  --output text 2>/dev/null || true)"
+if [ -z "$SEED_RELAY_PRIVATE_IP" ] || [ "$SEED_RELAY_PRIVATE_IP" = "None" ]; then
+  echo "ERROR: Could not resolve SeedRelay private IP for $SEED_RELAY_INSTANCE_ID"
+  exit 1
+fi
+
 SEED_RELAY_NOISE_PRIVKEY="$(cf_parameter SeedRelayNoisePrivKey)"
 PUBLISHER_KEY_HEX="$(cf_parameter PublisherPrivKeyHex)"
 CONTAINER_IMAGE_RELAY="$(cf_parameter ContainerImageRelay)"
@@ -174,7 +184,7 @@ SEED_ENVS="-e GBN_ROLE=relay -e GBN_P2P_PORT=4001 -e GBN_ONION_PORT=9001 -e GBN_
 run_ssm_commands "$SEED_RELAY_INSTANCE_ID" "gbn-seed-relay" "$CONTAINER_IMAGE_RELAY" "$SEED_ENVS"
 
 echo "Restarting Publisher with host networking..."
-PUBLISHER_ENVS="-e GBN_ROLE=publisher -e GBN_P2P_PORT=4001 -e GBN_MPUB_PORT=7001 -e GBN_CONTROL_PORT=5050 -e GBN_SEED_IPS=10.0.1.10:4001 -e GBN_INSTANCE_IPV4=10.0.3.10 -e GBN_SUBNET_TAG=FreeSubnet -e GBN_PUBLISHER_KEY_HEX=$PUBLISHER_KEY_HEX -e RUST_LOG=info"
+PUBLISHER_ENVS="-e GBN_ROLE=publisher -e GBN_P2P_PORT=4001 -e GBN_MPUB_PORT=7001 -e GBN_CONTROL_PORT=5050 -e GBN_SEED_IPS=${SEED_RELAY_PRIVATE_IP}:4001 -e GBN_INSTANCE_IPV4=10.0.3.10 -e GBN_SUBNET_TAG=PublisherNode -e GBN_PUBLISHER_KEY_HEX=$PUBLISHER_KEY_HEX -e RUST_LOG=info"
 run_ssm_commands "$PUBLISHER_INSTANCE_ID" "gbn-publisher" "$CONTAINER_IMAGE_PUBLISHER" "$PUBLISHER_ENVS"
 
 echo "✅ Static EC2 nodes are running with --network host."

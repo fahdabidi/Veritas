@@ -23,9 +23,26 @@
 set -euo pipefail
 export AWS_PAGER=""
 
-# Normalize terminal so backspace works correctly in interactive prompts.
-# WSL/Git Bash often has erase=^H but the terminal sends DEL (^?).
-if [ -t 0 ]; then stty sane 2>/dev/null || true; fi
+# Preserve and restore TTY state because ECS Exec interactive sessions can
+# leave local terminal erase/echo modes altered (shows backspace as '^?').
+TTY_STATE=""
+if [ -t 0 ]; then
+  TTY_STATE="$(stty -g 2>/dev/null || true)"
+  stty sane 2>/dev/null || true
+fi
+
+restore_tty() {
+  if [ -t 0 ]; then
+    if [[ -n "${TTY_STATE:-}" ]]; then
+      stty "$TTY_STATE" 2>/dev/null || true
+    else
+      stty sane 2>/dev/null || true
+      stty erase '^?' 2>/dev/null || true
+    fi
+  fi
+}
+
+trap restore_tty EXIT INT TERM
 
 CLUSTER="${1:-gbn-proto-phase1-scale-n100-cluster}"
 AWS_REGION="${2:-us-east-1}"
@@ -34,6 +51,43 @@ STACK_NAME="${3:-gbn-proto-phase1-scale-n100}"
 for dep in aws python3; do
   command -v "$dep" >/dev/null 2>&1 || { echo "ERROR: '$dep' not found in PATH." >&2; exit 1; }
 done
+
+_ecs_execute_command_retry() {
+  local arn="$1" container="$2" cmd="$3"
+  local attempt max_attempts rc raw filtered
+  max_attempts=3
+
+  for (( attempt=1; attempt<=max_attempts; attempt++ )); do
+    set +e
+    raw="$(aws ecs execute-command \
+      --cluster   "$CLUSTER" \
+      --task      "$arn" \
+      --container "$container" \
+      --region    "$AWS_REGION" \
+      --interactive \
+      --command "$cmd" \
+      2>&1)"
+    rc=$?
+    set -e
+
+    filtered="$(printf '%s\n' "$raw" | grep -v 'Session Manager plugin\|Starting session\|Exiting session\|installed successfully' || true)"
+    [[ -n "$filtered" ]] && printf '%s\n' "$filtered"
+
+    if [[ $rc -eq 0 ]]; then
+      return 0
+    fi
+
+    if grep -q "Could not connect to the endpoint URL" <<<"$raw" && (( attempt < max_attempts )); then
+      echo "  [WARN] ECS endpoint unreachable (attempt ${attempt}/${max_attempts}); retrying..." >&2
+      sleep $((attempt * 2))
+      continue
+    fi
+
+    return $rc
+  done
+
+  return 1
+}
 
 # ─────────────────────────── Node registry ───────────────────────────────────
 # Parallel arrays — always indexed together.
@@ -285,14 +339,10 @@ py = (
 print('python3 -c ' + json.dumps(py))
 " "$b64")"
 
-    aws ecs execute-command \
-      --cluster   "$CLUSTER" \
-      --task      "$arn" \
-      --container "$container" \
-      --region    "$AWS_REGION" \
-      --interactive \
-      --command "$ecs_cmd" \
-      2>&1 | grep -v 'Session Manager plugin\|Starting session\|Exiting session\|installed successfully'
+    if ! _ecs_execute_command_retry "$arn" "$container" "$ecs_cmd"; then
+      echo "  ECS execute-command failed for this node." >&2
+    fi
+    restore_tty
 
   elif [[ "$desc" == EC2:* ]]; then
     local rest="${desc#EC2:}"
@@ -384,6 +434,45 @@ do_dump_metadata() {
 do_broadcast_seed() {
   local scope; scope="$(_pick_scope "BroadcastSeed")"
   _run_scope "$scope" '{"cmd":"BroadcastSeed"}'
+}
+
+do_unicast_dht() {
+  echo "" >&2
+  echo "======  UnicastDHT: send local NodeAnnounce to a single peer  ======" >&2
+
+  # Pick the node that will SEND the unicast (the sender)
+  local sender_idx
+  sender_idx="$(_pick_node "Pick SENDER node (which relay sends its NodeAnnounce):")"
+
+  # Build list of candidate targets — any node that has a relay IP (excludes Creator/Publisher)
+  _TMP_IDXS=(); _TMP_LABELS=()
+  local i
+  for (( i=0; i<${#NODE_LABELS[@]}; i++ )); do
+    local ip="${NODE_IPS[$i]}"
+    if [[ -z "$ip" ]]; then continue; fi          # Creator/Publisher have no relay IP
+    if [[ "$i" -eq "$sender_idx" ]]; then continue; fi  # exclude sender from targets
+    _TMP_IDXS+=("$i")
+    _TMP_LABELS+=("$ip  ${NODE_LABELS[$i]}  (${NODE_ROLES[$i]})")
+  done
+
+  if [[ "${#_TMP_IDXS[@]}" -eq 0 ]]; then
+    echo "  ERROR: no valid target nodes (need at least one other node with a relay IP)." >&2
+    return 1
+  fi
+
+  local target_idx
+  target_idx="$(_pick_from_tmp "Pick TARGET node (who receives the NodeAnnounce):")"
+  local target_ip="${NODE_IPS[$target_idx]}"
+
+  echo "" >&2
+  echo "  Sender : ${NODE_LABELS[$sender_idx]}" >&2
+  echo "  Target : $target_ip  ${NODE_LABELS[$target_idx]}" >&2
+  echo "" >&2
+
+  local payload
+  payload="$(printf '{"cmd":"UnicastDHT","target_addr":"%s"}' "$target_ip")"
+
+  _send_cmd "$sender_idx" "$payload"
 }
 
 do_send_dummy() {
@@ -496,11 +585,12 @@ main() {
 
   while true; do
     echo "Command:"
-    select CMD in "DumpDht" "DumpMetadata" "BroadcastSeed" "SendDummy" "Refresh nodes" "Exit"; do
+    select CMD in "DumpDht" "DumpMetadata" "BroadcastSeed" "UnicastDHT" "SendDummy" "Refresh nodes" "Exit"; do
       case "$CMD" in
         DumpDht)           do_dump_dht ;;
         DumpMetadata)      do_dump_metadata ;;
         BroadcastSeed)     do_broadcast_seed ;;
+        UnicastDHT)        do_unicast_dht ;;
         SendDummy)         do_send_dummy ;;
         "Refresh nodes")   NODE_LABELS=(); NODE_DESCS=(); NODE_IPS=(); NODE_ROLES=()
                            discover_all_nodes; print_node_table ;;

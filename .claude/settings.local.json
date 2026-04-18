@@ -35,7 +35,8 @@
       "Bash(bash -n \"c:/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto/infra/scripts/relay-control-interactive.sh\")",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d['Status']\\); [print\\(o['OutputKey'],o['OutputValue']\\) for o in \\(d.get\\('Outputs'\\) or []\\)]\")",
       "Bash(aws ec2 *)",
-      "Bash(bash \"c:/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto/infra/scripts/restart-static-nodes.sh\" gbn-proto-phase1-scale-n100 us-east-1)"
+      "Bash(bash \"c:/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto/infra/scripts/restart-static-nodes.sh\" gbn-proto-phase1-scale-n100 us-east-1)",
+      "Bash(cargo build *)"
     ]
   }
 }

@@ -951,3 +951,6 @@ aws ssm get-command-invocation \
   --region us-east-1 \
   --command-id "$CMD_ID" \
   --instance-id i-08ec6402d9bdee34c
+
+aws sts get-caller-identity --region us-east-1
+aws ecs list-clusters --region us-east-1

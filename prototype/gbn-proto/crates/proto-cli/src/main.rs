@@ -710,16 +710,21 @@ async fn main() -> Result<()> {
                                         tracing::info!("Publisher: Found {} nodes for manual BroadcastSeed", nodes.len());
                                         let msg = GbnGossipMsg::DirectorySync(nodes);
                                         let payload = serde_json::to_vec(&msg).unwrap();
-                                        
+
                                         let mut msg_id = [0u8; 32];
                                         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                                         msg_id[0..8].copy_from_slice(&ts.to_le_bytes());
-                                        msg_id[8..16].copy_from_slice(&0x5EED_5EED_u64.to_le_bytes()); 
+                                        msg_id[8..16].copy_from_slice(&0x5EED_5EED_u64.to_le_bytes());
 
                                         let outbound = gossip_runtime.engine.publish_local(msg_id, payload);
                                         for out_msg in outbound {
                                             swarm_handle.behaviour_mut().gossip.send_request(&out_msg.peer, out_msg.request);
                                         }
+                                    }
+                                    // Publisher role doesn't have a local relay identity to announce;
+                                    // silently ignore UnicastDHT requests sent to it.
+                                    SwarmControlCmd::UnicastDHT { .. } => {
+                                        tracing::warn!("Publisher: UnicastDHT not supported on publisher role");
                                     }
                                 }
                             }
@@ -951,14 +956,21 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
     let discovery_deadline = Instant::now() + Duration::from_secs(DISCOVERY_TIMEOUT_SECS);
 
     let (all_relays, exit_candidates) = loop {
-        let relays: Vec<mcn_router_sim::circuit_manager::RelayNode> = seed_store.read().unwrap().values().cloned().collect();
+        let discovered_nodes: Vec<mcn_router_sim::circuit_manager::RelayNode> =
+            seed_store.read().unwrap().values().cloned().collect();
+        let relays: Vec<mcn_router_sim::circuit_manager::RelayNode> = discovered_nodes
+            .iter()
+            .filter(|n| n.subnet_tag == "HostileSubnet" || n.subnet_tag == "FreeSubnet")
+            .cloned()
+            .collect();
         let exits = select_exit_candidates(&relays);
 
         if !relays.is_empty() && !exits.is_empty() {
             tracing::info!(
-                "Creator: discovered {} relay nodes ({} FreeSubnet exits) from local seed store",
+                "Creator: discovered {} relay-capable nodes ({} FreeSubnet exits) from local seed store ({} total announced nodes)",
                 relays.len(),
-                exits.len()
+                exits.len(),
+                discovered_nodes.len()
             );
             break (relays, exits);
         }
@@ -966,8 +978,8 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
         // Log which constraint is unmet so logs are actionable
         if relays.is_empty() {
             tracing::warn!(
-                "Creator: 0 relay nodes found in local seed store \
-                 (relays may still be starting or converging via Gossip). \
+                "Creator: 0 relay-capable nodes found in local seed store \
+                 (nodes may still be starting or converging via Gossip). \
                  Retrying in {}s ({}s remaining)...",
                 DISCOVERY_RETRY_SECS,
                 discovery_deadline
@@ -992,11 +1004,12 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
                 .await;
             anyhow::bail!(
                 "Creator: relay discovery timed out after {}s — \
-                 {} total relays, {} FreeSubnet exits. \
+                 {} relay-capable nodes, {} FreeSubnet exits, {} total announced nodes. \
                  Check entrypoint.sh noise key generation and Cloud Map registration.",
                 DISCOVERY_TIMEOUT_SECS,
                 relays.len(),
-                exits.len()
+                exits.len(),
+                discovered_nodes.len()
             );
         }
 

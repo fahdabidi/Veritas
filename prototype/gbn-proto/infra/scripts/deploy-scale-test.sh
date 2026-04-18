@@ -101,6 +101,53 @@ PY
   fi
 }
 
+wait_for_seed_relay_container() {
+  local instance_id="$1"
+  local max_wait="${2:-300}"
+  local interval=10
+  local elapsed=0
+
+  while [ "$elapsed" -lt "$max_wait" ]; do
+    local cmd_id status out
+    cmd_id="$(aws ssm send-command \
+      --region "$REGION" \
+      --instance-ids "$instance_id" \
+      --document-name "AWS-RunShellScript" \
+      --parameters 'commands=["docker ps --filter name=gbn-seed-relay --format \"{{.Names}}\""]' \
+      --query 'Command.CommandId' \
+      --output text 2>/dev/null || true)"
+
+    if [ -n "$cmd_id" ] && [ "$cmd_id" != "None" ]; then
+      aws ssm wait command-executed \
+        --region "$REGION" \
+        --command-id "$cmd_id" \
+        --instance-id "$instance_id" 2>/dev/null || true
+
+      status="$(aws ssm get-command-invocation \
+        --region "$REGION" \
+        --command-id "$cmd_id" \
+        --instance-id "$instance_id" \
+        --query 'Status' \
+        --output text 2>/dev/null || true)"
+      out="$(aws ssm get-command-invocation \
+        --region "$REGION" \
+        --command-id "$cmd_id" \
+        --instance-id "$instance_id" \
+        --query 'StandardOutputContent' \
+        --output text 2>/dev/null || true)"
+
+      if [ "$status" = "Success" ] && printf '%s' "$out" | grep -q "gbn-seed-relay"; then
+        return 0
+      fi
+    fi
+
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+  done
+
+  return 1
+}
+
 echo "============================================"
 echo "  GBN Phase 1 — Deploy Scale Test"
 echo "  Stack:  $STACK_NAME"
@@ -158,6 +205,17 @@ if [ "$RESTART_STATIC_NODES" = "1" ]; then
   bash "$SCRIPT_DIR/restart-static-nodes.sh" "$STACK_NAME" "$REGION"
 else
   echo "[3/7] Skipping static node host-network restart (RESTART_STATIC_NODES=$RESTART_STATIC_NODES)."
+fi
+
+SEED_RELAY_INSTANCE_ID="$(cf_resource_id SeedRelayInstance)"
+if [ -z "$SEED_RELAY_INSTANCE_ID" ] || [ "$SEED_RELAY_INSTANCE_ID" = "None" ]; then
+  echo "ERROR: Failed to resolve SeedRelayInstance resource ID."
+  exit 1
+fi
+echo "[3.5/7] Waiting for SeedRelay container readiness before scaling ECS services..."
+if ! wait_for_seed_relay_container "$SEED_RELAY_INSTANCE_ID" "$POLL_TIMEOUT_SECONDS"; then
+  echo "ERROR: Seed relay container did not become ready within ${POLL_TIMEOUT_SECONDS}s ($SEED_RELAY_INSTANCE_ID)."
+  exit 1
 fi
 
 echo "[4/7] Resolving ECS services..."

@@ -7,12 +7,13 @@ use crate::observability::MetricsReporter;
 use anyhow::{Context, Result};
 use libp2p::futures::StreamExt;
 use libp2p::{
+    core::ConnectedPoint,
     identity,
     kad::{store::MemoryStore, Behaviour as Kademlia, Config as KademliaConfig},
     multiaddr::Protocol,
     noise, request_response,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Swarm, SwarmBuilder,
+    tcp, yamux, PeerId, Swarm, SwarmBuilder,
 };
 use mcn_crypto::x25519_pubkey_from_privkey;
 use rand::Rng;
@@ -46,11 +47,13 @@ pub struct GossipRuntime {
     pub rebootstrap_interval: Duration,
     pub last_announce: Instant,
     pub seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
+    pub peer_ip_map: HashMap<IpAddr, PeerId>,
 }
 
 pub enum SwarmControlCmd {
     DumpDht(tokio::sync::mpsc::Sender<Vec<String>>),
     BroadcastSeed,
+    UnicastDHT { target_addr: String },
 }
 
 pub fn gossip_config_from_env() -> (usize, usize) {
@@ -75,6 +78,10 @@ pub fn max_tracked_peers_from_env() -> usize {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(10_000)
+}
+
+fn role_participates_in_node_announce(role: &str) -> bool {
+    matches!(role, "relay" | "creator" | "publisher")
 }
 
 impl GossipRuntime {
@@ -107,6 +114,7 @@ impl GossipRuntime {
             ),
             last_announce: Instant::now(),
             seed_store,
+            peer_ip_map: HashMap::new(),
         }
     }
 }
@@ -195,9 +203,61 @@ pub async fn run_swarm_until_ctrl_c(
                             let mut msg_id = [0u8; 32];
                             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                             msg_id[0..8].copy_from_slice(&ts.to_le_bytes());
-                            msg_id[8..16].copy_from_slice(&0x5EED_5EED_u64.to_le_bytes()); 
+                            msg_id[8..16].copy_from_slice(&0x5EED_5EED_u64.to_le_bytes());
                             let outbound = runtime.engine.publish_local(msg_id, payload);
                             send_outbound(swarm, outbound);
+                        }
+                    }
+                    SwarmControlCmd::UnicastDHT { target_addr } => {
+                        let target_sa: SocketAddr = match target_addr.parse() {
+                            Ok(sa) => sa,
+                            Err(e) => {
+                                tracing::warn!("UnicastDHT: invalid target addr '{}': {}", target_addr, e);
+                                continue;
+                            }
+                        };
+                        let target_ip = target_sa.ip();
+                        match runtime.peer_ip_map.get(&target_ip).copied() {
+                            None => {
+                                tracing::warn!("UnicastDHT: no connected libp2p peer found for IP {}", target_ip);
+                                crate::control::push_packet_meta_trace(
+                                    "ComponentError", 0,
+                                    &format!("swarm.UnicastDHT ERROR no_peer_for_ip={}", target_ip),
+                                    "", "component.error",
+                                );
+                            }
+                            Some(peer_id) => {
+                                if let Some(local_node) = get_local_relay_node() {
+                                    let msg = GbnGossipMsg::NodeAnnounce(local_node);
+                                    if let Ok(payload) = serde_json::to_vec(&msg) {
+                                        let ts = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_millis() as u64;
+                                        let mut msg_id: MessageId = [0u8; 32];
+                                        msg_id[0..8].copy_from_slice(&ts.to_le_bytes());
+                                        // 0x554E4943 = "UNIC"
+                                        msg_id[16..24].copy_from_slice(&0x554E_4943_u64.to_le_bytes());
+                                        let request = GossipRequest::GossipData {
+                                            message_id: msg_id,
+                                            payload,
+                                            #[cfg(feature = "distributed-trace")]
+                                            trace: crate::gossip::TraceEnvelope {
+                                                chain: vec![crate::trace::next_hop_id()],
+                                            },
+                                        };
+                                        swarm.behaviour_mut().gossip.send_request(&peer_id, request);
+                                        crate::control::push_packet_meta_trace(
+                                            "ComponentOutput", 0,
+                                            &format!("swarm.UnicastDHT OUTPUT sent NodeAnnounce to peer={:?} target={}", peer_id, target_addr),
+                                            "", "component.output",
+                                        );
+                                        tracing::info!("UnicastDHT: sent NodeAnnounce to peer {:?} ({})", peer_id, target_addr);
+                                    }
+                                } else {
+                                    tracing::warn!("UnicastDHT: no local relay node available (not a relay role?)");
+                                }
+                            }
                         }
                     }
                 }
@@ -208,6 +268,17 @@ pub async fn run_swarm_until_ctrl_c(
         }
     }
     Ok(())
+}
+
+fn ip_from_multiaddr(addr: &libp2p::Multiaddr) -> Option<IpAddr> {
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(ip) => return Some(IpAddr::V4(ip)),
+            Protocol::Ip6(ip) => return Some(IpAddr::V6(ip)),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn send_outbound(
@@ -420,8 +491,15 @@ pub async fn drive_swarm_once(
 
     if let Some(event) = swarm_event {
         match event {
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                 runtime.engine.add_lazy_peer(peer_id);
+                let remote_addr = match &endpoint {
+                    ConnectedPoint::Dialer { address, .. } => address,
+                    ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr,
+                };
+                if let Some(ip) = ip_from_multiaddr(remote_addr) {
+                    runtime.peer_ip_map.insert(ip, peer_id);
+                }
             }
             SwarmEvent::Behaviour(RouterBehaviourEvent::Gossip(event)) => {
                 handle_gossip_event(swarm, runtime, event);
@@ -472,8 +550,9 @@ pub async fn drive_swarm_once(
         runtime.last_rebootstrap = Instant::now();
     }
 
-    // Publish local relay node presence to the Gossip mesh (only for relays)
-    if env::var("GBN_ROLE").unwrap_or_default() == "relay" {
+    // Publish local node presence to the Gossip mesh for service roles that
+    // should appear in runtime discovery (relay/creator/publisher).
+    if role_participates_in_node_announce(&runtime.role) {
         if runtime.last_announce.elapsed() >= Duration::from_secs(10) {
             runtime.last_announce = Instant::now();
             if let Some(local_node) = get_local_relay_node() {

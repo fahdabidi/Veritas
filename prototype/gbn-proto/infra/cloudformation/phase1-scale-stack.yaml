@@ -375,6 +375,7 @@ Resources:
 
   PublisherInstance:
     Type: AWS::EC2::Instance
+    DependsOn: SeedRelayInstance
     Properties:
       InstanceType: t3.small
       ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64}}'
@@ -421,9 +422,9 @@ Resources:
             -e GBN_P2P_PORT=4001 \
             -e GBN_MPUB_PORT=7001 \
             -e GBN_CONTROL_PORT=5050 \
-            -e GBN_SEED_IPS=10.0.1.10:4001 \
+            -e GBN_SEED_IPS=${SeedRelayInstance.PrivateIp}:4001 \
             -e GBN_INSTANCE_IPV4=10.0.3.10 \
-            -e GBN_SUBNET_TAG=FreeSubnet \
+            -e GBN_SUBNET_TAG=PublisherNode \
             -e GBN_PUBLISHER_KEY_HEX=${PublisherPrivKeyHex} \
             -e RUST_LOG=info \
             "$IMAGE_URI"
@@ -692,11 +693,11 @@ Resources:
             - Name: GBN_ROLE
               Value: creator
             - Name: GBN_SUBNET_TAG
-              Value: HostileSubnet
+              Value: CreatorNode
             - Name: GBN_DISCOVERY_MODE
               Value: static
             - Name: GBN_SEED_IPS
-              Value: 10.0.1.10:4001
+              Value: !Sub '${SeedRelayInstance.PrivateIp}:4001'
             - Name: GBN_PUBLISHER_IP
               Value: 10.0.3.10
             - Name: GBN_PUBLISHER_PUBKEY_HEX
@@ -753,7 +754,7 @@ Resources:
             - Name: GBN_DISCOVERY_MODE
               Value: static
             - Name: GBN_SEED_IPS
-              Value: 10.0.1.10:4001
+              Value: !Sub '${SeedRelayInstance.PrivateIp}:4001'
             - Name: GBN_SCALE
               Value: !Ref ScaleTarget
             - Name: GBN_P2P_PORT
@@ -803,7 +804,7 @@ Resources:
             - Name: GBN_DISCOVERY_MODE
               Value: static
             - Name: GBN_SEED_IPS
-              Value: 10.0.1.10:4001
+              Value: !Sub '${SeedRelayInstance.PrivateIp}:4001'
             - Name: GBN_SCALE
               Value: !Ref ScaleTarget
             - Name: GBN_P2P_PORT
@@ -821,6 +822,7 @@ Resources:
 
   HostileRelayService:
     Type: AWS::ECS::Service
+    DependsOn: SeedRelayInstance
     Properties:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE
@@ -835,6 +837,7 @@ Resources:
 
   FreeRelayService:
     Type: AWS::ECS::Service
+    DependsOn: SeedRelayInstance
     Properties:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE
@@ -849,6 +852,7 @@ Resources:
 
   CreatorService:
     Type: AWS::ECS::Service
+    DependsOn: SeedRelayInstance
     Properties:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE

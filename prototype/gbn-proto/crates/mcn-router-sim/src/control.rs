@@ -24,6 +24,9 @@ pub enum ControlRequest {
         limit: Option<usize>,
     },
     BroadcastSeed,
+    UnicastDHT {
+        target_addr: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -316,6 +319,28 @@ async fn handle_request(
             );
             ControlResponse::Ok { msg: "CloudMap local seed broadcast queued".to_string() }
         }
+        ControlRequest::UnicastDHT { target_addr } => {
+            let chain = next_chain("");
+            push_packet_meta_trace(
+                "ComponentInput", 0,
+                &format!("control.UnicastDHT INPUT target={target_addr}"),
+                &chain, "component.input",
+            );
+            if swarm_tx.send(SwarmControlCmd::UnicastDHT { target_addr: target_addr.clone() }).await.is_err() {
+                push_packet_meta_trace(
+                    "ComponentError", 0,
+                    "control.UnicastDHT ERROR swarm loop disconnected",
+                    &chain, "component.error",
+                );
+                return ControlResponse::Error { reason: "Swarm loop disconnected".into() };
+            }
+            push_packet_meta_trace(
+                "ComponentOutput", 0,
+                &format!("control.UnicastDHT OUTPUT queued target={target_addr}"),
+                &chain, "component.output",
+            );
+            ControlResponse::Ok { msg: format!("UnicastDHT NodeAnnounce to {} queued", target_addr) }
+        }
         ControlRequest::SendDummy { size, path } => {
             let chain = next_chain("");
             push_packet_meta_trace(
@@ -393,6 +418,23 @@ async fn execute_send_dummy(
         for hop_str in &path {
             let addr: SocketAddr = hop_str.parse().context(format!("Invalid SocketAddr: {hop_str}"))?;
             if let Some(node) = store.get(&addr) {
+                if node.subnet_tag != "HostileSubnet" && node.subnet_tag != "FreeSubnet" {
+                    push_packet_meta_trace(
+                        "ComponentError",
+                        0,
+                        &format!(
+                            "execute_send_dummy.lookup_seed_store ERROR non_relay_hop={} subnet_tag={}",
+                            hop_str, node.subnet_tag
+                        ),
+                        &chain,
+                        "component.error",
+                    );
+                    anyhow::bail!(
+                        "IP {} has subnet_tag '{}' and is not relay-capable (expected HostileSubnet/FreeSubnet)",
+                        hop_str,
+                        node.subnet_tag
+                    );
+                }
                 explicit_route.push(node.clone());
             } else {
                 push_packet_meta_trace(

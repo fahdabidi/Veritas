@@ -283,9 +283,8 @@ async fn handle_request(
             let (packets, total_in_ring): (Vec<PacketMeta>, usize) = {
                 let ring = get_ring().lock().unwrap();
                 let total = ring.len();
-                // Skip oldest entries so we always return the most recent N
-                let skip = total.saturating_sub(effective_limit);
-                let packets = ring.iter().skip(skip).cloned().collect();
+                // ring is newest-first (push_front); take the first N = the N most recent
+                let packets = ring.iter().take(effective_limit).cloned().collect();
                 (packets, total)
             };
             push_packet_meta_trace(

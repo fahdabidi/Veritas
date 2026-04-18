@@ -1,41 +1,17 @@
-//! # Onion Relay Engine (Step 4)
+//! # Onion Relay Engine
 //!
-//! Replaces the bare TCP forwarder with a state machine that speaks the
-//! `OnionCell` protocol. Each relay loop:
-//!
-//!   1. Accepts a TCP connection from an upstream peer (or the Creator).
-//!   2. Reads a length-prefixed `OnionCell` frame.
-//!   3. Dispatches based on cell type:
-//!      - `RelayExtend`   → dial the next hop, complete the inner Noise_XX
-//!                          handshake, cache the downstream connection, reply
-//!                          with `RelayExtended`.
-//!      - `RelayData`     → forward the opaque ciphertext to the cached
-//!                          downstream connection (or to the final destination
-//!                          if this is the Exit node).
-//!      - `RelayHeartbeat`→ echo back a heartbeat so the Circuit Manager knows
-//!                          the link is still live.
-//!
-//! Because the `RelayExtend` payload carries the initiator half of a fresh
-//! Noise_XX handshake, a malicious relay **cannot** fabricate a valid
-//! `RelayExtended` response — doing so would require it to hold the private
-//! key of the legitimate next-hop node.
+//! Relay behavior is decrypt-and-forward:
+//! - Read one framed ciphertext from upstream.
+//! - Open one onion layer with local static key (Noise_N).
+//! - If `next_hop` exists, forward inner bytes to that hop and relay ACK back.
+//! - If `next_hop` is `None`, process terminal `ChunkPayload` and return ACK.
 
-use crate::control::{push_packet_meta, push_packet_meta_trace};
-use crate::circuit_manager::RelayNode;
+use crate::control::push_packet_meta_trace;
 use crate::observability::publish_chunks_received_from_env;
 use anyhow::{Context, Result};
-use gbn_protocol::onion::{
-    DataPayload, ExtendPayload, ExtendedPayload, HeartbeatPayload, OnionCell,
-};
-use mcn_crypto::noise::{
-    build_initiator, build_responder, complete_handshake, decrypt_frame, encrypt_frame,
-};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use gbn_protocol::onion::{AckPayload, ChunkPayload, OnionLayer};
+use mcn_crypto::noise::{open, seal};
+use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -43,62 +19,6 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-
-// ─────────────────────────── Wire Framing ─────────────────────────────────
-// OnionCell frames are length-prefixed with a 4-byte LE u32 header.
-
-pub async fn send_cell(stream: &mut TcpStream, cell: &OnionCell) -> Result<()> {
-    let encoded = serde_json::to_vec(cell)?;
-    let len = encoded.len() as u32;
-    stream.write_all(&len.to_le_bytes()).await?;
-    stream.write_all(&encoded).await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-pub async fn recv_cell(stream: &mut TcpStream) -> Result<OnionCell> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
-    let cell = serde_json::from_slice(&buf)?;
-    Ok(cell)
-}
-
-/// Send an OnionCell over an established Noise transport channel.
-pub async fn send_cell_secure(
-    stream: &mut TcpStream,
-    transport: &mut snow::TransportState,
-    cell: &OnionCell,
-) -> Result<()> {
-    let encoded = serde_json::to_vec(cell)?;
-    let cipher = encrypt_frame(transport, &encoded)?;
-    let len = cipher.len() as u32;
-    stream.write_all(&len.to_le_bytes()).await?;
-    stream.write_all(&cipher).await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-/// Receive an OnionCell from an established Noise transport channel.
-pub async fn recv_cell_secure(
-    stream: &mut TcpStream,
-    transport: &mut snow::TransportState,
-) -> Result<OnionCell> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut cipher = vec![0u8; len];
-    stream.read_exact(&mut cipher).await?;
-    let plain = decrypt_frame(transport, &cipher)?;
-    let cell = serde_json::from_slice(&plain)?;
-    Ok(cell)
-}
-
-// ─────────────────────────── Noise Handshake Helpers ──────────────────────
-
-// ─────────────────────────── Relay Engine ─────────────────────────────────
 
 pub struct OnionRelayHandle {
     pub listen_addr: SocketAddr,
@@ -115,17 +35,29 @@ impl OnionRelayHandle {
     }
 }
 
-/// Spawn an OnionRelay that speaks the full `OnionCell` protocol.
-///
-/// `local_priv_key` is the 32-byte Curve25519 private key for this relay's
-/// `Noise_XX` identity — this is what cryptographically validates the node's
-/// place in the telescopic circuit.
+/// Write one raw frame: `[u32_be_len][bytes]`.
+pub async fn write_raw_frame(stream: &mut TcpStream, data: &[u8]) -> Result<()> {
+    let len = data.len() as u32;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(data).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Read one raw frame: `[u32_be_len][bytes]`.
+pub async fn read_raw_frame(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Spawn the onion relay listener.
 pub async fn spawn_onion_relay(
     listen_addr: SocketAddr,
     local_priv_key: [u8; 32],
-    seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
-    min_jitter_ms: u64,
-    max_jitter_ms: u64,
 ) -> Result<OnionRelayHandle> {
     let listener = TcpListener::bind(listen_addr).await?;
     let bound_addr = listener.local_addr()?;
@@ -133,7 +65,6 @@ pub async fn spawn_onion_relay(
     tracing::info!("OnionRelay listening on {}", bound_addr);
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-
     let task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -144,36 +75,15 @@ pub async fn spawn_onion_relay(
                 accept_res = listener.accept() => {
                     match accept_res {
                         Ok((stream, peer_addr)) => {
-                            tracing::debug!("OnionRelay {} accepted from {}", bound_addr, peer_addr);
                             let key = local_priv_key;
-                            let seed_store = seed_store.clone();
-                            let min_j = min_jitter_ms;
-                            let max_j = max_jitter_ms;
                             tokio::spawn(async move {
-                                let conn = tokio::spawn(async move {
-                                    handle_onion_connection(stream, key, seed_store, min_j, max_j)
-                                        .await
-                                })
-                                .await;
-
-                                match conn {
-                                    Ok(Ok(())) => {}
-                                    Ok(Err(e)) => {
-                                        let msg = format!(
-                                            "relay.handle_connection ERROR node={} listen={} peer={} err={e:#}",
-                                            crate::trace::node_id(), bound_addr, peer_addr
-                                        );
-                                        tracing::error!("{}", msg);
-                                        push_packet_meta_trace("ComponentError", 0, &msg, "", "relay.error");
-                                    }
-                                    Err(join_err) => {
-                                        let msg = format!(
-                                            "relay.handle_connection PANIC node={} listen={} peer={} err={}",
-                                            crate::trace::node_id(), bound_addr, peer_addr, join_err
-                                        );
-                                        tracing::error!("{}", msg);
-                                        push_packet_meta_trace("ComponentError", 0, &msg, "", "relay.panic");
-                                    }
+                                if let Err(e) = handle_onion_connection(stream, key).await {
+                                    let msg = format!(
+                                        "relay.handle_connection ERROR node={} listen={} peer={} err={e:#}",
+                                        crate::trace::node_id(), bound_addr, peer_addr
+                                    );
+                                    tracing::error!("{}", msg);
+                                    push_packet_meta_trace("ComponentError", 0, &msg, "", "relay.error");
                                 }
                             });
                         }
@@ -193,280 +103,191 @@ pub async fn spawn_onion_relay(
     })
 }
 
-// ─────────────────────────── Connection Handler (State Machine) ─────────────
-
-/// Core per-connection state machine.
-///
-/// Holds an optional downstream Noise transport (established via `RelayExtend`),
-/// and processes cells from the upstream until the connection closes.
-async fn handle_onion_connection(
-    mut upstream: TcpStream,
-    local_priv_key: [u8; 32],
-    seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
-    min_jitter_ms: u64,
-    max_jitter_ms: u64,
-) -> Result<()> {
-    // Upstream link is always Noise_XX protected after initial dial.
-    let upstream_hs = build_responder(&local_priv_key)
-        .context("Failed to build upstream Noise_XX responder")?;
-    let mut upstream_transport = complete_handshake(&mut upstream, upstream_hs, false)
+async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 32]) -> Result<()> {
+    let encrypted_layer = timeout(Duration::from_secs(30), read_raw_frame(&mut upstream))
         .await
-        .context("Noise_XX handshake with upstream failed")?;
+        .context("Timeout reading upstream raw frame")?
+        .context("Failed reading upstream raw frame")?;
 
-    // Optional downstream session: set when we receive a RelayExtend.
-    let mut downstream_transport: Option<(TcpStream, snow::TransportState)> = None;
+    let layer_plain = open(&local_priv_key, &encrypted_layer)
+        .context("Failed to open onion layer with local key")?;
+    let layer: OnionLayer =
+        serde_json::from_slice(&layer_plain).context("Failed to decode OnionLayer")?;
 
-    // Distributed trace chain ID received from the circuit initiator via RelayExtend.
-    // Carried on every ring-buffer entry for this connection so failures on any hop
-    // can be correlated back to the originating SendDummy / Creator operation.
-    let mut connection_trace_id = String::new();
-
-    loop {
-        let cell = timeout(
-            Duration::from_secs(30),
-            recv_cell_secure(&mut upstream, &mut upstream_transport),
-        )
-            .await
-            .context("Timeout waiting for OnionCell from upstream")?
-            .context("Failed to read OnionCell from upstream")?;
-
-        // Capture a compact snapshot of the cell before it is consumed by the match.
-        // Stored here so any bail! below can attach it as a RelayFailureCapture entry,
-        // letting a unit test reconstruct and replay the exact cell that failed.
-        let cell_snapshot: String = {
-            let mut s = serde_json::to_string(&cell).unwrap_or_else(|_| format!("{:?}", cell));
-            if s.len() > 1024 {
-                s.truncate(1024);
-                s.push_str("...(truncated)");
-            }
-            s
-        };
-
-        match cell {
-            // ── RelayExtend: dial next hop, perform inner handshake ────────
-            OnionCell::RelayExtend(ExtendPayload {
-                next_hop,
-                next_identity_key,
-                handshake_payload,
-                trace_id,
-            }) => {
-                // Latch the initiator's chain ID for all subsequent ring entries.
-                if let Some(tid) = trace_id {
-                    connection_trace_id = tid;
-                }
-                tracing::debug!("RelayExtend → dialing {}", next_hop);
-                let mapped_next_key = {
-                    let store = seed_store.read().unwrap();
-                    store.get(&next_hop).map(|n| n.identity_pub)
-                };
-                let selected_next_key = mapped_next_key.unwrap_or(next_identity_key);
-                let selected_fp = short_key_fingerprint(&selected_next_key);
-                let payload_fp = short_key_fingerprint(&next_identity_key);
-                tracing::info!(
-                    "RelayExtend handshake start node={} role=initiator next_hop={} selected_key_fp={} payload_key_fp={} key_source={}",
+    match layer.next_hop {
+        Some(next_hop) => {
+            push_packet_meta_trace(
+                "RelayData(Intermediate)",
+                layer.inner.len(),
+                &format!(
+                    "relay.forward node={} next_hop={} bytes={}",
                     crate::trace::node_id(),
                     next_hop,
-                    selected_fp,
-                    payload_fp,
-                    if mapped_next_key.is_some() { "seed_store" } else { "relay_extend_payload" }
+                    layer.inner.len()
+                ),
+                "",
+                "relay.data",
+            );
+
+            let mut next_stream = timeout(Duration::from_secs(10), TcpStream::connect(next_hop))
+                .await
+                .context(format!("Timeout dialing next hop {}", next_hop))?
+                .context(format!("Failed connecting to next hop {}", next_hop))?;
+
+            write_raw_frame(&mut next_stream, &layer.inner)
+                .await
+                .context("Failed writing inner onion bytes to next hop")?;
+
+            let ack_from_downstream = timeout(Duration::from_secs(30), read_raw_frame(&mut next_stream))
+                .await
+                .context("Timeout waiting for downstream ACK frame")?
+                .context("Failed reading downstream ACK frame")?;
+
+            // Peel one ACK layer (reverse onion) before relaying upstream.
+            let ack_to_upstream = peel_ack_for_upstream(&local_priv_key, &ack_from_downstream)
+                .unwrap_or(ack_from_downstream);
+
+            write_raw_frame(&mut upstream, &ack_to_upstream)
+                .await
+                .context("Failed relaying ACK upstream")?;
+        }
+        None => {
+            // Terminal destination for this onion message.
+            let payload: ChunkPayload =
+                serde_json::from_slice(&layer.inner).context("Failed to decode ChunkPayload")?;
+
+            let got_hash = *blake3::hash(&payload.chunk).as_bytes();
+            if got_hash != payload.hash {
+                anyhow::bail!(
+                    "Chunk hash mismatch at destination: expected {}, got {}",
+                    hex::encode(payload.hash),
+                    hex::encode(got_hash)
                 );
-                if let Some(mapped) = mapped_next_key {
-                    if mapped != next_identity_key {
-                        let msg = format!(
-                            "relay.extend key_mismatch node={} next_hop={} mapped_fp={} payload_fp={}",
-                            crate::trace::node_id(),
-                            next_hop,
-                            short_key_fingerprint(&mapped),
-                            payload_fp,
-                        );
-                        push_packet_meta_trace("ComponentError", 0, &msg, &connection_trace_id, "relay.error");
-                        anyhow::bail!(
-                            "RelayExtend key mismatch for {}: mapped key does not match payload key",
-                            next_hop
-                        );
-                    }
-                }
-                push_packet_meta_trace(
-                    "ComponentInput",
-                    handshake_payload.len(),
-                    &format!("relay.extend INPUT node={} next_hop={}", crate::trace::node_id(), next_hop),
-                    &connection_trace_id,
-                    "relay.extend",
-                );
+            }
 
-                // This relay dials the downstream hop, so it must be the initiator
-                // for the guard->middle / middle->exit handshake leg.
-                let hs = build_initiator(&local_priv_key, &selected_next_key)
-                    .context("Failed to build Noise_XX initiator for RelayExtend")?;
-
-                let mut ds_stream = timeout(Duration::from_secs(10), TcpStream::connect(next_hop))
-                    .await
-                    .context(format!("Timeout dialing next hop {}", next_hop))?
-                    .context(format!("Failed to TCP-connect to next hop {}", next_hop))?;
-
-                let transport = complete_handshake(&mut ds_stream, hs, true)
-                    .await
-                    .context(format!("Noise_XX handshake with next hop {} failed", next_hop))?;
-
-                // Capture the handshake hash as proof for the reply.
-                let handshake_hash = transport
-                    .get_remote_static()
-                    .map(|k| k.to_vec())
-                    .unwrap_or_default();
-                if !handshake_hash.is_empty() && handshake_hash != selected_next_key {
-                    let msg = format!(
-                        "relay.extend_identity_mismatch node={} next_hop={} expected={} got={} expected_fp={} got_fp={}",
-                        crate::trace::node_id(),
-                        next_hop,
-                        hex::encode(&selected_next_key),
-                        hex::encode(&handshake_hash),
-                        short_key_fingerprint(&selected_next_key),
-                        short_key_fingerprint(&handshake_hash),
-                    );
-                    push_packet_meta_trace("RelayFailureCapture", 0,
-                        &format!("node={} cell={} err=identity_mismatch", crate::trace::node_id(), cell_snapshot),
-                        &connection_trace_id, "relay.capture");
-                    push_packet_meta_trace("ComponentError", 0, &msg, &connection_trace_id, "relay.error");
-                    anyhow::bail!(
-                        "RelayExtend target identity mismatch at {}: expected {:?}, got {:?}",
-                        next_hop, selected_next_key, handshake_hash
+            // Compatibility bridge: in existing Phase-2 flow, terminal relay still
+            // forwards chunk bytes to mpub-receiver when publisher address is known.
+            if let Ok(publisher_addr) = crate::swarm::discover_publisher_addr_for_exit_relay().await {
+                if let Err(e) = forward_terminal_chunk_to_publisher(publisher_addr, &payload.chunk).await {
+                    tracing::warn!(
+                        "Destination relay failed forwarding chunk to Publisher {}: {e:#}",
+                        publisher_addr
                     );
                 }
-                tracing::info!(
-                    "RelayExtend handshake complete node={} role=initiator next_hop={} remote_key_fp={}",
+            }
+
+            push_packet_meta_trace(
+                "ExitDelivery",
+                payload.chunk.len(),
+                &format!(
+                    "relay.destination node={} chunk_id={} bytes={}",
                     crate::trace::node_id(),
-                    next_hop,
-                    short_key_fingerprint(&handshake_hash)
-                );
+                    payload.chunk_id,
+                    payload.chunk.len()
+                ),
+                "",
+                "relay.data",
+            );
 
-                send_cell_secure(
-                    &mut upstream,
-                    &mut upstream_transport,
-                    &OnionCell::RelayExtended(ExtendedPayload {
-                        handshake_response: handshake_hash,
-                    }),
-                )
-                .await?;
+            tokio::spawn(async move {
+                publish_chunks_received_from_env(1).await;
+            });
 
-                downstream_transport = Some((ds_stream, transport));
-                push_packet_meta_trace(
-                    "ComponentOutput",
-                    0,
-                    &format!("relay.extend OUTPUT node={} next_hop={} ok", crate::trace::node_id(), next_hop),
-                    &connection_trace_id,
-                    "relay.extend",
-                );
-                tracing::debug!(
-                    "RelayExtend complete — downstream link established to {}",
-                    next_hop
-                );
-            }
-
-            // ── RelayData: apply jitter, forward to downstream ─────────────
-            OnionCell::RelayData(DataPayload { ciphertext }) => {
-                let jitter =
-                    rand::random::<u64>() % (max_jitter_ms - min_jitter_ms + 1) + min_jitter_ms;
-                tokio::time::sleep(Duration::from_millis(jitter)).await;
-
-                match &mut downstream_transport {
-                    Some((ds_stream, transport)) => {
-                        let decrypted = decrypt_frame(&mut upstream_transport, &ciphertext)
-                            .context("Failed to decrypt RelayData outer envelope")?;
-
-                        let fwd_cell = OnionCell::RelayData(DataPayload {
-                            ciphertext: decrypted.clone(),
-                        });
-                        push_packet_meta_trace(
-                            "RelayData(Intermediate)",
-                            decrypted.len(),
-                            &format!("relay.forward node={} bytes={}", crate::trace::node_id(), decrypted.len()),
-                            &connection_trace_id,
-                            "relay.data",
-                        );
-                        send_cell_secure(ds_stream, transport, &fwd_cell)
-                            .await
-                            .context("Failed to forward RelayData to downstream")?;
-                    }
-                    None => {
-                        // Exit node: all onion layers peeled; forward to Publisher.
-                        let publisher_addr = crate::swarm::discover_publisher_addr_for_exit_relay()
-                            .await
-                            .context("Exit relay: could not resolve Publisher address")?;
-
-                        let mut pub_stream =
-                            timeout(Duration::from_secs(10), TcpStream::connect(publisher_addr))
-                                .await
-                                .context(format!("Exit relay: timeout connecting to Publisher {}", publisher_addr))?
-                                .context(format!("Exit relay: TCP connect to Publisher {} failed", publisher_addr))?;
-
-                        let plaintext_chunk = decrypt_frame(&mut upstream_transport, &ciphertext)
-                            .context("Exit relay: failed to decrypt final onion layer")?;
-
-                        let len = plaintext_chunk.len() as u32;
-                        pub_stream
-                            .write_all(&len.to_le_bytes())
-                            .await
-                            .context(format!("Exit relay: failed writing length prefix to Publisher {}", publisher_addr))?;
-                        pub_stream
-                            .write_all(&plaintext_chunk)
-                            .await
-                            .context(format!("Exit relay: failed writing chunk bytes to Publisher {}", publisher_addr))?;
-                        pub_stream.flush().await?;
-
-                        push_packet_meta_trace(
-                            "ExitDelivery",
-                            plaintext_chunk.len(),
-                            &format!("relay.exit_deliver node={} publisher={} bytes={}", crate::trace::node_id(), publisher_addr, plaintext_chunk.len()),
-                            &connection_trace_id,
-                            "relay.data",
-                        );
-                        tracing::info!(
-                            "Exit relay: forwarded {} bytes to Publisher {}",
-                            plaintext_chunk.len(),
-                            publisher_addr
-                        );
-
-                        tokio::spawn(async move {
-                            publish_chunks_received_from_env(1).await;
-                        });
-                    }
-                }
-            }
-
-            // ── RelayHeartbeat: echo to prove liveness ────────────────────
-            OnionCell::RelayHeartbeat(HeartbeatPayload { seq_id }) => {
-                tracing::trace!("Heartbeat seq={}", seq_id);
-                send_cell_secure(
-                    &mut upstream,
-                    &mut upstream_transport,
-                    &OnionCell::RelayHeartbeat(HeartbeatPayload { seq_id }),
-                )
-                .await?;
-            }
-
-            // ── RelayExtended: not expected on the responder side ─────────
-            OnionCell::RelayExtended(_) => {
-                push_packet_meta_trace(
-                    "RelayFailureCapture",
-                    0,
-                    &format!("node={} cell={} err=unexpected_extended", crate::trace::node_id(), cell_snapshot),
-                    &connection_trace_id,
-                    "relay.capture",
-                );
-                tracing::warn!("Unexpected RelayExtended cell from upstream — ignoring");
-            }
+            let ack = build_ack_onion(&payload)?;
+            write_raw_frame(&mut upstream, &ack)
+                .await
+                .context("Failed writing terminal ACK to upstream")?;
         }
     }
+
+    Ok(())
 }
 
-fn short_key_fingerprint(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return "none".to_string();
-    }
-    let hexed = hex::encode(bytes);
-    if hexed.len() <= 12 {
-        hexed
-    } else {
-        hexed[..12].to_string()
-    }
+fn peel_ack_for_upstream(local_priv_key: &[u8; 32], ack_frame: &[u8]) -> Option<Vec<u8>> {
+    let opened = open(local_priv_key, ack_frame).ok()?;
+    let layer: OnionLayer = serde_json::from_slice(&opened).ok()?;
+    Some(layer.inner)
 }
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Build a reverse-direction layered ACK.
+///
+/// `return_path` format is:
+/// `[Creator, Guard, Middle, Exit, ... , Destination]`
+///
+/// The destination (current node) wraps for each prior hop in reverse order so
+/// the ACK can be peeled hop-by-hop on the way back to the creator.
+fn build_ack_onion(payload: &ChunkPayload) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        !payload.return_path.is_empty(),
+        "ACK build failed: empty return_path"
+    );
+
+    let ack = AckPayload {
+        chunk_id: payload.chunk_id,
+        hash: payload.hash,
+        send_timestamp_ms: payload.send_timestamp_ms,
+        received_timestamp_ms: now_millis(),
+        total_chunks: payload.total_chunks,
+        chunk_index: payload.chunk_index,
+    };
+    let ack_bytes = serde_json::to_vec(&ack)?;
+
+    let creator = &payload.return_path[0];
+    let creator_layer = OnionLayer {
+        next_hop: None,
+        inner: ack_bytes,
+    };
+    let creator_layer_bytes = serde_json::to_vec(&creator_layer)?;
+    let mut sealed = seal(&creator.identity_pub, &creator_layer_bytes)?;
+
+    let dest_idx = payload.return_path.len().saturating_sub(1);
+    for idx in (1..dest_idx).rev() {
+        let current = &payload.return_path[idx];
+        let next_addr = payload.return_path[idx - 1].addr;
+        let layer = OnionLayer {
+            next_hop: Some(next_addr),
+            inner: sealed,
+        };
+        let layer_bytes = serde_json::to_vec(&layer)?;
+        sealed = seal(&current.identity_pub, &layer_bytes)?;
+    }
+
+    Ok(sealed)
+}
+
+async fn forward_terminal_chunk_to_publisher(
+    publisher_addr: SocketAddr,
+    chunk_bytes: &[u8],
+) -> Result<()> {
+    let mut pub_stream = timeout(Duration::from_secs(10), TcpStream::connect(publisher_addr))
+        .await
+        .context(format!(
+            "Timeout connecting to Publisher {} from destination relay",
+            publisher_addr
+        ))?
+        .context(format!(
+            "TCP connect to Publisher {} failed from destination relay",
+            publisher_addr
+        ))?;
+
+    // mpub-receiver wire format uses little-endian length prefix.
+    let len = chunk_bytes.len() as u32;
+    pub_stream
+        .write_all(&len.to_le_bytes())
+        .await
+        .context("Failed writing publisher length prefix")?;
+    pub_stream
+        .write_all(chunk_bytes)
+        .await
+        .context("Failed writing publisher chunk bytes")?;
+    pub_stream.flush().await?;
+    Ok(())
+}
+

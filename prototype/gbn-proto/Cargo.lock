@@ -2480,6 +2480,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-cloudwatch",
  "aws-sdk-servicediscovery",
+ "blake3",
  "ed25519-dalek",
  "gbn-protocol",
  "hex",

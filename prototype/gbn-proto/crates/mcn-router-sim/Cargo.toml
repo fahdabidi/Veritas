@@ -26,6 +26,7 @@ aws-config = { workspace = true }
 aws-sdk-servicediscovery = { workspace = true }
 aws-sdk-cloudwatch = { workspace = true }
 hex = "0.4.3"
+blake3 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

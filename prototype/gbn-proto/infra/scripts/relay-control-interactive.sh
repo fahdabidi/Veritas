@@ -329,7 +329,8 @@ py = (
     \"raw=base64.b64decode('\" + b64 + \"').decode('utf-8'); \"
     \"obj=json.loads(raw); \"
     \"wire=json.dumps(obj,separators=(',',':')).encode('utf-8'); \"
-    \"s=socket.create_connection(('127.0.0.1',5050),5); \"
+    \"s=socket.create_connection(('127.0.0.1',5050),60); \"
+    \"s.settimeout(60); \"
     \"s.sendall(wire); \"
     \"s.shutdown(socket.SHUT_WR); \"
     \"out=s.recv(131072); \"
@@ -356,7 +357,8 @@ b64, cont = sys.argv[1], sys.argv[2]
 py = (
     \"import base64,socket; \"
     \"p=base64.b64decode('\" + b64 + \"').decode(); \"
-    \"s=socket.create_connection(('127.0.0.1',5050),5); \"
+    \"s=socket.create_connection(('127.0.0.1',5050),60); \"
+    \"s.settimeout(60); \"
     \"s.sendall(p.encode()+b'\\\\n'); \"
     \"s.shutdown(1); print(s.recv(131072).decode(errors='replace')); s.close()\"
 )

@@ -4,6 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 pub const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
+pub const NOISE_ONE_SHOT_PATTERN: &str = "Noise_N_25519_ChaChaPoly_BLAKE2s";
 
 /// Initialize an Initiator for a Noise_XX handshake.
 /// The Initiator drives the connection, passing their local private key and the
@@ -83,4 +84,36 @@ pub async fn complete_handshake(
     }
 
     Ok(hs.into_transport_mode()?)
+}
+
+/// One-shot seal for onion payloads using Noise_N.
+///
+/// The sender only needs the recipient's static public key and sends a single
+/// encrypted message without an interactive handshake round-trip.
+pub fn seal(recipient_pub: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let builder = Builder::new(NOISE_ONE_SHOT_PATTERN.parse()?);
+    let mut hs = builder
+        .remote_public_key(recipient_pub)
+        .build_initiator()
+        .context("Failed to build Noise_N initiator")?;
+    let mut buf = vec![0u8; plaintext.len() + 128];
+    let len = hs.write_message(plaintext, &mut buf)?;
+    buf.truncate(len);
+    Ok(buf)
+}
+
+/// One-shot open for onion payloads using Noise_N.
+///
+/// The recipient uses its static private key to decrypt a single inbound
+/// ciphertext frame.
+pub fn open(local_priv: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    let builder = Builder::new(NOISE_ONE_SHOT_PATTERN.parse()?);
+    let mut hs = builder
+        .local_private_key(local_priv)
+        .build_responder()
+        .context("Failed to build Noise_N responder")?;
+    let mut buf = vec![0u8; ciphertext.len()];
+    let len = hs.read_message(ciphertext, &mut buf)?;
+    buf.truncate(len);
+    Ok(buf)
 }

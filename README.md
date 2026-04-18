@@ -125,11 +125,45 @@ The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline
 ```
 
 
+## Packet Path
+
+**Path/Return_Path**: Creator → Guard → Middle → Exit → Publisher
+
+The path is created by the creator from its DHT which has been populated by the gossip network
+
+**Onion build (Creator, innermost first):**
+
+```
+layer_pub  = seal(publisher_pub,  { next_hop: None,chunk_payload, chunk_id, chunk_hash, return_path, send_timestamp, total_chunks, chunk_index })
+layer_exit = seal(exit_pub,       { next_hop: publisher_addr, inner: layer_pub  })
+layer_mid  = seal(middle_pub,     { next_hop: exit_addr,      inner: layer_exit })
+layer_grd  = seal(guard_pub,      { next_hop: middle_addr,    inner: layer_mid  })
+```
+
+Creator sends `layer_grd` over TCP to Guard.
+
+**Each relay (Guard / Middle / Exit):**
+1. Read length-prefixed bytes from TCP
+2. `open(own_priv, bytes)` → `{ next_hop, inner }`
+3. Connect to `next_hop`, write `inner` as length-prefixed bytes
+4. (No response needed for data forwarding)
+
+**Publisher:**
+1. `open(own_priv, bytes)` → `{ next_hop: None,chunk_payload, chunk_id, chunk_hash, return_path, send_timestamp, total_chunks, chunk_index }`
+2. Verify hash, store chunk
+3. Build reverse-direction ACK (ChunkID, Receive Timestamp, Hash, ChunkIndex) onion using `return_path` → send back to Creator
+
+**ACK return path**: Publisher → Exit → Middle → Guard → Creator
+Creator must listen on an ACK port; return_path contains Creator's ack address.
+
+---
+
+
 ### What each participant can observe
 
 ```text
 Creator      â†’ Sees: local video + target Publisher key
-               Cannot see: full relay topology
+               Sees full relay topology and Pub Keys
 
 Guard relay  â†’ Sees: previous hop + next hop
                Cannot see: payload plaintext or final destination context
@@ -138,10 +172,10 @@ Middle relay â†’ Sees: adjacent hops only
                Cannot see: creator identity, publisher identity, or content plaintext
 
 Exit relay   â†’ Sees: prior hop and destination endpoint
-               Cannot see: origin creator identity
+               Cannot see: origin creator identity or content plaintext
 
 Publisher    â†’ Sees: decrypted submitted content
-               Cannot see: creator origin IP/path
+               Can see: full relay topology and Pub Keys back to creator for Ack message
 
 Storage node â†’ Sees: encrypted shards by content-addressed ID
                Cannot see: plaintext media

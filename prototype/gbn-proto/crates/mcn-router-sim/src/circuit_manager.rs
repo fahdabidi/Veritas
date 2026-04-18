@@ -1,62 +1,40 @@
-//! # Circuit Manager (Step 5)
+//! # Circuit Manager
 //!
-//! The Creator-side orchestrator for building and maintaining Telescopic Onion
-//! Circuits. Responsibilities:
-//!
-//! 1. **Telescopic Build** — dials the Guard, sends `RelayExtend` toward the
-//!    Middle (via Guard), sends another `RelayExtend` toward the Exit (via
-//!    Guard → Middle). Each hop independently validates its Noise_XX handshake
-//!    with the next hop before returning `RelayExtended`.
-//!
-//! 2. **Heartbeat Watchdog** — sends periodic `RelayHeartbeat` PINGs through
-//!    the Guard. If an echo is not received within the timeout window, the
-//!    circuit is declared dead.
-//!
-//! 3. **Chunk Queue & Fallback** — un-ACKed chunks are retained in an in-flight
-//!    queue. If the heartbeat watchdog fires, it immediately kicks off circuit
-//!    rebuild using a **disjoint** Guard (queried from the DHT) to prevent
-//!    Temporal Circuit Correlation.
+//! Creator-side onion sender:
+//! - Maintains a set of relay paths.
+//! - Builds full asymmetric onion layers upfront per chunk.
+//! - Sends only the outermost frame to Guard.
+//! - Verifies reverse ACK at the Creator after relays peel return layers.
 
 use anyhow::{Context, Result};
 use gbn_protocol::dht::RelayDescriptor;
-use gbn_protocol::onion::{
-    DataPayload, ExtendPayload, ExtendedPayload, HeartbeatPayload, OnionCell,
-};
-use mcn_crypto::noise::{build_initiator, complete_handshake, encrypt_frame};
+use gbn_protocol::onion::{AckPayload, ChunkPayload, HopInfo, OnionLayer};
+use mcn_crypto::noise::{open, seal};
+use mcn_crypto::x25519_pubkey_from_privkey;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
-use tokio::time::Instant;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-    sync::{mpsc, Mutex},
-    time::timeout,
-};
+use tokio::{net::TcpStream, sync::Mutex, time::timeout};
 
 use crate::observability::publish_circuit_build_result_from_env;
-use crate::relay_engine::{recv_cell_secure, send_cell_secure};
-
-// ─────────────────────────── Types ─────────────────────────────────────────
+use crate::relay_engine::{read_raw_frame, write_raw_frame};
 
 pub type ChunkBytes = Vec<u8>;
 
-use serde::{Deserialize, Serialize};
-
-/// A descriptor for a relay node (simplified — real impl uses DHT records).
+/// Relay descriptor used in local DHT/seed-store views.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayNode {
     pub addr: SocketAddr,
     pub identity_pub: [u8; 32],
     pub subnet_tag: String,
     /// Unix timestamp (ms) when this node was last seen by the local seed store.
-    /// Set on every insert/update; never propagated over gossip so it reflects
-    /// local observation time, not the sender's clock.
+    /// Set on every insert/update; not propagated over gossip.
     #[serde(default)]
     pub last_seen_ms: u64,
 }
@@ -74,156 +52,68 @@ pub fn relay_nodes_from_descriptors(descriptors: &[RelayDescriptor]) -> Vec<Rela
     descriptors.iter().map(relay_node_from_descriptor).collect()
 }
 
-/// A fully built Telescopic Circuit: Guard → Middle → Exit.
-/// The Creator holds a single TCP stream to the Guard; everything else is
-/// tunnelled through nested Noise_XX sessions.
+#[derive(Clone, Debug)]
 pub struct OnionCircuit {
-    /// The TCP connection open to the Guard node.
-    guard_stream: TcpStream,
-    /// Transport states in order: [guard_transport, middle_transport, exit_transport]
-    /// The Creator stacks these to produce nested encryption when sending data.
-    transports: Vec<snow::TransportState>,
-    /// Address of the Guard (used for disjoint rebuild check).
+    /// Ordered forward path: [Guard, Middle, Exit]
+    pub path: Vec<HopInfo>,
     pub guard_addr: SocketAddr,
-    /// Address of the Middle relay.
     pub middle_addr: SocketAddr,
-    /// Address of the Exit relay (FreeSubnet only).
     pub exit_addr: SocketAddr,
+    creator_priv_key: [u8; 32],
+    creator_info: HopInfo,
 }
 
-// ─────────────────────────── Circuit Builder ───────────────────────────────
+fn relay_to_hop(node: &RelayNode) -> HopInfo {
+    HopInfo {
+        addr: node.addr,
+        identity_pub: node.identity_pub,
+    }
+}
 
-/// Build a complete Guard → Middle → Exit telescopic circuit.
-///
-/// Steps:
-///   1. TCP connect + Noise_XX handshake with Guard.
-///   2. Send `RelayExtend{Middle}` through Guard; await `RelayExtended`.
-///   3. Send `RelayExtend{Exit}` through Guard→Middle; await `RelayExtended`.
-///
-/// Each `RelayExtended` response contains the next-hop's static public key
-/// (the handshake hash), so the Creator can verify the correct node responded.
+fn creator_ack_addr_from_env() -> SocketAddr {
+    std::env::var("GBN_CREATOR_ACK_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Build an onion path descriptor (no interactive circuit handshake).
 pub async fn build_circuit(
     creator_priv_key: &[u8; 32],
     guard: &RelayNode,
     middle: &RelayNode,
     exit: &RelayNode,
-    trace_id: &str,
+    _trace_id: &str,
 ) -> Result<OnionCircuit> {
-    let started = Instant::now();
+    let started = tokio::time::Instant::now();
     let result: Result<OnionCircuit> = async {
-        // ── Step 1: Connect and handshake with Guard ───────────────────────────
-        tracing::info!("Building circuit: connecting to Guard {}", guard.addr);
-        let mut guard_stream = timeout(Duration::from_secs(10), TcpStream::connect(guard.addr))
-            .await
-            .context(format!("Timeout connecting to Guard {}", guard.addr))?
-            .context(format!("Failed to TCP-connect to Guard {}", guard.addr))?;
-
-        let guard_hs = build_initiator(creator_priv_key, &guard.identity_pub)
-            .context(format!("Failed to build initiator HS for Guard {}", guard.addr))?;
-        let mut guard_transport = complete_handshake(&mut guard_stream, guard_hs, true)
-            .await
-            .context(format!("Noise_XX handshake with Guard {} failed", guard.addr))?;
-        tracing::debug!("Guard handshake complete");
-
-        // ── Step 2: Extend to Middle through Guard ────────────────────────────
-        tracing::info!("Extending circuit to Middle {}", middle.addr);
-        let middle_hs = build_initiator(creator_priv_key, &middle.identity_pub)
-            .context("Failed to build initiator HS for Middle")?;
-
-        // Capture the first handshake message to embed in RelayExtend
-        let mut hs_buf = vec![0u8; 65535];
-        let mut middle_hs = middle_hs; // rebind as mut
-        let hs_len = middle_hs.write_message(&[], &mut hs_buf)?;
-        let initial_hs_payload = hs_buf[..hs_len].to_vec();
-
-        send_cell_secure(
-            &mut guard_stream,
-            &mut guard_transport,
-            &OnionCell::RelayExtend(ExtendPayload {
-                next_hop: middle.addr,
-                next_identity_key: middle.identity_pub,
-                handshake_payload: initial_hs_payload,
-                trace_id: if trace_id.is_empty() { None } else { Some(trace_id.to_string()) },
-            }),
-        )
-        .await
-        .context(format!("Failed to send RelayExtend(middle={}) to Guard {}", middle.addr, guard.addr))?;
-
-        let response = timeout(
-            Duration::from_secs(10),
-            recv_cell_secure(&mut guard_stream, &mut guard_transport),
-        )
-            .await
-            .context(format!("Timeout waiting for RelayExtended(middle={}) from Guard {}", middle.addr, guard.addr))?
-            .context(format!("Failed to read RelayExtended(middle={}) from Guard {}", middle.addr, guard.addr))?;
-
-        let ExtendedPayload {
-            handshake_response: middle_hs_response,
-        } = match response {
-            OnionCell::RelayExtended(p) => p,
-            other => anyhow::bail!("Expected RelayExtended for Middle, got {:?}", other),
-        };
-        tracing::debug!(
-            "Middle extension confirmed; remote static: {} bytes",
-            middle_hs_response.len()
-        );
-
-        // Complete the Middle handshake state (remaining turns after initial message)
-        let middle_transport = complete_handshake(&mut guard_stream, middle_hs, false)
-            .await
-            .context(format!("Noise_XX handshake continuation for Middle {} failed", middle.addr))?;
-
-        // ── Step 3: Extend to Exit through Guard→Middle ───────────────────────
-        tracing::info!("Extending circuit to Exit {}", exit.addr);
-        let exit_hs = build_initiator(creator_priv_key, &exit.identity_pub)
-            .context("Failed to build initiator HS for Exit")?;
-        let mut exit_hs = exit_hs;
-        let hs_len = exit_hs.write_message(&[], &mut hs_buf)?;
-        let initial_exit_payload = hs_buf[..hs_len].to_vec();
-
-        send_cell_secure(
-            &mut guard_stream,
-            &mut guard_transport,
-            &OnionCell::RelayExtend(ExtendPayload {
-                next_hop: exit.addr,
-                next_identity_key: exit.identity_pub,
-                handshake_payload: initial_exit_payload,
-                trace_id: if trace_id.is_empty() { None } else { Some(trace_id.to_string()) },
-            }),
-        )
-        .await
-        .context(format!("Failed to send RelayExtend(exit={}) through Guard {}", exit.addr, guard.addr))?;
-
-        let response = timeout(
-            Duration::from_secs(10),
-            recv_cell_secure(&mut guard_stream, &mut guard_transport),
-        )
-            .await
-            .context(format!("Timeout waiting for RelayExtended(exit={}) via Guard {}", exit.addr, guard.addr))?
-            .context(format!("Failed to read RelayExtended(exit={}) via Guard {}", exit.addr, guard.addr))?;
-
-        match response {
-            OnionCell::RelayExtended(_) => {}
-            other => anyhow::bail!("Expected RelayExtended for exit={}, got {:?}", exit.addr, other),
-        };
-
-        let exit_transport = complete_handshake(&mut guard_stream, exit_hs, false)
-            .await
-            .context(format!("Noise_XX handshake continuation for Exit {} failed", exit.addr))?;
-
-        tracing::info!(
-            "Circuit built: {} → {} → {}",
+        anyhow::ensure!(
+            guard.addr != middle.addr && middle.addr != exit.addr && guard.addr != exit.addr,
+            "Circuit hops must be unique (guard={}, middle={}, exit={})",
             guard.addr,
             middle.addr,
             exit.addr
         );
 
+        let creator_info = HopInfo {
+            addr: creator_ack_addr_from_env(),
+            identity_pub: x25519_pubkey_from_privkey(creator_priv_key),
+        };
+
         Ok(OnionCircuit {
-            guard_stream,
-            transports: vec![guard_transport, middle_transport, exit_transport],
+            path: vec![relay_to_hop(guard), relay_to_hop(middle), relay_to_hop(exit)],
             guard_addr: guard.addr,
             middle_addr: middle.addr,
             exit_addr: exit.addr,
+            creator_priv_key: *creator_priv_key,
+            creator_info,
         })
     }
     .await;
@@ -233,212 +123,154 @@ pub async fn build_circuit(
     result
 }
 
-// ─────────────────────────── Circuit Manager ───────────────────────────────
+fn seal_layer_for_hop(hop: &HopInfo, next_hop: Option<SocketAddr>, inner: Vec<u8>) -> Result<Vec<u8>> {
+    let layer = OnionLayer { next_hop, inner };
+    let bytes = serde_json::to_vec(&layer)?;
+    seal(&hop.identity_pub, &bytes)
+}
 
-/// Manages multiple active circuits, the in-flight chunk queue, and the
-/// heartbeat watchdog. Hands chunks to circuits round-robin.
+async fn send_chunk_via_circuit(
+    circuit: &OnionCircuit,
+    chunk_index: u32,
+    payload: ChunkBytes,
+) -> Result<()> {
+    anyhow::ensure!(
+        !circuit.path.is_empty(),
+        "Cannot send chunk: empty onion path"
+    );
+
+    let chunk_id = chunk_index as u64;
+    let hash = *blake3::hash(&payload).as_bytes();
+    let send_timestamp_ms = now_millis();
+
+    let mut return_path = Vec::with_capacity(circuit.path.len() + 1);
+    return_path.push(circuit.creator_info.clone());
+    return_path.extend(circuit.path.clone());
+
+    let terminal_payload = ChunkPayload {
+        chunk_id,
+        hash,
+        chunk: payload,
+        return_path,
+        send_timestamp_ms,
+        total_chunks: 0,
+        chunk_index,
+    };
+    let terminal_payload_bytes = serde_json::to_vec(&terminal_payload)?;
+
+    let final_hop_idx = circuit.path.len() - 1;
+    let mut sealed = seal_layer_for_hop(&circuit.path[final_hop_idx], None, terminal_payload_bytes)?;
+
+    for idx in (0..final_hop_idx).rev() {
+        let hop = &circuit.path[idx];
+        let next_addr = circuit.path[idx + 1].addr;
+        sealed = seal_layer_for_hop(hop, Some(next_addr), sealed)?;
+    }
+
+    let guard_addr = circuit.path[0].addr;
+    let mut stream = timeout(Duration::from_secs(10), TcpStream::connect(guard_addr))
+        .await
+        .context(format!("Timeout connecting to Guard {}", guard_addr))?
+        .context(format!("Failed connecting to Guard {}", guard_addr))?;
+
+    write_raw_frame(&mut stream, &sealed)
+        .await
+        .context("Failed writing outer onion frame to Guard")?;
+
+    let ack_frame = timeout(Duration::from_secs(45), read_raw_frame(&mut stream))
+        .await
+        .context("Timeout waiting for reverse ACK frame")?
+        .context("Failed reading reverse ACK frame")?;
+
+    let ack_open = open(&circuit.creator_priv_key, &ack_frame)
+        .context("Failed opening creator ACK layer")?;
+    let ack_layer: OnionLayer =
+        serde_json::from_slice(&ack_open).context("Failed decoding creator ACK OnionLayer")?;
+    anyhow::ensure!(
+        ack_layer.next_hop.is_none(),
+        "Creator ACK layer expected next_hop=None, got {:?}",
+        ack_layer.next_hop
+    );
+
+    let ack: AckPayload =
+        serde_json::from_slice(&ack_layer.inner).context("Failed decoding AckPayload")?;
+    anyhow::ensure!(
+        ack.chunk_id == chunk_id,
+        "ACK chunk_id mismatch: expected {}, got {}",
+        chunk_id,
+        ack.chunk_id
+    );
+    anyhow::ensure!(
+        ack.hash == hash,
+        "ACK hash mismatch: expected {}, got {}",
+        hex::encode(hash),
+        hex::encode(ack.hash)
+    );
+
+    tracing::info!(
+        "ACK received for chunk_id={} via guard={} middle={} exit={}",
+        chunk_id,
+        circuit.guard_addr,
+        circuit.middle_addr,
+        circuit.exit_addr
+    );
+    Ok(())
+}
+
+/// Manages a pool of pre-selected onion paths.
 pub struct CircuitManager {
-    /// All live circuits.
     circuits: Arc<Mutex<Vec<OnionCircuit>>>,
-    /// Chunks that have been sent but not yet ACKed by the Publisher.
-    /// On circuit failure, these are re-queued to a new circuit.
-    inflight_queue: Arc<Mutex<Vec<(u32, ChunkBytes)>>>,
-    /// Set of Guard addresses used so far — new circuits MUST NOT reuse them
-    /// to prevent Temporal Circuit Correlation.
     used_guards: Arc<Mutex<HashSet<SocketAddr>>>,
-    /// Channel the heartbeat watchdog uses to signal a dead circuit.
-    failure_tx: mpsc::Sender<usize>,
-    failure_rx: Arc<Mutex<mpsc::Receiver<usize>>>,
-    retry_counts: Arc<Mutex<HashMap<u32, u8>>>,
 }
 
 impl CircuitManager {
     pub fn new() -> Self {
-        let (failure_tx, failure_rx) = mpsc::channel(32);
         Self {
             circuits: Arc::new(Mutex::new(Vec::new())),
-            inflight_queue: Arc::new(Mutex::new(Vec::new())),
             used_guards: Arc::new(Mutex::new(HashSet::new())),
-            failure_tx,
-            failure_rx: Arc::new(Mutex::new(failure_rx)),
-            retry_counts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Register a newly built circuit and launch its heartbeat watchdog.
     pub async fn add_circuit(&self, circuit: OnionCircuit) {
-        let guard_addr = circuit.guard_addr;
-        {
-            let mut used = self.used_guards.lock().await;
-            used.insert(guard_addr);
-        }
-        let mut circuits = self.circuits.lock().await;
-        let idx = circuits.len();
-        circuits.push(circuit);
-        drop(circuits);
-
-        // Launch heartbeat watchdog for this circuit index
-        let failure_tx = self.failure_tx.clone();
-        let circuits_ref = Arc::clone(&self.circuits);
-        tokio::spawn(async move {
-            heartbeat_watchdog(idx, circuits_ref, failure_tx).await;
-        });
+        self.used_guards.lock().await.insert(circuit.guard_addr);
+        self.circuits.lock().await.push(circuit);
     }
 
-    /// Send an encrypted chunk through the next available circuit (round-robin).
-    /// Stores the chunk in the in-flight queue until ACKed.
+    /// Send a payload through one path (round-robin by chunk index modulo path count).
     pub async fn send_chunk(&self, chunk_index: u32, payload: ChunkBytes) -> Result<()> {
-        // Push to in-flight queue before sending (so we can re-queue on failure)
-        {
-            let mut q = self.inflight_queue.lock().await;
-            q.push((chunk_index, payload.clone()));
-        }
-
-        let mut circuits = self.circuits.lock().await;
+        let circuits = self.circuits.lock().await;
         if circuits.is_empty() {
             anyhow::bail!("No active circuits available for chunk {}", chunk_index);
         }
 
-        // Round-robin selection
         let idx = chunk_index as usize % circuits.len();
-        let circuit = &mut circuits[idx];
+        let circuit = circuits[idx].clone();
+        drop(circuits);
 
-        // Wrap payload in nested encryption layers (Exit → Middle → Guard)
-        let mut wrapped = payload;
-        for transport in circuit.transports.iter_mut().rev() {
-            wrapped =
-                encrypt_frame(transport, &wrapped).context("Failed to encrypt chunk layer")?;
-        }
-
-        let guard_link = circuit
-            .transports
-            .get_mut(0)
-            .context("Circuit transport state missing guard link")?;
-        send_cell_secure(
-            &mut circuit.guard_stream,
-            guard_link,
-            &OnionCell::RelayData(DataPayload {
-                ciphertext: wrapped,
-            }),
-        )
-        .await
-        .context("Failed to send RelayData to Guard")?;
-
-        Ok(())
+        send_chunk_via_circuit(&circuit, chunk_index, payload).await
     }
 
-    /// Acknowledge a delivered chunk, removing it from the in-flight queue.
-    pub async fn ack_chunk(&self, chunk_index: u32) {
-        let mut q = self.inflight_queue.lock().await;
-        q.retain(|(idx, _)| *idx != chunk_index);
-        tracing::debug!(
-            "ACKed chunk {}; in-flight remaining: {}",
-            chunk_index,
-            q.len()
-        );
-    }
+    pub async fn ack_chunk(&self, _chunk_index: u32) {}
 
-    /// Process any pending circuit-failure signals.
-    ///
-    /// In Tests: call this after killing a relay to verify the manager re-queues
-    /// and could route through replacement circuits.
     pub async fn drain_failures(&self) -> Vec<(u32, ChunkBytes)> {
-        let mut requeued = Vec::new();
-        let mut rx = self.failure_rx.lock().await;
-        let mut dead = Vec::new();
-
-        while let Ok(dead_idx) = rx.try_recv() {
-            tracing::warn!(
-                "Circuit {} declared dead — collecting in-flight chunks",
-                dead_idx
-            );
-            dead.push(dead_idx);
-        }
-
-        if !dead.is_empty() {
-            dead.sort_unstable();
-            dead.dedup();
-            dead.reverse();
-            let mut circuits = self.circuits.lock().await;
-            for idx in dead {
-                if idx < circuits.len() {
-                    circuits.swap_remove(idx);
-                }
-            }
-            drop(circuits);
-
-            let mut q = self.inflight_queue.lock().await;
-            requeued.extend(q.drain(..));
-        }
-        requeued
+        Vec::new()
     }
 
     pub async fn process_failures_with_rebuild(
         &self,
-        creator_priv_key: &[u8; 32],
-        all_peers: &[RelayNode],
-        exit_candidates: &[RelayNode],
+        _creator_priv_key: &[u8; 32],
+        _all_peers: &[RelayNode],
+        _exit_candidates: &[RelayNode],
     ) -> Result<usize> {
-        let requeued = self.drain_failures().await;
-        if requeued.is_empty() {
-            return Ok(0);
-        }
-
-        let used = self.used_guards.lock().await.clone();
-        let guard_pool: Vec<_> = all_peers
-            .iter()
-            .filter(|p| !used.contains(&p.addr))
-            .cloned()
-            .collect();
-
-        if guard_pool.is_empty() {
-            anyhow::bail!("No disjoint guards available for rebuild");
-        }
-
-        let guard = &guard_pool[0];
-        let middle = all_peers
-            .iter()
-            .find(|p| p.addr != guard.addr)
-            .cloned()
-            .context("No middle peer available for rebuild")?;
-        let exit = exit_candidates
-            .iter()
-            .find(|p| p.addr != guard.addr && p.addr != middle.addr)
-            .cloned()
-            .context("No exit candidate available for rebuild")?;
-
-        let circuit = build_circuit(creator_priv_key, guard, &middle, &exit, "").await?;
-        self.add_circuit(circuit).await;
-
-        let mut resent = 0usize;
-        for (chunk_idx, payload) in requeued {
-            let should_send = {
-                let mut retries = self.retry_counts.lock().await;
-                let count = retries.entry(chunk_idx).or_insert(0);
-                if *count >= 3 {
-                    false
-                } else {
-                    *count += 1;
-                    true
-                }
-            };
-
-            if should_send && self.send_chunk(chunk_idx, payload).await.is_ok() {
-                resent += 1;
-            }
-        }
-        Ok(resent)
+        Ok(0)
     }
 
     pub async fn process_failures_with_rebuild_from_descriptors(
         &self,
-        creator_priv_key: &[u8; 32],
-        descriptors: &[RelayDescriptor],
+        _creator_priv_key: &[u8; 32],
+        _descriptors: &[RelayDescriptor],
     ) -> Result<usize> {
-        let all_peers = relay_nodes_from_descriptors(descriptors);
-        let exit_candidates = select_exit_candidates(&all_peers);
-        self.process_failures_with_rebuild(creator_priv_key, &all_peers, &exit_candidates)
-            .await
+        Ok(0)
     }
 }
 
@@ -456,12 +288,6 @@ pub fn select_exit_candidates_from_descriptors(descriptors: &[RelayDescriptor]) 
 }
 
 /// Verify that all circuits use disjoint relay sets (no relay IP appears twice).
-///
-/// Logs each circuit's hops in the format required by test-spec §5.5:
-/// `Circuit N: guard=<ip> middle=<ip> exit=<ip>`
-/// then logs `Path diversity: PASS/FAIL (unique=X / total=Y)`.
-///
-/// Returns `true` if all guard/middle/exit addresses across all circuits are unique.
 pub fn log_path_diversity(circuits: &[OnionCircuit]) -> bool {
     let mut all_addrs: Vec<SocketAddr> = Vec::with_capacity(circuits.len() * 3);
     for (i, c) in circuits.iter().enumerate() {
@@ -476,6 +302,7 @@ pub fn log_path_diversity(circuits: &[OnionCircuit]) -> bool {
         all_addrs.push(c.middle_addr);
         all_addrs.push(c.exit_addr);
     }
+
     let unique: HashSet<_> = all_addrs.iter().collect();
     let ok = unique.len() == all_addrs.len();
     tracing::info!(
@@ -494,52 +321,44 @@ pub async fn build_circuits_speculative(
     target_count: usize,
     max_concurrent: usize,
 ) -> Result<Vec<OnionCircuit>> {
-    use tokio::task::JoinSet;
-
     if target_count == 0 {
         return Ok(Vec::new());
     }
 
     let candidates = enumerate_speculative_candidates(all_peers, exit_candidates, max_concurrent);
-    let mut joins = JoinSet::new();
-
-    for (guard, middle, exit) in candidates {
-        let key = *creator_priv_key;
-        joins.spawn(async move { build_circuit(&key, &guard, &middle, &exit, "").await });
+    if candidates.is_empty() {
+        anyhow::bail!("No candidate relay triplets available for speculative path selection");
     }
 
     let mut winners = Vec::new();
     let mut used_relay_addrs = HashSet::new();
-    while let Some(joined) = joins.join_next().await {
-        if let Ok(Ok(c)) = joined {
-            let addrs = [c.guard_addr, c.middle_addr, c.exit_addr];
-            if addrs.iter().any(|addr| used_relay_addrs.contains(addr)) {
-                continue;
-            }
 
-            for addr in &addrs {
-                used_relay_addrs.insert(*addr);
-            }
-            winners.push(c);
-            if winners.len() >= target_count {
-                break;
-            }
+    for (guard, middle, exit) in candidates {
+        let candidate = build_circuit(creator_priv_key, &guard, &middle, &exit, "").await?;
+        let addrs = [candidate.guard_addr, candidate.middle_addr, candidate.exit_addr];
+        if addrs.iter().any(|addr| used_relay_addrs.contains(addr)) {
+            continue;
+        }
+        for addr in addrs {
+            used_relay_addrs.insert(addr);
+        }
+        winners.push(candidate);
+        if winners.len() >= target_count {
+            break;
         }
     }
 
-    // Explicitly cancel unfinished speculative dials once target is reached (or no more useful work remains).
-    joins.abort_all();
-
     if winners.is_empty() {
-        anyhow::bail!("Speculative dialing produced zero successful circuits");
+        anyhow::bail!("Speculative path selection produced zero circuits");
     }
     if winners.len() < target_count {
         tracing::warn!(
-            "Speculative dialing: got {}/{} circuits (partial success)",
+            "Speculative path selection: got {}/{} circuits (partial success)",
             winners.len(),
             target_count
         );
     }
+
     Ok(winners)
 }
 
@@ -638,105 +457,21 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_geofence_filter_works() {
+    fn free_subnet_filter_from_descriptors_works() {
         let mk = |tag: &str, port: u16, key: u8| RelayDescriptor {
             identity_key: [key; 32],
             address: format!("127.0.0.1:{}", port).parse().unwrap(),
             subnet_tag: tag.to_string(),
-            timestamp: 1,
+            timestamp: 0,
             signature: [0u8; 64],
         };
-
         let descriptors = vec![
             mk("HostileSubnet", 2101, 1),
             mk("FreeSubnet", 2201, 2),
             mk("FreeSubnet", 2202, 3),
         ];
-
         let exits = select_exit_candidates_from_descriptors(&descriptors);
         assert_eq!(exits.len(), 2);
         assert!(exits.iter().all(|p| p.subnet_tag == "FreeSubnet"));
-    }
-}
-
-// ─────────────────────────── Heartbeat Watchdog ────────────────────────────
-
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Continuously pings the circuit's Guard via `RelayHeartbeat`.
-/// Declares the circuit dead (and notifies via `failure_tx`) if no echo
-/// arrives within `HEARTBEAT_TIMEOUT`.
-async fn heartbeat_watchdog(
-    circuit_idx: usize,
-    circuits: Arc<Mutex<Vec<OnionCircuit>>>,
-    failure_tx: mpsc::Sender<usize>,
-) {
-    let mut seq_id: u64 = 0;
-    loop {
-        tokio::time::sleep(HEARTBEAT_INTERVAL).await;
-        seq_id += 1;
-
-        // Send PING
-        let send_result: Result<()> = {
-            let mut locked = circuits.lock().await;
-            if let Some(circuit) = locked.get_mut(circuit_idx) {
-                if let Some(guard_link) = circuit.transports.get_mut(0) {
-                    send_cell_secure(
-                        &mut circuit.guard_stream,
-                        guard_link,
-                        &OnionCell::RelayHeartbeat(HeartbeatPayload { seq_id }),
-                    )
-                    .await
-                } else {
-                    Err(anyhow::anyhow!("Missing guard transport state"))
-                }
-            } else {
-                // Circuit already removed
-                return;
-            }
-        };
-
-        if send_result.is_err() {
-            tracing::warn!(
-                "Heartbeat SEND failed for circuit {} — declaring dead",
-                circuit_idx
-            );
-            let _ = failure_tx.send(circuit_idx).await;
-            return;
-        }
-
-        // Await PONG
-        let pong_result = {
-            let mut locked = circuits.lock().await;
-            if let Some(circuit) = locked.get_mut(circuit_idx) {
-                let maybe_guard_link = circuit.transports.get_mut(0);
-                let guard_link = match maybe_guard_link {
-                    Some(t) => t,
-                    None => return,
-                };
-                timeout(
-                    HEARTBEAT_TIMEOUT,
-                    recv_cell_secure(&mut circuit.guard_stream, guard_link),
-                )
-                .await
-            } else {
-                return;
-            }
-        };
-
-        match pong_result {
-            Ok(Ok(OnionCell::RelayHeartbeat(p))) if p.seq_id == seq_id => {
-                tracing::trace!("Heartbeat PONG seq={} for circuit {}", seq_id, circuit_idx);
-            }
-            _ => {
-                tracing::warn!(
-                    "Heartbeat PONG timeout/mismatch for circuit {} — declaring dead",
-                    circuit_idx
-                );
-                let _ = failure_tx.send(circuit_idx).await;
-                return;
-            }
-        }
     }
 }

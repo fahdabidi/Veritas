@@ -1,50 +1,53 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-/// Outer envelope representing traffic traversing a Telescopic Circuit.
+/// A single onion layer plaintext after successful decrypt/open.
+///
+/// If `next_hop` is `Some(addr)`, the current node is an intermediate relay and
+/// must forward `inner` to `addr`.
+///
+/// If `next_hop` is `None`, this node is the terminal destination and `inner`
+/// should be decoded as the destination payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OnionCell {
-    /// Request the current node to dial a new downstream hop.
-    RelayExtend(ExtendPayload),
-
-    /// Inform the client that the extension succeeded or failed.
-    RelayExtended(ExtendedPayload),
-
-    /// A bi-directional heartbeat to maintain active connections.
-    RelayHeartbeat(HeartbeatPayload),
-
-    /// Standard data payload that will be forwarded to the next hop or the Exit node.
-    RelayData(DataPayload),
+pub struct OnionLayer {
+    pub next_hop: Option<SocketAddr>,
+    pub inner: Vec<u8>,
 }
 
+/// Public identity for one hop in a route.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtendPayload {
-    /// The address of the next hop to dial.
-    pub next_hop: SocketAddr,
-    /// The identity key of the next hop (to verify their Snow handshake).
-    pub next_identity_key: [u8; 32],
-    /// The first stage of a Noise_XX handshake intended for the next hop.
-    pub handshake_payload: Vec<u8>,
-    /// Distributed trace chain ID propagated from the circuit initiator.
-    /// Relays include this in their ring-buffer entries so failures on any hop
-    /// can be correlated back to the originating SendDummy / Creator operation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<String>,
+pub struct HopInfo {
+    pub addr: SocketAddr,
+    pub identity_pub: [u8; 32],
 }
 
+/// Terminal payload delivered at the final hop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtendedPayload {
-    /// The response stage of the Noise_XX handshake if successful.
-    pub handshake_response: Vec<u8>,
+pub struct ChunkPayload {
+    pub chunk_id: u64,
+    pub hash: [u8; 32],
+    pub chunk: Vec<u8>,
+    pub return_path: Vec<HopInfo>,
+    #[serde(default)]
+    pub send_timestamp_ms: u64,
+    #[serde(default)]
+    pub total_chunks: u32,
+    #[serde(default)]
+    pub chunk_index: u32,
 }
 
+/// Terminal ACK payload decrypted by the creator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeartbeatPayload {
-    pub seq_id: u64,
+pub struct AckPayload {
+    pub chunk_id: u64,
+    pub hash: [u8; 32],
+    #[serde(default)]
+    pub send_timestamp_ms: u64,
+    #[serde(default)]
+    pub received_timestamp_ms: u64,
+    #[serde(default)]
+    pub total_chunks: u32,
+    #[serde(default)]
+    pub chunk_index: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataPayload {
-    /// The inner payload, fully opaque to non-destination relays.
-    pub ciphertext: Vec<u8>,
-}

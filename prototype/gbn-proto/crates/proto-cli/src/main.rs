@@ -555,9 +555,6 @@ async fn main() -> Result<()> {
                     let onion_handle = relay_engine::spawn_onion_relay(
                         onion_addr,
                         noise_priv_key,
-                        seed_store.clone(),
-                        0,
-                        0, // no artificial jitter in ECS
                     )
                     .await
                     .map_err(|e| {

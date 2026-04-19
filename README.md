@@ -50,6 +50,24 @@ See [`test-vectors/README.md`](./test-vectors/README.md) for expected files and 
 
 For EC2-based prototype runs and teardown, see [`infra/README-infra.md`](./infra/README-infra.md).
 
+### 5) Scan the repo for leaked secrets
+
+Use the repo-local scanner before commits or sharing the workspace:
+
+```bash
+python tools/scan_secrets.py .
+```
+
+Fail CI or pre-push checks when findings exist:
+
+```bash
+python tools/scan_secrets.py . --fail-on-findings
+```
+
+The scanner looks for likely AWS credentials, private key blocks, GitHub tokens, JWTs,
+and suspicious secret-style assignments. To suppress an intentional test fixture or
+documented example on a specific line, add `secretscan:allow` to that line.
+
 ---
 
 ## Vision & Mission

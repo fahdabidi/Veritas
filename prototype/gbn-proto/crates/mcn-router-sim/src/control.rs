@@ -80,6 +80,15 @@ fn next_chain(parent: &str) -> String {
     }
 }
 
+const SEND_DUMMY_FRAGMENT_SIZE: usize = 16 * 1024;
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 pub fn push_packet_meta(action: &str, size_bytes: usize, info: &str) {
     #[cfg(not(feature = "distributed-trace"))]
     {
@@ -556,50 +565,88 @@ async fn execute_send_dummy(
     
     cm.add_circuit(circuit).await;
 
-    // 4. Send dummy packet
-    chain = next_chain(&chain);
+    let dummy_payload = vec![0x42u8; size]; // "B"s
+    let total_chunks = dummy_payload.len().div_ceil(SEND_DUMMY_FRAGMENT_SIZE) as u32;
+    let transfer_chunk_id = now_millis();
+    let transfer_chain = next_chain(&chain);
     push_packet_meta_trace(
         "ComponentInput",
         size,
-        &format!("circuit_manager.send_chunk INPUT chunk_index=0 size={size}"),
-        &chain,
+        &format!(
+            "circuit_manager.send_chunk INPUT chunk_id={} total_chunks={} size={} fragment_size={}",
+            transfer_chunk_id, total_chunks, size, SEND_DUMMY_FRAGMENT_SIZE
+        ),
+        &transfer_chain,
         "component.input",
     );
-    let dummy_payload = vec![0x42u8; size]; // "B"s
 
-    cm.send_chunk(0, dummy_payload)
+    for (chunk_index, fragment) in dummy_payload
+        .chunks(SEND_DUMMY_FRAGMENT_SIZE)
+        .enumerate()
+    {
+        cm.send_chunk_with_meta(
+            transfer_chunk_id,
+            chunk_index as u32,
+            total_chunks,
+            Some(&transfer_chain),
+            fragment.to_vec(),
+        )
         .await
         .with_context(|| {
             format!(
-                "SendDummy send_chunk failed guard={} middle={} exit={} size={}",
-                guard.addr, middle.addr, exit.addr, size
+                "SendDummy send_chunk failed guard={} middle={} exit={} size={} chunk_index={} total_chunks={} chunk_id={}",
+                guard.addr,
+                middle.addr,
+                exit.addr,
+                size,
+                chunk_index,
+                total_chunks,
+                transfer_chunk_id
             )
         })
         .map_err(|e| {
-        push_packet_meta_trace(
-            "ComponentError",
-            size,
-            &format!("circuit_manager.send_chunk ERROR err={e:#}"),
-            &chain,
-            "component.error",
-        );
-        e
-    })?;
+            push_packet_meta_trace(
+                "ComponentError",
+                fragment.len(),
+                &format!(
+                    "circuit_manager.send_chunk ERROR chunk_id={} chunk_index={} total_chunks={} err={e:#}",
+                    transfer_chunk_id,
+                    chunk_index,
+                    total_chunks
+                ),
+                &transfer_chain,
+                "component.error",
+            );
+            e
+        })?;
+    }
     push_packet_meta_trace(
         "ComponentOutput",
         size,
-        &format!("circuit_manager.send_chunk OUTPUT sent_bytes={size}"),
-        &chain,
+        &format!(
+            "circuit_manager.send_chunk OUTPUT sent_bytes={} chunk_id={} total_chunks={}",
+            size, transfer_chunk_id, total_chunks
+        ),
+        &transfer_chain,
         "component.output",
     );
 
-    info!("SendDummy: Successfully sent {} bytes over explicit circuit.", size);
+    info!(
+        "SendDummy: Successfully sent {} bytes over explicit circuit in {} chunk(s), chunk_id={}.",
+        size, total_chunks, transfer_chunk_id
+    );
     push_packet_meta_trace(
         "ComponentOutput",
         size,
-        &format!("execute_send_dummy OUTPUT success size={size}"),
-        &chain,
+        &format!(
+            "execute_send_dummy OUTPUT success size={} chunk_id={} total_chunks={}",
+            size, transfer_chunk_id, total_chunks
+        ),
+        &transfer_chain,
         "component.output",
     );
-    Ok(format!("Successfully built circuit and sent {} bytes.", size))
+    Ok(format!(
+        "Successfully built circuit and sent {} bytes across {} chunk(s).",
+        size, total_chunks
+    ))
 }

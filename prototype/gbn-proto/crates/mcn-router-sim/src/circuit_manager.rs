@@ -231,7 +231,10 @@ fn seal_layer_for_hop(
 
 async fn send_chunk_via_circuit(
     circuit: &OnionCircuit,
+    chunk_id: u64,
     chunk_index: u32,
+    total_chunks: u32,
+    transfer_trace_root: Option<&str>,
     payload: ChunkBytes,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -239,18 +242,20 @@ async fn send_chunk_via_circuit(
         "Cannot send chunk: empty onion path"
     );
 
-    let chunk_id = chunk_index as u64;
     let payload_len = payload.len();
     let hash = *blake3::hash(&payload).as_bytes();
     let send_timestamp_ms = now_millis();
-    let chunk_trace_base = next_chain(&circuit.trace_id);
+    let chunk_trace_base = match transfer_trace_root {
+        Some(root) if !root.is_empty() => root.to_string(),
+        _ => next_chain(&circuit.trace_id),
+    };
     let send_input_chain = next_chain(&chunk_trace_base);
     push_packet_meta_trace(
         "ComponentInput",
         payload_len,
         &format!(
-            "circuit.send_chunk INPUT chunk_id={} chunk_index={} guard={} middle={} exit={}",
-            chunk_id, chunk_index, circuit.guard_addr, circuit.middle_addr, circuit.exit_addr
+            "circuit.send_chunk INPUT chunk_id={} chunk_index={} total_chunks={} guard={} middle={} exit={}",
+            chunk_id, chunk_index, total_chunks, circuit.guard_addr, circuit.middle_addr, circuit.exit_addr
         ),
         &send_input_chain,
         "circuit.send",
@@ -276,7 +281,7 @@ async fn send_chunk_via_circuit(
         return_path,
         trace_id: Some(payload_trace.clone()),
         send_timestamp_ms,
-        total_chunks: 0,
+        total_chunks,
         chunk_index,
     };
     let terminal_payload_bytes = serde_json::to_vec(&terminal_payload).with_context(|| {
@@ -466,6 +471,20 @@ async fn send_chunk_via_circuit(
         );
         anyhow::bail!(msg);
     }
+    if ack.chunk_index != chunk_index {
+        let msg = format!(
+            "ACK chunk_index mismatch: expected {}, got {}",
+            chunk_index, ack.chunk_index
+        );
+        push_packet_meta_trace(
+            "ComponentError",
+            payload_len,
+            &format!("circuit.send_chunk ERROR {}", msg),
+            &next_chain(&send_input_chain),
+            "circuit.error",
+        );
+        anyhow::bail!(msg);
+    }
 
     let ack_chain = ack
         .trace_id
@@ -485,8 +504,8 @@ async fn send_chunk_via_circuit(
         "ComponentOutput",
         payload_len,
         &format!(
-            "circuit.send_chunk OUTPUT ack chunk_id={} guard={} middle={} exit={}",
-            chunk_id, circuit.guard_addr, circuit.middle_addr, circuit.exit_addr
+            "circuit.send_chunk OUTPUT ack chunk_id={} chunk_index={} total_chunks={} guard={} middle={} exit={}",
+            chunk_id, chunk_index, total_chunks, circuit.guard_addr, circuit.middle_addr, circuit.exit_addr
         ),
         &next_chain(&ack_chain),
         "circuit.send",
@@ -515,6 +534,18 @@ impl CircuitManager {
 
     /// Send a payload through one path (round-robin by chunk index modulo path count).
     pub async fn send_chunk(&self, chunk_index: u32, payload: ChunkBytes) -> Result<()> {
+        self.send_chunk_with_meta(chunk_index as u64, chunk_index, 0, None, payload)
+            .await
+    }
+
+    pub async fn send_chunk_with_meta(
+        &self,
+        chunk_id: u64,
+        chunk_index: u32,
+        total_chunks: u32,
+        transfer_trace_root: Option<&str>,
+        payload: ChunkBytes,
+    ) -> Result<()> {
         let circuits = self.circuits.lock().await;
         if circuits.is_empty() {
             anyhow::bail!("No active circuits available for chunk {}", chunk_index);
@@ -524,7 +555,15 @@ impl CircuitManager {
         let circuit = circuits[idx].clone();
         drop(circuits);
 
-        send_chunk_via_circuit(&circuit, chunk_index, payload).await
+        send_chunk_via_circuit(
+            &circuit,
+            chunk_id,
+            chunk_index,
+            total_chunks,
+            transfer_trace_root,
+            payload,
+        )
+        .await
     }
 
     pub async fn ack_chunk(&self, _chunk_index: u32) {}

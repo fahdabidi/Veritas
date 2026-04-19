@@ -484,19 +484,43 @@ async fn handle_onion_terminal_frame(
         .into());
     }
 
-    handle_payload_frame(&payload.chunk, state, &payload_chain).await?;
-    push_packet_meta_trace(
-        "ComponentOutput",
-        payload.chunk.len(),
-        &format!(
-            "publisher.payload OUTPUT accepted chunk_id={} chunk_index={} bytes={}",
-            payload.chunk_id,
-            payload.chunk_index,
-            payload.chunk.len()
-        ),
-        &payload_chain,
-        "publisher.payload",
-    );
+    let payload_stored = match handle_payload_frame(&payload.chunk, state, &payload_chain).await {
+        Ok(()) => {
+            push_packet_meta_trace(
+                "ComponentOutput",
+                payload.chunk.len(),
+                &format!(
+                    "publisher.payload OUTPUT accepted chunk_id={} chunk_index={} bytes={} mode=stored",
+                    payload.chunk_id,
+                    payload.chunk_index,
+                    payload.chunk.len()
+                ),
+                &payload_chain,
+                "publisher.payload",
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Publisher: transport accepted but packet parse/store failed chunk_id={} chunk_index={}: {e}",
+                payload.chunk_id,
+                payload.chunk_index
+            );
+            push_packet_meta_trace(
+                "ComponentOutput",
+                payload.chunk.len(),
+                &format!(
+                    "publisher.payload OUTPUT accepted chunk_id={} chunk_index={} bytes={} mode=transport_only",
+                    payload.chunk_id,
+                    payload.chunk_index,
+                    payload.chunk.len()
+                ),
+                &payload_chain,
+                "publisher.payload",
+            );
+            false
+        }
+    };
     tracing::info!(
         "Publisher: accepted terminal onion payload chunk_id={} chunk_index={} bytes={}",
         payload.chunk_id,
@@ -509,10 +533,11 @@ async fn handle_onion_terminal_frame(
         "ComponentOutput",
         ack.len(),
         &format!(
-            "publisher.ack OUTPUT chunk_id={} chunk_index={} bytes={}",
+            "publisher.ack OUTPUT chunk_id={} chunk_index={} bytes={} payload_stored={}",
             payload.chunk_id,
             payload.chunk_index,
-            ack.len()
+            ack.len(),
+            payload_stored
         ),
         &ack_trace,
         "publisher.ack",

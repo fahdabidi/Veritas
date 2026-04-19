@@ -733,6 +733,157 @@ pub async fn build_circuits_speculative_from_descriptors(
     .await
 }
 
+/// Per-chunk outcome returned by [`send_scale_multipath`].
+#[derive(Debug)]
+pub struct ScaleChunkOutcome {
+    pub chunk_index: u32,
+    pub chunk_id: u64,
+    pub guard_addr: SocketAddr,
+    pub middle_addr: SocketAddr,
+    pub exit_addr: SocketAddr,
+    pub acked: bool,
+    pub error_msg: Option<String>,
+}
+
+/// Send `chunk_count` chunks in parallel, each over a unique auto-selected circuit
+/// built from the local DHT.  Returns `(outcomes, elapsed_ms)`.
+pub async fn send_scale_multipath(
+    creator_priv_key: &[u8; 32],
+    all_peers: Vec<RelayNode>,
+    publisher_addr: SocketAddr,
+    publisher_pub_key: [u8; 32],
+    chunk_count: usize,
+    chunk_size: usize,
+    parent_chain: &str,
+) -> Result<(Vec<ScaleChunkOutcome>, u64)> {
+    let started = tokio::time::Instant::now();
+
+    let exit_candidates = select_exit_candidates(&all_peers);
+    if exit_candidates.is_empty() {
+        anyhow::bail!("No FreeSubnet exit nodes in DHT — cannot build circuits");
+    }
+
+    push_packet_meta_trace(
+        "ComponentInput",
+        chunk_count * chunk_size,
+        &format!(
+            "scale.build_circuits INPUT chunk_count={} chunk_size={} peers={} exits={}",
+            chunk_count,
+            chunk_size,
+            all_peers.len(),
+            exit_candidates.len()
+        ),
+        parent_chain,
+        "scale.build",
+    );
+
+    let circuits = build_circuits_speculative(
+        creator_priv_key,
+        &all_peers,
+        &exit_candidates,
+        publisher_addr,
+        publisher_pub_key,
+        chunk_count,
+        chunk_count * 5,
+    )
+    .await?;
+
+    let total = circuits.len();
+    let total_u32 = total as u32;
+    let chunk_id_base = now_millis();
+    let parent = parent_chain.to_string();
+
+    push_packet_meta_trace(
+        "ComponentOutput",
+        total,
+        &format!(
+            "scale.build_circuits OUTPUT built={}/{} circuits",
+            total, chunk_count
+        ),
+        parent_chain,
+        "scale.build",
+    );
+
+    let handles: Vec<_> = circuits
+        .into_iter()
+        .enumerate()
+        .map(|(i, circuit)| {
+            let payload = vec![0x42u8; chunk_size];
+            let p = parent.clone();
+            let chunk_id = chunk_id_base.wrapping_add(i as u64);
+            let guard_addr = circuit.guard_addr;
+            let middle_addr = circuit.middle_addr;
+            let exit_addr = circuit.exit_addr;
+            tokio::spawn(async move {
+                // Record chosen path before any encryption or I/O.
+                push_packet_meta_trace(
+                    "ChunkRouteSelected",
+                    payload.len(),
+                    &format!(
+                        "scale.route_selected chunk_index={i} chunk_id={chunk_id} \
+                         guard={guard_addr} middle={middle_addr} exit={exit_addr} \
+                         bytes={}",
+                        payload.len()
+                    ),
+                    &p,
+                    "scale.route",
+                );
+                let res = send_chunk_via_circuit(
+                    &circuit,
+                    chunk_id,
+                    i as u32,
+                    total_u32,
+                    Some(&p),
+                    payload,
+                )
+                .await;
+                let acked = res.is_ok();
+                let error_msg = res.err().map(|e| format!("{e:#}"));
+                (i as u32, chunk_id, guard_addr, middle_addr, exit_addr, acked, error_msg)
+            })
+        })
+        .collect();
+
+    let mut outcomes: Vec<ScaleChunkOutcome> = Vec::with_capacity(total);
+    for handle in handles {
+        match handle.await {
+            Ok((chunk_index, chunk_id, guard_addr, middle_addr, exit_addr, acked, error_msg)) => {
+                if !acked {
+                    tracing::warn!(
+                        "scale chunk {} failed: {:?}",
+                        chunk_index,
+                        error_msg.as_deref().unwrap_or("unknown")
+                    );
+                }
+                outcomes.push(ScaleChunkOutcome {
+                    chunk_index,
+                    chunk_id,
+                    guard_addr,
+                    middle_addr,
+                    exit_addr,
+                    acked,
+                    error_msg,
+                });
+            }
+            Err(e) => tracing::warn!("scale chunk task panicked: {e}"),
+        }
+    }
+
+    let acked_count = outcomes.iter().filter(|o| o.acked).count();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    push_packet_meta_trace(
+        "ComponentOutput",
+        acked_count * chunk_size,
+        &format!(
+            "scale.multipath OUTPUT acked={}/{} elapsed_ms={}",
+            acked_count, total, elapsed_ms
+        ),
+        parent_chain,
+        "scale.result",
+    );
+    Ok((outcomes, elapsed_ms))
+}
+
 fn enumerate_speculative_candidates(
     all_peers: &[RelayNode],
     exit_candidates: &[RelayNode],

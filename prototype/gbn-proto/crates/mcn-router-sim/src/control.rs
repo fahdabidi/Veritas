@@ -29,6 +29,22 @@ pub enum ControlRequest {
     UnicastDHT {
         target_addr: String,
     },
+    SendScale {
+        chunk_count: usize,
+        chunk_size: usize,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScaleChunkResult {
+    pub chunk_index: u32,
+    pub chunk_id: u64,
+    pub guard_addr: String,
+    pub middle_addr: String,
+    pub exit_addr: String,
+    pub acked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -42,6 +58,12 @@ pub enum ControlResponse {
     Metadata { packets: Vec<PacketMeta> },
     Error { reason: String },
     TraceId { chain_id: String },
+    ScaleResult {
+        chunks: Vec<ScaleChunkResult>,
+        acked: usize,
+        total: usize,
+        elapsed_ms: u64,
+    },
 }
 
 // ─────────────────────────── Packet Metadata Tracker ──────────────────────
@@ -188,7 +210,8 @@ pub async fn spawn_control_server(
                                         Ok(req) => {
                                             // For SendDummy: emit chain_id immediately before async work begins.
                                             let pre_chain = match &req {
-                                                ControlRequest::SendDummy { .. } => {
+                                                ControlRequest::SendDummy { .. }
+                                                | ControlRequest::SendScale { .. } => {
                                                     let chain = next_chain("");
                                                     let pre_json = serde_json::to_string(
                                                         &ControlResponse::TraceId { chain_id: chain.clone() }
@@ -378,6 +401,49 @@ async fn handle_request(
                 &chain, "component.output",
             );
             ControlResponse::Ok { msg: format!("UnicastDHT NodeAnnounce to {} queued", target_addr) }
+        }
+        ControlRequest::SendScale { chunk_count, chunk_size } => {
+            let chain = pre_chain.unwrap_or_else(|| next_chain(""));
+            push_packet_meta_trace(
+                "ComponentInput",
+                chunk_count * chunk_size,
+                &format!(
+                    "control.SendScale INPUT chunk_count={chunk_count} chunk_size={chunk_size}"
+                ),
+                &chain,
+                "component.input",
+            );
+            match execute_send_scale(chunk_count, chunk_size, seed_store, noise_priv_key, &chain)
+                .await
+            {
+                Ok(resp) => {
+                    if let ControlResponse::ScaleResult { acked, total, elapsed_ms, .. } = &resp {
+                        push_packet_meta_trace(
+                            "ComponentOutput",
+                            acked * chunk_size,
+                            &format!(
+                                "control.SendScale OUTPUT acked={acked}/{total} elapsed_ms={elapsed_ms}"
+                            ),
+                            &chain,
+                            "component.output",
+                        );
+                    }
+                    resp
+                }
+                Err(e) => {
+                    let reason = format!(
+                        "SendScale failed chunk_count={chunk_count} chunk_size={chunk_size} err={e:#}"
+                    );
+                    push_packet_meta_trace(
+                        "ComponentError",
+                        0,
+                        &format!("control.SendScale ERROR {reason}"),
+                        &chain,
+                        "component.error",
+                    );
+                    ControlResponse::Error { reason }
+                }
+            }
         }
         ControlRequest::SendDummy { size, path } => {
             let chain = pre_chain.unwrap_or_else(|| next_chain(""));
@@ -649,4 +715,72 @@ async fn execute_send_dummy(
         "Successfully built circuit and sent {} bytes across {} chunk(s).",
         size, total_chunks
     ))
+}
+
+async fn execute_send_scale(
+    chunk_count: usize,
+    chunk_size: usize,
+    seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
+    noise_priv_key: [u8; 32],
+    parent_chain: &str,
+) -> Result<ControlResponse> {
+    let chain = next_chain(parent_chain);
+
+    let all_peers: Vec<RelayNode> = {
+        let store = seed_store.read().unwrap();
+        store.values().cloned().collect()
+    };
+
+    if all_peers.is_empty() {
+        anyhow::bail!("DHT is empty — gossip has not populated any peers yet");
+    }
+
+    push_packet_meta_trace(
+        "ComponentInput",
+        0,
+        &format!(
+            "execute_send_scale INPUT chunk_count={chunk_count} chunk_size={chunk_size} peers={}",
+            all_peers.len()
+        ),
+        &chain,
+        "component.input",
+    );
+
+    let (publisher_addr, publisher_pub_key) = crate::swarm::discover_publisher_static()
+        .await
+        .context("SendScale: failed to discover Publisher static endpoint")?;
+
+    let (outcomes, elapsed_ms) = crate::circuit_manager::send_scale_multipath(
+        &noise_priv_key,
+        all_peers,
+        publisher_addr,
+        publisher_pub_key,
+        chunk_count,
+        chunk_size,
+        &chain,
+    )
+    .await?;
+
+    let total = outcomes.len();
+    let acked = outcomes.iter().filter(|o| o.acked).count();
+
+    let chunks: Vec<ScaleChunkResult> = outcomes
+        .into_iter()
+        .map(|o| ScaleChunkResult {
+            chunk_index: o.chunk_index,
+            chunk_id: o.chunk_id,
+            guard_addr: o.guard_addr.to_string(),
+            middle_addr: o.middle_addr.to_string(),
+            exit_addr: o.exit_addr.to_string(),
+            acked: o.acked,
+            error: o.error_msg,
+        })
+        .collect();
+
+    Ok(ControlResponse::ScaleResult {
+        chunks,
+        acked,
+        total,
+        elapsed_ms,
+    })
 }

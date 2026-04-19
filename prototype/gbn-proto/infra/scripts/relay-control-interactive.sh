@@ -571,6 +571,168 @@ do_unicast_dht() {
   _send_cmd "$sender_idx" "$payload"
 }
 
+_do_send_dummy_scale() {
+  echo ""
+  echo "======  SendDummy / Scale mode  ======"
+  echo "  Creator auto-selects one unique circuit per chunk from its local DHT."
+  echo ""
+
+  local creator_idx
+  creator_idx="$(_pick_node "Pick Creator node:" "CREATOR")"
+
+  local chunk_count chunk_size
+  read -r -p "  Chunks to send [10]: " chunk_count
+  chunk_count="${chunk_count:-10}"
+  [[ "$chunk_count" =~ ^[1-9][0-9]*$ ]] || { echo "  Defaulting to 10." >&2; chunk_count=10; }
+
+  read -r -p "  Chunk size in bytes [8192]: " chunk_size
+  chunk_size="${chunk_size:-8192}"
+  [[ "$chunk_size" =~ ^[1-9][0-9]*$ ]] || { echo "  Defaulting to 8192." >&2; chunk_size=8192; }
+
+  local total_bytes
+  total_bytes="$(python3 -c "print(${chunk_count} * ${chunk_size})")"
+
+  echo ""
+  printf "+-------------+-------------------------------------------------------------+\n"
+  printf "| %-11s | %-59s |\n" "Creator"  "${NODE_LABELS[$creator_idx]}"
+  printf "| %-11s | %-59s |\n" "Chunks"   "$chunk_count x $chunk_size B = $total_bytes B"
+  printf "| %-11s | %-59s |\n" "Circuits" "auto-built from Creator DHT (one unique path per chunk)"
+  printf "+-------------+-------------------------------------------------------------+\n"
+  echo ""
+  read -r -p "Proceed? [Y/n]: " confirm
+  [[ "${confirm,,}" == "n" ]] && { echo "Aborted."; return 0; }
+
+  local payload
+  payload="$(printf '{"cmd":"SendScale","chunk_count":%s,"chunk_size":%s}' "$chunk_count" "$chunk_size")"
+
+  echo ""
+  echo "Sending SendScale to Creator..."
+  local scale_output
+  scale_output="$(_send_cmd "$creator_idx" "$payload")"
+  printf '%s\n' "$scale_output"
+
+  # ── Parse ScaleResult: display circuit table, write relay IPs + chain_id ──
+  local parse_tmp
+  parse_tmp="$(mktemp)"
+
+  printf '%s\n' "$scale_output" | python3 - "$parse_tmp" "$chunk_size" <<'PYEOF'
+import json, sys
+
+parse_file = sys.argv[1]
+chunk_sz   = int(sys.argv[2])
+
+result   = None
+chain_id = ''
+
+for line in sys.stdin.read().splitlines():
+    line = line.strip()
+    if not line: continue
+    try:
+        d = json.loads(line)
+        t = d.get('type', '')
+        if t == 'ScaleResult':
+            result = d
+        elif t == 'TraceId' and not chain_id:
+            chain_id = d.get('chain_id', '')
+        elif t == 'Error':
+            print(f'\n  ERROR from Creator: {d.get("reason","")}')
+    except:
+        pass
+
+relay_ips = set()
+
+if result:
+    acked   = result.get('acked', 0)
+    total   = result.get('total', 0)
+    elapsed = result.get('elapsed_ms', 0)
+    chunks  = result.get('chunks', [])
+    icon    = 'PASS' if acked == total > 0 else 'PARTIAL' if acked > 0 else 'FAIL'
+
+    print(f'\n  === Scale Result: {icon} ===')
+    print(f'  ACKed  : {acked}/{total} chunks')
+    print(f'  Bytes  : {acked} x {chunk_sz} B = {acked*chunk_sz} B delivered')
+    print(f'  Elapsed: {elapsed} ms')
+    print()
+    print(f'  {"#":>5}  {"Guard":22}  {"Middle":22}  {"Exit":22}  Status')
+    print('  ' + '-' * 83)
+    for c in sorted(chunks, key=lambda x: x.get('chunk_index', 0)):
+        guard  = c.get('guard_addr',  '?')
+        middle = c.get('middle_addr', '?')
+        exit_  = c.get('exit_addr',   '?')
+        st     = 'ACK ' if c.get('acked') else 'FAIL'
+        err    = c.get('error') or ''
+        err_s  = f'  [{err[:55]}]' if err else ''
+        relay_ips.update([guard, middle, exit_])
+        print(f'  {c.get("chunk_index",0):>5}  {guard:<22}  {middle:<22}  {exit_:<22}  {st}{err_s}')
+else:
+    print('\n  (no ScaleResult in Creator response)')
+
+relay_ips.discard('?')
+relay_ips.discard('')
+
+with open(parse_file, 'w') as f:
+    json.dump({'chain_id': chain_id, 'relay_ips': sorted(relay_ips)}, f)
+PYEOF
+
+  local chain_id relay_ips_json
+  chain_id="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('chain_id',''))" "$parse_tmp")"
+  relay_ips_json="$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('relay_ips',[])))" "$parse_tmp")"
+  rm -f "$parse_tmp"
+
+  [[ -n "$chain_id" ]] && echo "" && echo "  Root Chain ID: $chain_id"
+
+  # ── Build ordered circuit node list: Creator + relays (by IP) + Publisher ──
+  local -a circuit_node_idxs=("$creator_idx")
+
+  if [[ -n "$relay_ips_json" && "$relay_ips_json" != "[]" ]]; then
+    local relay_ip ni
+    while IFS= read -r relay_ip; do
+      for (( ni=0; ni<${#NODE_IPS[@]}; ni++ )); do
+        if [[ "${NODE_IPS[$ni]}" == "$relay_ip" ]]; then
+          circuit_node_idxs+=("$ni"); break
+        fi
+      done
+    done < <(python3 -c "import sys,json; [print(x) for x in json.loads(sys.argv[1])]" "$relay_ips_json")
+  fi
+
+  local pi
+  for (( pi=0; pi<${#NODE_LABELS[@]}; pi++ )); do
+    if [[ "${NODE_ROLES[$pi]}" == "PUBLISHER" ]]; then circuit_node_idxs+=("$pi"); break; fi
+  done
+
+  echo ""
+  printf "  Circuit nodes identified (%d total):\n" "${#circuit_node_idxs[@]}"
+  local k
+  for (( k=0; k<${#circuit_node_idxs[@]}; k++ )); do
+    local idx="${circuit_node_idxs[$k]}"
+    printf "    [%d] %-12s  %s\n" "$((k+1))" "${NODE_ROLES[$idx]}" "${NODE_LABELS[$idx]}"
+  done
+
+  echo ""
+  read -r -p "DumpMetadata on all circuit nodes? [y/N]: " dump_yn
+  [[ "${dump_yn,,}" != "y" ]] && return 0
+
+  local dm_json='{"cmd":"DumpMetadata","limit":0}'
+  if [[ -n "$chain_id" ]]; then
+    dm_json="$(python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+d['chain_id'] = sys.argv[1]
+print(json.dumps(d))
+" "$chain_id" <<< "$dm_json")"
+    echo "  Filtering to chain: $chain_id" >&2
+  fi
+
+  echo ""
+  echo "====  DumpMetadata: Scale circuit nodes  ===="
+  local n=1
+  for idx in "${circuit_node_idxs[@]}"; do
+    echo ">>> [$n/${#circuit_node_idxs[@]}] ${NODE_ROLES[$idx]}  ${NODE_LABELS[$idx]}"
+    _send_cmd "$idx" "$dm_json"
+    (( n++ ))
+  done
+}
+
 do_live_metrics() {
   local interval=30
   read -r -p "Refresh interval in seconds [30]: " iv
@@ -670,6 +832,22 @@ PYEOF
 }
 
 do_send_dummy() {
+  echo ""
+  echo "======  SendDummy  ======"
+  echo "  [1] Manual  — pick circuit nodes individually"
+  echo "  [2] Scale   — Creator auto-builds one unique circuit per chunk from DHT"
+  local sd_mode
+  while true; do
+    read -r -p "  Mode [1/2]: " sd_mode
+    [[ "$sd_mode" == "1" || "$sd_mode" == "2" ]] && break
+    echo "  Invalid — enter 1 or 2." >&2
+  done
+
+  if [[ "$sd_mode" == "2" ]]; then
+    _do_send_dummy_scale
+    return 0
+  fi
+
   echo ""
   echo "======  SendDummy: select circuit nodes in order  ======"
 

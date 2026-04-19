@@ -3,6 +3,8 @@
 # wait for bootstrap, then scale to full target.
 #
 # Usage: ./deploy-scale-test.sh <stack-name> [scale-target] [region]
+#        ENABLE_CHAOS=1 bash deploy-scale-test.sh gbn-proto-phase1-scale-n100 100 us-east-1
+# ENABLE_CHAOS=1 CHAOS_ENABLE_DELAY_SECONDS=180 CHAOS_HOSTILE_CHURN_RATE=0.4 CHAOS_FREE_CHURN_RATE=0.2 bash prototype/gbn-proto/infra/scripts/deploy-scale-test.sh gbn-proto-phase1-scale-n100 100 us-east-1
 
 set -euo pipefail
 export AWS_PAGER=""
@@ -37,6 +39,10 @@ POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-10}"
 POLL_TIMEOUT_SECONDS="${POLL_TIMEOUT_SECONDS:-1200}"
 SEED_PERCENT="${SEED_PERCENT:-30}"
 SMOKE_TOPOLOGY="${SMOKE_TOPOLOGY:-0}"
+ENABLE_CHAOS="${ENABLE_CHAOS:-0}"
+CHAOS_ENABLE_DELAY_SECONDS="${CHAOS_ENABLE_DELAY_SECONDS:-0}"
+CHAOS_HOSTILE_CHURN_RATE="${CHAOS_HOSTILE_CHURN_RATE:-0.4}"
+CHAOS_FREE_CHURN_RATE="${CHAOS_FREE_CHURN_RATE:-0.2}"
 SEED_RELAY_KEY_NAME="${SEED_RELAY_KEY_NAME:-}"
 ADMIN_CIDR="${ADMIN_CIDR:-0.0.0.0/0}"
 RESTART_STATIC_NODES="${RESTART_STATIC_NODES:-1}"
@@ -45,6 +51,11 @@ STOP_ECS_TASKS_BEFORE_DEPLOY="${STOP_ECS_TASKS_BEFORE_DEPLOY:-0}"
 
 if [ "$SEED_PERCENT" -lt 1 ] || [ "$SEED_PERCENT" -gt 99 ]; then
   echo "ERROR: SEED_PERCENT must be between 1 and 99."
+  exit 1
+fi
+
+if ! [[ "$CHAOS_ENABLE_DELAY_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: CHAOS_ENABLE_DELAY_SECONDS must be a non-negative integer."
   exit 1
 fi
 
@@ -60,6 +71,91 @@ cf_resource_id() {
     --logical-resource-id "$logical_id" \
     --query 'StackResources[0].PhysicalResourceId' \
     --output text
+}
+
+validate_rate() {
+  local name="$1"
+  local value="$2"
+  python3 - "$name" "$value" <<'PY'
+import sys
+name, raw = sys.argv[1], sys.argv[2]
+try:
+    value = float(raw)
+except ValueError:
+    print(f"ERROR: {name} must be a float between 0.0 and 1.0.")
+    sys.exit(1)
+if not (0.0 <= value <= 1.0):
+    print(f"ERROR: {name} must be between 0.0 and 1.0.")
+    sys.exit(1)
+PY
+}
+
+validate_rate "CHAOS_HOSTILE_CHURN_RATE" "$CHAOS_HOSTILE_CHURN_RATE"
+validate_rate "CHAOS_FREE_CHURN_RATE" "$CHAOS_FREE_CHURN_RATE"
+
+configure_chaos_lambda() {
+  local function_name="$1"
+  local current_env_json merged_env_json
+
+  if [ -z "$function_name" ] || [ "$function_name" = "None" ]; then
+    echo "  Chaos lambda not found; skipping configuration."
+    return 0
+  fi
+
+  current_env_json="$(aws lambda get-function-configuration \
+    --function-name "$function_name" \
+    --region "$REGION" \
+    --query 'Environment.Variables' \
+    --output json 2>/dev/null || echo '{}')"
+
+  merged_env_json="$(
+    CHAOS_HOSTILE_CHURN_RATE="$CHAOS_HOSTILE_CHURN_RATE" \
+    CHAOS_FREE_CHURN_RATE="$CHAOS_FREE_CHURN_RATE" \
+    python3 - <<'PY' <<< "$current_env_json"
+import json
+import os
+import sys
+
+try:
+    env = json.load(sys.stdin)
+except Exception:
+    env = {}
+
+env["HOSTILE_CHURN_RATE"] = os.environ["CHAOS_HOSTILE_CHURN_RATE"]
+env["FREE_CHURN_RATE"] = os.environ["CHAOS_FREE_CHURN_RATE"]
+print(json.dumps({"Variables": env}, separators=(",", ":")))
+PY
+  )"
+
+  aws lambda update-function-configuration \
+    --function-name "$function_name" \
+    --region "$REGION" \
+    --environment "$merged_env_json" >/dev/null
+  aws lambda wait function-updated \
+    --function-name "$function_name" \
+    --region "$REGION"
+
+  echo "  Chaos lambda configured: $function_name"
+  echo "    Hostile churn rate: $CHAOS_HOSTILE_CHURN_RATE"
+  echo "    Free churn rate:    $CHAOS_FREE_CHURN_RATE"
+}
+
+set_chaos_rule_state() {
+  local rule_name="$1"
+  local enable_flag="$2"
+
+  if [ -z "$rule_name" ] || [ "$rule_name" = "None" ]; then
+    echo "  Chaos rule not found; skipping state change."
+    return 0
+  fi
+
+  if [ "$enable_flag" = "1" ]; then
+    aws events enable-rule --name "$rule_name" --region "$REGION"
+    echo "  Chaos enabled: $rule_name"
+  else
+    aws events disable-rule --name "$rule_name" --region "$REGION" || true
+    echo "  Chaos disabled: $rule_name"
+  fi
 }
 
 running_sum_latest() {
@@ -216,6 +312,14 @@ if [ "$SMOKE_TOPOLOGY" = "1" ]; then
 else
   echo "  Mode:   seeded scale deployment"
 fi
+if [ "$ENABLE_CHAOS" = "1" ]; then
+  echo "  Chaos:  enable scheduled churn after deploy"
+else
+  echo "  Chaos:  leave scheduled churn disabled"
+fi
+echo "  Chaos enable delay:   ${CHAOS_ENABLE_DELAY_SECONDS}s"
+echo "  Hostile churn rate:   $CHAOS_HOSTILE_CHURN_RATE"
+echo "  Free churn rate:      $CHAOS_FREE_CHURN_RATE"
 echo "============================================"
 
 echo "[1/6] Generating static cryptographic keys..."
@@ -286,6 +390,8 @@ CLUSTER_NAME="$(cf_resource_id ECSCluster)"
 HOSTILE_SERVICE_NAME="$(cf_resource_id HostileRelayService)"
 FREE_SERVICE_NAME="$(cf_resource_id FreeRelayService)"
 CREATOR_SERVICE_NAME="$(cf_resource_id CreatorService)"
+CHAOS_LAMBDA_NAME="$(cf_resource_id ChaosControllerLambda)"
+CHAOS_RULE_NAME="$(cf_resource_id ChaosEngineRule)"
 ECR_RELAY_REPO="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --output json | \
   python3 -c "import json,sys; d=json.load(sys.stdin); o=d['Stacks'][0].get('Outputs',[]); print(next((x['OutputValue'] for x in o if x.get('OutputKey')=='ECRUriRelay'), ''))" 2>/dev/null || true)"
 RELAY_REPO_NAME="${ECR_RELAY_REPO##*/}"
@@ -421,6 +527,13 @@ else
   echo ""
   echo "✅ Scale test stack deployed and scaled to full target."
 fi
+echo "[8/8] Applying chaos engine state..."
+configure_chaos_lambda "$CHAOS_LAMBDA_NAME"
+if [ "$ENABLE_CHAOS" = "1" ] && [ "$CHAOS_ENABLE_DELAY_SECONDS" -gt 0 ]; then
+  echo "  Waiting ${CHAOS_ENABLE_DELAY_SECONDS}s before enabling chaos rule..."
+  sleep "$CHAOS_ENABLE_DELAY_SECONDS"
+fi
+set_chaos_rule_state "$CHAOS_RULE_NAME" "$ENABLE_CHAOS"
 echo "   Cluster: $CLUSTER_NAME"
 echo "   Hostile service: $HOSTILE_SERVICE_NAME"
 echo "   Free service:    $FREE_SERVICE_NAME"

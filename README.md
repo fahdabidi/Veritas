@@ -542,6 +542,21 @@ The main AWS bring-up flow for the current phase prototype is:
 3. Expand to smoke or scale topology.
 4. Use the relay control panel to inspect DHT state and run end-to-end path tests.
 
+All of these scripts use the **AWS CLI** for their AWS operations. Before using them from WSL Ubuntu, make sure:
+
+1. `aws` is installed and available in the WSL Ubuntu shell `PATH`
+2. you have completed AWS authentication successfully in that same environment
+3. the CLI can make authenticated calls for the target account and region
+
+Minimum prerequisite check from WSL Ubuntu:
+
+```bash
+aws configure list
+aws sts get-caller-identity
+```
+
+If those commands do not work, do not proceed with the deploy scripts yet. Fix AWS CLI installation and complete your AWS sign-in / credential setup first.
+
 ### Important scripts
 
 | Script | What it does | Main infrastructure touched |

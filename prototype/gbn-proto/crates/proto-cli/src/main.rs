@@ -601,7 +601,8 @@ async fn main() -> Result<()> {
                         "GossipRuntime::from_env",
                         "role=relay",
                     );
-                    let mut runtime = swarm::GossipRuntime::from_env(seed_store.clone()).await;
+                    let mut runtime =
+                        swarm::GossipRuntime::from_env(seed_store.clone(), noise_priv_key).await;
                     trace_output(&c2, "mcn-router-sim", "GossipRuntime::from_env", "ok", 0);
                     trace_chain = c2;
 
@@ -662,7 +663,8 @@ async fn main() -> Result<()> {
                         "GossipRuntime::from_env",
                         "role=creator",
                     );
-                    let mut runtime = swarm::GossipRuntime::from_env(seed_store.clone()).await;
+                    let mut runtime =
+                        swarm::GossipRuntime::from_env(seed_store.clone(), noise_priv_key).await;
                     trace_output(&c2, "mcn-router-sim", "GossipRuntime::from_env", "ok", 0);
 
                     let circuit_delay_secs: u64 = std::env::var("GBN_CIRCUIT_DELAY_SECS")
@@ -758,7 +760,7 @@ async fn main() -> Result<()> {
                         "role=publisher",
                     );
                     let mut gossip_runtime =
-                        swarm::GossipRuntime::from_env(seed_store.clone()).await;
+                        swarm::GossipRuntime::from_env(seed_store.clone(), noise_priv_key).await;
                     trace_output(&c4, "mcn-router-sim", "GossipRuntime::from_env", "ok", 0);
                     trace_chain = c4;
 

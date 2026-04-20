@@ -32,6 +32,80 @@ convert_path() {
   echo "$1"
 }
 
+format_duration() {
+  local total="${1:-0}"
+  if [ "$total" -lt 0 ]; then
+    total=0
+  fi
+  local minutes=$((total / 60))
+  local seconds=$((total % 60))
+  printf "%02dm%02ds" "$minutes" "$seconds"
+}
+
+show_countdown() {
+  local elapsed="$1"
+  local budget="$2"
+  local remaining=$((budget - elapsed))
+  if [ "$remaining" -lt 0 ]; then
+    remaining=0
+  fi
+  printf "elapsed=%s eta~%s" "$(format_duration "$elapsed")" "$(format_duration "$remaining")"
+}
+
+latest_stack_progress() {
+  local stack_status latest_event
+  stack_status="$(aws cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" \
+    --region "$REGION" \
+    --query 'Stacks[0].StackStatus' \
+    --output text 2>/dev/null || echo unknown)"
+  latest_event="$(aws cloudformation describe-stack-events \
+    --stack-name "$STACK_NAME" \
+    --region "$REGION" \
+    --query "StackEvents[?contains(ResourceStatus, 'IN_PROGRESS')]|[0].[LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]" \
+    --output text 2>/dev/null || true)"
+  if [ -n "$latest_event" ] && [ "$latest_event" != "None" ]; then
+    printf "stack=%s current=%s" "$stack_status" "$latest_event"
+  else
+    printf "stack=%s" "$stack_status"
+  fi
+}
+
+run_cloudformation_deploy_with_progress() {
+  local log_file pid start_ts elapsed rc
+  log_file="$(mktemp)"
+
+  aws cloudformation deploy \
+    --stack-name "$STACK_NAME" \
+    --template-file "$TEMPLATE_PATH" \
+    --capabilities CAPABILITY_IAM \
+    --no-fail-on-empty-changeset \
+    --parameter-overrides "ScaleTarget=$SCALE_TARGET" \
+                          "PublisherPrivKeyHex=$PUBLISHER_KEY_HEX" \
+                          "PublisherPubKeyHex=$PUBLISHER_PUB_HEX" \
+                          "SeedRelayNoisePrivKey=$SEED_RELAY_NOISE_PRIVKEY" \
+                          "SeedRelayKeyName=$SEED_RELAY_KEY_NAME" \
+                          "AdminCidr=$ADMIN_CIDR" \
+    --region "$REGION" >"$log_file" 2>&1 &
+  pid=$!
+  start_ts=$(date +%s)
+
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    elapsed=$(( $(date +%s) - start_ts ))
+    printf "  [CFN %s] %s\n" "$(show_countdown "$elapsed" 900)" "$(latest_stack_progress)"
+    sleep 15
+  done
+
+  if wait "$pid"; then
+    rm -f "$log_file"
+    return 0
+  fi
+  rc=$?
+  cat "$log_file"
+  rm -f "$log_file"
+  return "$rc"
+}
+
 STACK_NAME="${1:?Usage: $0 <stack-name> [scale-target] [region]}"
 SCALE_TARGET="${2:-100}"
 REGION="${3:-us-east-1}"
@@ -109,23 +183,23 @@ configure_chaos_lambda() {
     --output json 2>/dev/null || echo '{}')"
 
   merged_env_json="$(
+    CURRENT_ENV_JSON="$current_env_json" \
     CHAOS_HOSTILE_CHURN_RATE="$CHAOS_HOSTILE_CHURN_RATE" \
     CHAOS_FREE_CHURN_RATE="$CHAOS_FREE_CHURN_RATE" \
-    python3 - <<'PY' <<< "$current_env_json"
-import json
-import os
-import sys
-
+    python3 -c 'import json, os
 try:
-    env = json.load(sys.stdin)
+    env = json.loads(os.environ.get("CURRENT_ENV_JSON", "{}") or "{}")
 except Exception:
     env = {}
-
 env["HOSTILE_CHURN_RATE"] = os.environ["CHAOS_HOSTILE_CHURN_RATE"]
 env["FREE_CHURN_RATE"] = os.environ["CHAOS_FREE_CHURN_RATE"]
-print(json.dumps({"Variables": env}, separators=(",", ":")))
-PY
+print(json.dumps({"Variables": env}, separators=(",", ":")))' 
   )"
+
+  if [ -z "$merged_env_json" ] || [ "$merged_env_json" = "None" ]; then
+    echo "ERROR: Failed to build merged lambda environment for $function_name."
+    return 1
+  fi
 
   aws lambda update-function-configuration \
     --function-name "$function_name" \
@@ -239,6 +313,8 @@ wait_for_seed_relay_container() {
       fi
     fi
 
+    printf "  [SeedRelay readiness %s] docker ps has not reported gbn-seed-relay yet\n" \
+      "$(show_countdown "$elapsed" "$max_wait")"
     sleep "$interval"
     elapsed=$((elapsed + interval))
   done
@@ -263,6 +339,9 @@ stop_service_tasks() {
   local service_name="$2"
   local reason="$3"
   local tasks task_count=0
+  local max_parallel="${ECS_STOP_PARALLELISM:-20}"
+  local -a pids=()
+  local failures=0
 
   tasks="$(list_service_tasks "$cluster_name" "$service_name")"
   if [ -z "$tasks" ] || [ "$tasks" = "None" ]; then
@@ -273,16 +352,35 @@ stop_service_tasks() {
   echo "  $service_name: stopping running tasks before force-new-deployment..."
   while IFS= read -r task_arn; do
     [ -n "$task_arn" ] || continue
-    aws ecs stop-task \
-      --cluster "$cluster_name" \
-      --task "$task_arn" \
-      --reason "$reason" \
-      --region "$REGION" >/dev/null
+    (
+      aws ecs stop-task \
+        --cluster "$cluster_name" \
+        --task "$task_arn" \
+        --reason "$reason" \
+        --region "$REGION" >/dev/null
+      echo "    stopped ${task_arn##*/}"
+    ) &
+    pids+=("$!")
     task_count=$((task_count + 1))
-    echo "    stopped ${task_arn##*/}"
+    if [ "${#pids[@]}" -ge "$max_parallel" ]; then
+      if ! wait "${pids[0]}"; then
+        failures=$((failures + 1))
+      fi
+      pids=("${pids[@]:1}")
+    fi
   done < <(printf '%s\n' "$tasks" | tr '\t' '\n')
 
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      failures=$((failures + 1))
+    fi
+  done
+
   echo "  $service_name: stopped $task_count task(s)"
+  if [ "$failures" -gt 0 ]; then
+    echo "ERROR: $service_name failed to stop $failures task(s)"
+    return 1
+  fi
 }
 
 redeploy_service() {
@@ -298,6 +396,7 @@ redeploy_service() {
     --cluster "$cluster_name" \
     --service "$service_name" \
     --desired-count "$desired_count" \
+    --enable-execute-command \
     --force-new-deployment \
     --region "$REGION" >/dev/null
 }
@@ -334,18 +433,7 @@ SEED_RELAY_NOISE_PRIVKEY="$(openssl rand -hex 32)"
 cd "$SCRIPT_DIR"
 
 echo "[2/6] Deploying CloudFormation stack..."
-aws cloudformation deploy \
-  --stack-name "$STACK_NAME" \
-  --template-file "$TEMPLATE_PATH" \
-  --capabilities CAPABILITY_IAM \
-  --no-fail-on-empty-changeset \
-  --parameter-overrides "ScaleTarget=$SCALE_TARGET" \
-                        "PublisherPrivKeyHex=$PUBLISHER_KEY_HEX" \
-                        "PublisherPubKeyHex=$PUBLISHER_PUB_HEX" \
-                        "SeedRelayNoisePrivKey=$SEED_RELAY_NOISE_PRIVKEY" \
-                        "SeedRelayKeyName=$SEED_RELAY_KEY_NAME" \
-                        "AdminCidr=$ADMIN_CIDR" \
-  --region "$REGION"
+run_cloudformation_deploy_with_progress
 
 # Ensure relay image exists before restarting static EC2 nodes that docker-pull :latest.
 ECR_RELAY_REPO_PRE="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --output json | \
@@ -369,6 +457,7 @@ fi
 
 if [ "$RESTART_STATIC_NODES" = "1" ]; then
   echo "[3/7] Ensuring static EC2 SeedRelay/Publisher run with host networking..."
+  echo "  Static-node recovery policy: reboot when SSM is Online, stop/start when SSM is ConnectionLost/disconnected."
   bash "$SCRIPT_DIR/restart-static-nodes.sh" "$STACK_NAME" "$REGION"
 else
   echo "[3/7] Skipping static node host-network restart (RESTART_STATIC_NODES=$RESTART_STATIC_NODES)."
@@ -462,11 +551,19 @@ else
 fi
 echo "  Hostile relays: $HOSTILE_SEED"
 echo "  Free relays:    $FREE_SEED"
-redeploy_service "$CLUSTER_NAME" "$HOSTILE_SERVICE_NAME" "$HOSTILE_SEED"
-redeploy_service "$CLUSTER_NAME" "$FREE_SERVICE_NAME" "$FREE_SEED"
+redeploy_service "$CLUSTER_NAME" "$HOSTILE_SERVICE_NAME" "$HOSTILE_SEED" &
+hostile_redeploy_pid=$!
+redeploy_service "$CLUSTER_NAME" "$FREE_SERVICE_NAME" "$FREE_SEED" &
+free_redeploy_pid=$!
 if [ -n "$CREATOR_SERVICE_NAME" ] && [ "$CREATOR_SERVICE_NAME" != "None" ]; then
-  redeploy_service "$CLUSTER_NAME" "$CREATOR_SERVICE_NAME" 1
-echo "  Creator: 1"
+  redeploy_service "$CLUSTER_NAME" "$CREATOR_SERVICE_NAME" 1 &
+  creator_redeploy_pid=$!
+  echo "  Creator: 1"
+fi
+wait "$hostile_redeploy_pid"
+wait "$free_redeploy_pid"
+if [ -n "${creator_redeploy_pid:-}" ]; then
+  wait "$creator_redeploy_pid"
 fi
 
 echo "[6/7] Stabilization Gate 1 (ECS running tasks >= 90% seed; BootstrapResult for diagnostics)..."
@@ -481,6 +578,9 @@ echo "  Target: $SEED_THRESHOLD/$GATE_SEED_TASKS tasks running  (timeout: ${POLL
 start_ts=$(date +%s)
 last_cw_ts=0
 cw_val="--"
+hostile_running=0
+free_running=0
+creator_running=0
 
 while true; do
   now_ts=$(date +%s)
@@ -495,8 +595,15 @@ while true; do
     cw_next=30
   fi
 
-  printf "  [%4ds] ECS: %d/%d running  |  CW BootstrapResult(10m sum): %s  (next CW in %ds)\n" \
-    "$elapsed" "$running_total" "$SEED_THRESHOLD" "$cw_val" "$cw_next"
+  hostile_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$HOSTILE_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null || echo 0)"
+  free_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$FREE_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null || echo 0)"
+  creator_running=0
+  if [ -n "${CREATOR_SERVICE_NAME:-}" ] && [ "$CREATOR_SERVICE_NAME" != "None" ]; then
+    creator_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$CREATOR_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null || echo 0)"
+  fi
+
+  printf "  [Gate1 %s] ECS total=%d/%d hostile=%s free=%s creator=%s | CW BootstrapResult(10m sum)=%s (next CW in %ds)\n" \
+    "$(show_countdown "$elapsed" "$POLL_TIMEOUT_SECONDS")" "$running_total" "$SEED_THRESHOLD" "$hostile_running" "$free_running" "$creator_running" "$cw_val" "$cw_next"
 
   # Gate condition: ECS running count only (reliable; CW is diagnostic)
   if [ "$running_total" -ge "$SEED_THRESHOLD" ]; then
@@ -521,8 +628,12 @@ else
   echo "[7/7] Scaling to full target..."
   echo "  Hostile full: $FULL_HOSTILE"
   echo "  Free full:    $FULL_FREE"
-  redeploy_service "$CLUSTER_NAME" "$HOSTILE_SERVICE_NAME" "$FULL_HOSTILE"
-  redeploy_service "$CLUSTER_NAME" "$FREE_SERVICE_NAME" "$FULL_FREE"
+  redeploy_service "$CLUSTER_NAME" "$HOSTILE_SERVICE_NAME" "$FULL_HOSTILE" &
+  hostile_full_pid=$!
+  redeploy_service "$CLUSTER_NAME" "$FREE_SERVICE_NAME" "$FULL_FREE" &
+  free_full_pid=$!
+  wait "$hostile_full_pid"
+  wait "$free_full_pid"
 
   echo ""
   echo "✅ Scale test stack deployed and scaled to full target."
@@ -531,7 +642,12 @@ echo "[8/8] Applying chaos engine state..."
 configure_chaos_lambda "$CHAOS_LAMBDA_NAME"
 if [ "$ENABLE_CHAOS" = "1" ] && [ "$CHAOS_ENABLE_DELAY_SECONDS" -gt 0 ]; then
   echo "  Waiting ${CHAOS_ENABLE_DELAY_SECONDS}s before enabling chaos rule..."
-  sleep "$CHAOS_ENABLE_DELAY_SECONDS"
+  delay_elapsed=0
+  while [ "$delay_elapsed" -lt "$CHAOS_ENABLE_DELAY_SECONDS" ]; do
+    echo "  [Chaos delay $(show_countdown "$delay_elapsed" "$CHAOS_ENABLE_DELAY_SECONDS")]"
+    sleep 5
+    delay_elapsed=$((delay_elapsed + 5))
+  done
 fi
 set_chaos_rule_state "$CHAOS_RULE_NAME" "$ENABLE_CHAOS"
 echo "   Cluster: $CLUSTER_NAME"

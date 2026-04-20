@@ -449,4 +449,33 @@ mod tests {
         assert!(matches!(out[0].request, GossipRequest::IWant { .. }));
         assert_eq!(e.state.lazy_repairs_total(), 1);
     }
+
+    #[test]
+    fn publish_local_sends_full_payload_only_to_eager_peers() {
+        let mut e = PlumTreeEngine::new(1024 * 1024, 10);
+        let eager_a = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let eager_b = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let lazy = identity::Keypair::generate_ed25519().public().to_peer_id();
+        e.add_eager_peer(eager_a);
+        e.add_eager_peer(eager_b);
+        e.add_lazy_peer(lazy);
+
+        let out = e.publish_local([7u8; 32], b"hello".to_vec());
+        assert_eq!(out.len(), 3);
+
+        let mut full_payload_targets = Vec::new();
+        let mut lazy_targets = Vec::new();
+        for item in out {
+            match item.request {
+                GossipRequest::GossipData { .. } => full_payload_targets.push(item.peer),
+                GossipRequest::IHave { .. } => lazy_targets.push(item.peer),
+                other => panic!("unexpected forwarding request: {other:?}"),
+            }
+        }
+
+        assert_eq!(full_payload_targets.len(), 2);
+        assert!(full_payload_targets.contains(&eager_a));
+        assert!(full_payload_targets.contains(&eager_b));
+        assert_eq!(lazy_targets, vec![lazy]);
+    }
 }

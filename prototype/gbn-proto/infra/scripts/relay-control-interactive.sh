@@ -67,14 +67,25 @@ _ecs_execute_command_retry() {
 
   for (( attempt=1; attempt<=max_attempts; attempt++ )); do
     set +e
-    raw="$(aws ecs execute-command \
-      --cluster   "$CLUSTER" \
-      --task      "$arn" \
-      --container "$container" \
-      --region    "$AWS_REGION" \
-      --interactive \
-      --command "$cmd" \
-      2>&1)"
+    if command -v timeout >/dev/null 2>&1; then
+      raw="$(timeout --foreground 75 aws ecs execute-command \
+        --cluster   "$CLUSTER" \
+        --task      "$arn" \
+        --container "$container" \
+        --region    "$AWS_REGION" \
+        --interactive \
+        --command "$cmd" \
+        2>&1)"
+    else
+      raw="$(aws ecs execute-command \
+        --cluster   "$CLUSTER" \
+        --task      "$arn" \
+        --container "$container" \
+        --region    "$AWS_REGION" \
+        --interactive \
+        --command "$cmd" \
+        2>&1)"
+    fi
     rc=$?
     set -e
 
@@ -87,6 +98,12 @@ _ecs_execute_command_retry() {
 
     if grep -q "Could not connect to the endpoint URL" <<<"$raw" && (( attempt < max_attempts )); then
       echo "  [WARN] ECS endpoint unreachable (attempt ${attempt}/${max_attempts}); retrying..." >&2
+      sleep $((attempt * 2))
+      continue
+    fi
+
+    if [[ $rc -eq 124 ]] && (( attempt < max_attempts )); then
+      echo "  [WARN] ECS execute-command timed out (attempt ${attempt}/${max_attempts}); retrying..." >&2
       sleep $((attempt * 2))
       continue
     fi
@@ -123,7 +140,7 @@ _discover_ecs_service() {
   mapfile -t rows < <(
     aws ecs describe-tasks \
       --cluster "$CLUSTER" --tasks "${arns[@]}" --region "$AWS_REGION" \
-      --query 'tasks[?lastStatus==`RUNNING`].[taskArn,attachments[0].details[?name==`privateIPv4Address`].value|[0],containers[0].name]' \
+      --query 'tasks[?lastStatus==`RUNNING`].[taskArn,attachments[].details[?name==`privateIPv4Address`].value|[0][0],containers[0].name]' \
       --output text 2>/dev/null | grep -v '^$' || true
   )
 
@@ -337,9 +354,22 @@ _ssm_command_output() {
     --query            'Command.CommandId' \
     --output text)"
 
-  aws ssm wait command-executed \
-    --command-id "$command_id" --instance-id "$iid" \
-    --region "$AWS_REGION" 2>/dev/null || true
+  local status="Pending" elapsed=0 interval=3 max_wait=75
+  while (( elapsed < max_wait )); do
+    status="$(aws ssm get-command-invocation \
+      --command-id "$command_id" \
+      --instance-id "$iid" \
+      --region "$AWS_REGION" \
+      --query 'Status' \
+      --output text 2>/dev/null || echo Pending)"
+    case "$status" in
+      Success|Failed|Cancelled|TimedOut|Undeliverable|Terminated|Delivery\ Timed\ Out|Execution\ Timed\ Out)
+        break
+        ;;
+    esac
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+  done
 
   aws ssm get-command-invocation \
     --command-id "$command_id" \
@@ -393,7 +423,7 @@ py = (
     \"wire=json.dumps(obj,separators=(',',':')).encode('utf-8'); \"
     \"s=socket.create_connection(('127.0.0.1',5050),60); \"
     \"s.settimeout(60); \"
-    \"s.sendall(wire); \"
+    \"s.sendall(wire+b'\\\\n'); \"
     \"s.shutdown(socket.SHUT_WR); \"
     \"out=b''.join(iter(lambda: s.recv(65536), b'')); \"
     \"s.close(); \"
@@ -409,26 +439,27 @@ print('python3 -c ' + json.dumps(py))
 
   elif [[ "$desc" == EC2:* ]]; then
     local rest="${desc#EC2:}"
-    local iid="${rest%%:*}" container="${rest#*:}"
+    local iid="${rest%%:*}"
 
     # Build the SSM parameters JSON via Python to handle all escaping correctly.
     local params
     params="$(python3 -c "
 import json, sys
-b64, cont = sys.argv[1], sys.argv[2]
+b64 = sys.argv[1]
 py = (
-    \"import base64,socket; \"
+    \"import base64,json,socket,sys; \"
     \"p=base64.b64decode('\" + b64 + \"').decode(); \"
+    \"obj=json.loads(p); \"
+    \"wire=json.dumps(obj,separators=(',',':')).encode('utf-8'); \"
     \"s=socket.create_connection(('127.0.0.1',5050),60); \"
     \"s.settimeout(60); \"
-    \"s.sendall(p.encode()+b'\\\\n'); \"
+    \"s.sendall(wire+b'\\\\n'); \"
     \"s.shutdown(1); \"
     \"out=b''.join(iter(lambda: s.recv(65536), b'')); \"
-    \"print(out.decode(errors='replace')); s.close()\"
+    \"sys.stdout.write(out.decode(errors='replace')); s.close()\"
 )
-cmd = 'docker exec ' + cont + ' python3 -c ' + json.dumps(py)
-print(json.dumps({'commands': [cmd]}))
-" "$b64" "$container")"
+print(json.dumps({'commands': ['python3 -c ' + json.dumps(py)]}))
+" "$b64")"
 
     local cid
     cid="$(aws ssm send-command \
@@ -438,15 +469,24 @@ print(json.dumps({'commands': [cmd]}))
       --region           "$AWS_REGION" \
       --query 'Command.CommandId' --output text)"
 
-    aws ssm wait command-executed \
-      --command-id "$cid" --instance-id "$iid" \
-      --region "$AWS_REGION" 2>/dev/null || true
-
-    local status
-    status="$(aws ssm get-command-invocation \
-      --command-id "$cid" --instance-id "$iid" \
-      --region "$AWS_REGION" --query 'Status' --output text 2>/dev/null || echo "Unknown")"
-    echo "  SSM status: $status"
+    local status="Pending" status_details="Pending" elapsed=0 interval=3 max_wait=75
+    while (( elapsed < max_wait )); do
+      status="$(aws ssm get-command-invocation \
+        --command-id "$cid" --instance-id "$iid" \
+        --region "$AWS_REGION" --query 'Status' --output text 2>/dev/null || echo "Pending")"
+      status_details="$(aws ssm get-command-invocation \
+        --command-id "$cid" --instance-id "$iid" \
+        --region "$AWS_REGION" --query 'StatusDetails' --output text 2>/dev/null || echo "Pending")"
+      case "$status" in
+        Success|Failed|Cancelled|TimedOut|Undeliverable|Terminated|Delivery\ Timed\ Out|Execution\ Timed\ Out)
+          break
+          ;;
+      esac
+      echo "  SSM status: $status details: $status_details (elapsed ${elapsed}s)"
+      sleep "$interval"
+      elapsed=$((elapsed + interval))
+    done
+    echo "  SSM status: $status details: $status_details"
     aws ssm get-command-invocation \
       --command-id "$cid" --instance-id "$iid" \
       --region "$AWS_REGION" \

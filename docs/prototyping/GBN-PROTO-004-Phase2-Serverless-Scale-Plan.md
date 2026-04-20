@@ -864,9 +864,15 @@ aws ecs describe-tasks --cluster gbn-proto-phase1-scale-n100-cluster --tasks 9b4
 # Step 3. Connect to an ECS Container/Task
 aws ecs execute-command --cluster gbn-proto-phase1-scale-n100-cluster --task  arn:aws:ecs:us-east-1:138472308340:task/gbn-proto-phase1-scale-n100-cluster/cb5845e94382412db25ed7f48688db5e --container relay --region us-east-1 --interactive --command "echo helo world"
 
+aws ssm describe-instance-information \
+  --region us-east-1 \
+  --filters "Key=InstanceIds,Values=i-0afdb333be2af1c0b" \
+  --output table
+
+
 #Connecting to EC2 Instances running the GBN Containers in Docker environment using system session manager
 #Step1 : user the instance ID to start the session
-aws ssm start-session --target i-08ec6402d9bdee34c --region us-east-1
+aws ssm start-session --target i-0afdb333be2af1c0b --region us-east-1
 
 #Step2 : connect to the container environmet
 sudo -i
@@ -954,3 +960,34 @@ aws ssm get-command-invocation \
 
 aws sts get-caller-identity --region us-east-1
 aws ecs list-clusters --region us-east-1
+
+
+aws ssm describe-instance-information \
+  --region us-east-1 \
+  --filters "Key=InstanceIds,Values=i-0afdb333be2af1c0b" \
+  --output table
+
+CMD_ID=$(aws ssm send-command \
+  --region us-east-1 \
+  --instance-ids i-0afdb333be2af1c0b \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["echo ok","date"]' \
+  --query 'Command.CommandId' \
+  --output text)
+
+
+watch -n 3 "aws ssm get-command-invocation --region us-east-1 --command-id $CMD_ID --instance-id i-0afdb333be2af1c0b --query '[Status,StatusDetails]' --output table"
+
+
+aws ssm send-command \
+  --region us-east-1 \
+  --instance-ids i-0afdb333be2af1c0b \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["whoami","hostname","pwd","date"]' \
+  --output json
+  
+aws ssm start-session \
+  --region us-east-1 \
+  --target i-0afdb333be2af1c0b \
+  --document-name AWS-StartInteractiveCommand \
+  --parameters 'command=["/bin/bash -li"]'

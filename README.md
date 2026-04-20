@@ -243,10 +243,15 @@ This keeps redundant traffic low under normal conditions while still repairing m
 
 1. A live node periodically broadcasts NodeAnnounce through PlumTree.
 2. When two peers connect directly, they exchange DirectNodeAnnounce.
-3. Every 10 seconds, a node sends a sampled DirectNodePropagate batch containing the freshest live entries from its local DHT to a sampled subset of neighbors.
+3. Every 10 seconds, a node sends a sampled DirectNodePropagate batch from its local DHT to a sampled subset of neighbors.
 4. A node learned only through propagation is queued for DirectNodeProbe.
-5. Only a successful direct probe response populates last_direct_seen_ms.
-6. `DirectNodePropagate` updates are only accepted from nodes whose `validation_state` is `complete`.
+5. A successful direct probe response inserts the node as a direct sighting with `validation_state=unvalidated` and `validation_score=max(score,10)`.
+6. Newly direct-but-unvalidated nodes are queued for an automatic bootstrap validation send: a random-length dummy chunk is sent to the Publisher using the new node as Guard plus default Middle and Exit nodes chosen from the highest-ranked eligible relays in the local DHT.
+7. A valid Publisher ACK promotes that new Guard into `direct` through the normal scoring path.
+8. `DirectNodePropagate` updates are accepted from nodes whose `validation_state` is `direct` or `complete`.
+9. Outbound propagation is target-aware:
+   - `complete` peers receive a full ranked DHT slice
+   - non-complete peers receive only a minimal bootstrap DHT containing the designated Middle and Exit relays they need to start participating
 
 **How the Creator uses the gossip DHT:**
 
@@ -320,15 +325,17 @@ propagated_only
 
 unvalidated
   First direct sighting seeds validation_score to 10.
-  Still not trusted for normal path construction.
+  Eligible as a last-resort routing fallback during bootstrap.
+  Newly direct/unvalidated nodes are also queued for an automatic dummy-packet
+  validation send to force early promotion into direct.
 
 direct
   At least one chunk path using this node produced a valid publisher ACK.
-  The node is usable, but still in the preliminary scoring period.
+  The node is usable for routing and may propagate bootstrap DHT snapshots.
 
 complete
   validation_score > 20.
-  Fully trusted for routing and for accepted DHT propagation.
+  Fully trusted for routing and for full accepted DHT propagation.
 
 isolated
   validation_score == 0.
@@ -365,23 +372,23 @@ DumpDht Control Output (creator control plane response)
 
 When a Creator wants to send, it queries its local in-memory DHT and filters candidates by validation state:
 
-- **Guard** - must be a validated HostileRelay or SeedRelay
-- **Middle** - normally same validated pool, Guard excluded
-- **Exit** - must be a validated FreeRelay
+- **Guard** - prefer `complete`, then `direct`, then `unvalidated`
+- **Middle** - same tier ordering, Guard excluded
+- **Exit** - same tier ordering, but must be a `FreeSubnet` relay
 - **Publisher** - the known Publisher address
 
-**Lazy validation of new nodes:**
+**Bootstrap validation of new nodes:**
 
 - propagated_only nodes are queued for direct probe and are not used for routing.
-- unvalidated nodes are not trusted for general routing and their inbound DHT propagation is ignored.
-- During the next multi-chunk send, the Creator may place one unvalidated node only in the **middle** position of a canary path while keeping the same validated Guard and Exit as a sibling baseline path.
-- If both chunks receive valid publisher ACKs, the candidate middle can gain score and promote into direct.
-- If the baseline succeeds and the canary fails, only the canary middle is penalized.
-- Once the node's score exceeds 20, it becomes complete and its propagated DHT updates are accepted.
+- unvalidated nodes are eligible only after a direct sighting and remain lower priority than `direct` and `complete`.
+- when a new direct/unvalidated node appears, the system automatically sends a random-length dummy packet to the Publisher with:
+  guard = the node under validation
+  middle = highest-ranked eligible middle relay in the local DHT
+  exit = highest-ranked eligible `FreeSubnet` relay in the local DHT
+- if the Publisher ACK returns successfully, the guard gains score and promotes into `direct`.
+- once the node's score exceeds 20, it becomes `complete`.
 
-The Creator still builds the onion circuit from local DHT state, but it now filters out isolated nodes and prefers nodes with stronger direct-validation evidence.
-
-The Creator still builds the onion circuit from local DHT state, but it now filters out isolated nodes and prefers nodes with stronger direct-validation evidence.
+The Creator still builds the onion circuit from local DHT state, but it now excludes only `isolated` and `propagated_only` nodes, then prefers stronger validation evidence in this order: `complete > direct > unvalidated`.
 
 ---
 

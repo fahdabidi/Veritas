@@ -76,7 +76,7 @@ fn default_validation_state() -> ValidationState {
     }
     #[cfg(not(feature = "dht-validation-policy"))]
     {
-    ValidationState::Direct
+        ValidationState::Direct
     }
 }
 
@@ -89,6 +89,115 @@ fn default_validation_score() -> u32 {
     {
         100
     }
+}
+
+pub fn validation_state_rank(state: &ValidationState) -> i32 {
+    match state {
+        ValidationState::Complete => 3,
+        ValidationState::Direct => 2,
+        ValidationState::Unvalidated => 1,
+        ValidationState::PropagatedOnly => 0,
+        ValidationState::Isolated => -1,
+    }
+}
+
+fn is_circuit_relay_node(node: &RelayNode) -> bool {
+    node.subnet_tag == "HostileSubnet" || node.subnet_tag == "FreeSubnet"
+}
+
+pub fn is_bootstrap_eligible_node(node: &RelayNode) -> bool {
+    !matches!(
+        node.validation_state,
+        ValidationState::PropagatedOnly | ValidationState::Isolated
+    ) && node.validation_score > 0
+}
+
+fn validation_sort_key(node: &RelayNode) -> (i32, u32, u64, SocketAddr) {
+    (
+        validation_state_rank(&node.validation_state),
+        node.validation_score,
+        node.last_observed_ms,
+        node.addr,
+    )
+}
+
+pub fn sort_bootstrap_candidates(nodes: &mut [RelayNode]) {
+    nodes.sort_unstable_by(|a, b| validation_sort_key(b).cmp(&validation_sort_key(a)));
+}
+
+pub fn select_default_bootstrap_path(
+    all_peers: &[RelayNode],
+    guard_addr: SocketAddr,
+) -> Option<(RelayNode, RelayNode)> {
+    let mut exit_candidates: Vec<RelayNode> = all_peers
+        .iter()
+        .filter(|node| is_circuit_relay_node(node))
+        .filter(|node| node.addr != guard_addr)
+        .filter(|node| node.subnet_tag == "FreeSubnet")
+        .filter(|node| is_bootstrap_eligible_node(node))
+        .cloned()
+        .collect();
+    sort_bootstrap_candidates(&mut exit_candidates);
+    let exit = exit_candidates.into_iter().next()?;
+
+    let mut middle_candidates: Vec<RelayNode> = all_peers
+        .iter()
+        .filter(|node| is_circuit_relay_node(node))
+        .filter(|node| node.addr != guard_addr && node.addr != exit.addr)
+        .filter(|node| is_bootstrap_eligible_node(node))
+        .cloned()
+        .collect();
+    middle_candidates.sort_unstable_by(|a, b| {
+        let a_key = (
+            a.subnet_tag != "FreeSubnet",
+            validation_state_rank(&a.validation_state),
+            a.validation_score,
+            a.last_observed_ms,
+            a.addr,
+        );
+        let b_key = (
+            b.subnet_tag != "FreeSubnet",
+            validation_state_rank(&b.validation_state),
+            b.validation_score,
+            b.last_observed_ms,
+            b.addr,
+        );
+        b_key.cmp(&a_key)
+    });
+    let middle = middle_candidates.into_iter().next()?;
+    Some((middle, exit))
+}
+
+pub fn bootstrap_snapshot_for_peer(
+    all_peers: &[RelayNode],
+    target_validation_state: Option<&ValidationState>,
+    target_addr: Option<SocketAddr>,
+    full_limit: usize,
+) -> Vec<RelayNode> {
+    let mut eligible: Vec<RelayNode> = all_peers
+        .iter()
+        .filter(|node| node.validation_state != ValidationState::Isolated)
+        .cloned()
+        .collect();
+    sort_bootstrap_candidates(&mut eligible);
+
+    if matches!(target_validation_state, Some(ValidationState::Complete)) {
+        let limit = full_limit.max(1);
+        eligible.truncate(limit.min(eligible.len()));
+        return eligible;
+    }
+
+    let Some(guard_addr) = target_addr else {
+        eligible.truncate(eligible.len().min(2));
+        return eligible;
+    };
+
+    if let Some((middle, exit)) = select_default_bootstrap_path(&eligible, guard_addr) {
+        return vec![middle, exit];
+    }
+
+    eligible.truncate(eligible.len().min(2));
+    eligible
 }
 
 pub fn relay_node_from_descriptor(descriptor: &RelayDescriptor) -> RelayNode {
@@ -711,6 +820,7 @@ pub fn select_exit_candidates(all_peers: &[RelayNode]) -> Vec<RelayNode> {
     all_peers
         .iter()
         .filter(|p| p.subnet_tag == "FreeSubnet")
+        .filter(|p| is_bootstrap_eligible_node(p))
         .cloned()
         .collect()
 }
@@ -827,21 +937,25 @@ pub async fn build_circuits_speculative_from_descriptors(
 ) -> Result<Vec<OnionCircuit>> {
     let all_peers = relay_nodes_from_descriptors(descriptors);
     #[cfg(feature = "dht-validation-policy")]
-    let trusted_peers: Vec<RelayNode> = all_peers
+    let mut trusted_peers: Vec<RelayNode> = all_peers
         .iter()
-        .filter(|p| {
-            matches!(p.validation_state, ValidationState::Direct | ValidationState::Complete)
-                && p.validation_score > 0
-        })
+        .filter(|p| is_circuit_relay_node(p))
+        .filter(|p| is_bootstrap_eligible_node(p))
         .cloned()
         .collect();
+    #[cfg(feature = "dht-validation-policy")]
+    sort_bootstrap_candidates(&mut trusted_peers);
     #[cfg(not(feature = "dht-validation-policy"))]
-    let trusted_peers = all_peers.clone();
+    let trusted_peers: Vec<RelayNode> = all_peers
+        .iter()
+        .filter(|p| is_circuit_relay_node(p))
+        .cloned()
+        .collect();
 
     let exit_candidates = select_exit_candidates(&trusted_peers);
     build_circuits_speculative(
         creator_priv_key,
-        &all_peers,
+        &trusted_peers,
         &exit_candidates,
         publisher_addr,
         publisher_pub_key,
@@ -877,16 +991,20 @@ pub async fn send_scale_multipath(
     let started = tokio::time::Instant::now();
 
     #[cfg(feature = "dht-validation-policy")]
-    let trusted_peers: Vec<RelayNode> = all_peers
+    let mut trusted_peers: Vec<RelayNode> = all_peers
         .iter()
-        .filter(|p| {
-            matches!(p.validation_state, ValidationState::Direct | ValidationState::Complete)
-                && p.validation_score > 0
-        })
+        .filter(|p| is_circuit_relay_node(p))
+        .filter(|p| is_bootstrap_eligible_node(p))
         .cloned()
         .collect();
+    #[cfg(feature = "dht-validation-policy")]
+    sort_bootstrap_candidates(&mut trusted_peers);
     #[cfg(not(feature = "dht-validation-policy"))]
-    let trusted_peers = all_peers.clone();
+    let trusted_peers: Vec<RelayNode> = all_peers
+        .iter()
+        .filter(|p| is_circuit_relay_node(p))
+        .cloned()
+        .collect();
 
     let exit_candidates = select_exit_candidates(&trusted_peers);
     if exit_candidates.is_empty() {
@@ -934,18 +1052,33 @@ pub async fn send_scale_multipath(
             let guard = trusted_peers
                 .iter()
                 .filter(|p| p.subnet_tag == "HostileSubnet")
-                .max_by_key(|p| (p.validation_state == ValidationState::Complete, p.validation_score))
+                .max_by_key(|p| {
+                    (
+                        p.validation_state == ValidationState::Complete,
+                        p.validation_score,
+                    )
+                })
                 .cloned();
             let exit = exit_candidates
                 .iter()
-                .max_by_key(|p| (p.validation_state == ValidationState::Complete, p.validation_score))
+                .max_by_key(|p| {
+                    (
+                        p.validation_state == ValidationState::Complete,
+                        p.validation_score,
+                    )
+                })
                 .cloned();
             let baseline_middle = trusted_peers
                 .iter()
                 .filter(|p| p.subnet_tag == "HostileSubnet")
                 .filter(|p| guard.as_ref().map(|g| g.addr != p.addr).unwrap_or(true))
                 .filter(|p| exit.as_ref().map(|e| e.addr != p.addr).unwrap_or(true))
-                .max_by_key(|p| (p.validation_state == ValidationState::Complete, p.validation_score))
+                .max_by_key(|p| {
+                    (
+                        p.validation_state == ValidationState::Complete,
+                        p.validation_score,
+                    )
+                })
                 .cloned();
             let canary_middle = unvalidated_middles
                 .iter()
@@ -1197,5 +1330,71 @@ mod tests {
         let exits = select_exit_candidates_from_descriptors(&descriptors);
         assert_eq!(exits.len(), 2);
         assert!(exits.iter().all(|p| p.subnet_tag == "FreeSubnet"));
+    }
+
+    #[test]
+    fn bootstrap_path_prefers_highest_ranked_middle_and_exit() {
+        let mk = |tag: &str, port: u16, state: ValidationState, score: u32| RelayNode {
+            addr: format!("127.0.0.1:{}", port).parse().unwrap(),
+            identity_pub: [port as u8; 32],
+            subnet_tag: tag.to_string(),
+            announce_ts_ms: 0,
+            last_direct_seen_ms: Some(1),
+            last_propagated_seen_ms: None,
+            last_observed_ms: score as u64,
+            validation_state: state,
+            validation_score: score,
+            last_seen_ms: 0,
+        };
+        let guard = mk("HostileSubnet", 3101, ValidationState::Unvalidated, 10);
+        let peers = vec![
+            guard.clone(),
+            mk("HostileSubnet", 3102, ValidationState::Direct, 11),
+            mk("HostileSubnet", 3103, ValidationState::Complete, 20),
+            mk("FreeSubnet", 3201, ValidationState::Direct, 12),
+            mk("FreeSubnet", 3202, ValidationState::Complete, 30),
+        ];
+
+        let path = select_default_bootstrap_path(&peers, guard.addr).unwrap();
+        assert_eq!(path.0.addr, "127.0.0.1:3103".parse::<SocketAddr>().unwrap());
+        assert_eq!(path.1.addr, "127.0.0.1:3202".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn bootstrap_snapshot_limits_direct_peer_to_middle_and_exit() {
+        let mk = |tag: &str, port: u16, state: ValidationState, score: u32| RelayNode {
+            addr: format!("127.0.0.1:{}", port).parse().unwrap(),
+            identity_pub: [port as u8; 32],
+            subnet_tag: tag.to_string(),
+            announce_ts_ms: 0,
+            last_direct_seen_ms: Some(1),
+            last_propagated_seen_ms: None,
+            last_observed_ms: score as u64,
+            validation_state: state,
+            validation_score: score,
+            last_seen_ms: 0,
+        };
+        let guard_addr: SocketAddr = "127.0.0.1:4101".parse().unwrap();
+        let peers = vec![
+            mk("HostileSubnet", 4101, ValidationState::Direct, 15),
+            mk("HostileSubnet", 4102, ValidationState::Complete, 20),
+            mk("HostileSubnet", 4103, ValidationState::Direct, 18),
+            mk("FreeSubnet", 4201, ValidationState::Complete, 25),
+            mk("FreeSubnet", 4202, ValidationState::Direct, 22),
+        ];
+
+        let snapshot = bootstrap_snapshot_for_peer(
+            &peers,
+            Some(&ValidationState::Direct),
+            Some(guard_addr),
+            10,
+        );
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot
+            .iter()
+            .any(|node| node.addr == "127.0.0.1:4102".parse::<SocketAddr>().unwrap()));
+        assert!(snapshot
+            .iter()
+            .any(|node| node.addr == "127.0.0.1:4201".parse::<SocketAddr>().unwrap()));
     }
 }

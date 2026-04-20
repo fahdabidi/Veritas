@@ -1,4 +1,5 @@
-use crate::circuit_manager::RelayNode;
+use crate::circuit_manager::{RelayNode, ValidationState};
+use crate::control::{bootstrap_validate_unvalidated_node, minimal_bootstrap_snapshot};
 use crate::gossip::{
     new_plumtree_behaviour, GbnGossipMsg, GossipRequest, GossipResponse, MessageId, OutboundGossip,
     PlumTreeBehaviour, PlumTreeEngine,
@@ -16,11 +17,11 @@ use libp2p::{
     tcp, yamux, PeerId, Swarm, SwarmBuilder,
 };
 use mcn_crypto::x25519_pubkey_from_privkey;
-use rand::Rng;
 use rand::seq::SliceRandom;
+use rand::Rng;
 use std::time::Duration;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env,
     net::{IpAddr, SocketAddr},
     sync::{Arc, RwLock},
@@ -56,7 +57,9 @@ pub struct GossipRuntime {
     pub seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
     pub peer_ip_map: HashMap<IpAddr, PeerId>,
     pub peer_ip_reverse: HashMap<PeerId, IpAddr>,
-    pub pending_direct_validation: HashSet<IpAddr>,
+    pub pending_direct_validation: HashMap<IpAddr, String>,
+    pub pending_bootstrap_validation: HashMap<SocketAddr, String>,
+    pub noise_priv_key: [u8; 32],
 }
 
 pub enum SwarmControlCmd {
@@ -94,7 +97,10 @@ fn role_participates_in_node_announce(role: &str) -> bool {
 }
 
 impl GossipRuntime {
-    pub async fn from_env(seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>) -> Self {
+    pub async fn from_env(
+        seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
+        noise_priv_key: [u8; 32],
+    ) -> Self {
         let (gossip_bps, max_tracked_messages) = gossip_config_from_env();
         let metrics = MetricsReporter::from_env().await.ok();
         let role = env::var("GBN_ROLE").unwrap_or_else(|_| "relay".to_string());
@@ -154,7 +160,9 @@ impl GossipRuntime {
             seed_store,
             peer_ip_map: HashMap::new(),
             peer_ip_reverse: HashMap::new(),
-            pending_direct_validation: HashSet::new(),
+            pending_direct_validation: HashMap::new(),
+            pending_bootstrap_validation: HashMap::new(),
+            noise_priv_key,
         }
     }
 }
@@ -376,8 +384,12 @@ fn apply_seed_update_from_gossip_msg(
             let mut accepted = 0usize;
             let mut continuity_events = 0usize;
             for node in &nodes {
-                let (was_accepted, events) =
-                    upsert_seed_store_node(&mut store, node.clone(), now_ms, SeedUpdateSource::Propagated);
+                let (was_accepted, events) = upsert_seed_store_node(
+                    &mut store,
+                    node.clone(),
+                    now_ms,
+                    SeedUpdateSource::Propagated,
+                );
                 if was_accepted {
                     accepted += 1;
                 }
@@ -404,10 +416,19 @@ fn apply_seed_update_from_gossip_msg(
                 .unwrap_or_default()
                 .as_millis() as u64;
             let mut store = runtime.seed_store.write().unwrap();
-            let (was_accepted, events) =
-                upsert_seed_store_node(&mut store, node.clone(), now_ms, SeedUpdateSource::Propagated);
+            let (was_accepted, events) = upsert_seed_store_node(
+                &mut store,
+                node.clone(),
+                now_ms,
+                SeedUpdateSource::Propagated,
+            );
             for event in events {
                 tracing::warn!("Seed-store continuity: {}", event);
+            }
+            if was_accepted {
+                runtime
+                    .pending_direct_validation
+                    .insert(node.addr.ip(), id_chain.to_string());
             }
             crate::control::push_packet_meta_trace(
                 "InternalAction",
@@ -431,18 +452,15 @@ pub fn handle_gossip_event(
 ) {
     if let request_response::Event::Message { peer, message } = event {
         #[cfg(feature = "dht-validation-policy")]
-        let source_validation_state = runtime
-            .peer_ip_reverse
-            .get(&peer)
-            .and_then(|ip| {
-                runtime
-                    .seed_store
-                    .read()
-                    .unwrap()
-                    .values()
-                    .find(|node| node.addr.ip() == *ip)
-                    .map(|node| node.validation_state.clone())
-            });
+        let source_validation_state = runtime.peer_ip_reverse.get(&peer).and_then(|ip| {
+            runtime
+                .seed_store
+                .read()
+                .unwrap()
+                .values()
+                .find(|node| node.addr.ip() == *ip)
+                .map(|node| node.validation_state.clone())
+        });
         match message {
             request_response::Message::Request {
                 request, channel, ..
@@ -464,6 +482,11 @@ pub fn handle_gossip_event(
                         for event in events {
                             tracing::warn!("Seed-store continuity: {}", event);
                         }
+                        if accepted {
+                            runtime
+                                .pending_bootstrap_validation
+                                .insert(node.addr, String::new());
+                        }
                         crate::control::push_packet_meta_trace(
                             "InternalAction",
                             if accepted { 32 } else { 0 },
@@ -479,13 +502,15 @@ pub fn handle_gossip_event(
                         snapshot_ts_ms: _,
                         nodes,
                     } => {
-                        if source_validation_state
-                            != Some(crate::circuit_manager::ValidationState::Complete)
-                        {
+                        let source_allowed = matches!(
+                            source_validation_state,
+                            Some(ValidationState::Complete) | Some(ValidationState::Direct)
+                        );
+                        if !source_allowed {
                             crate::control::push_packet_meta_trace(
                                 "InternalAction",
                                 0,
-                                "DHT ignored: DirectNodePropagate from non-complete source",
+                                "DHT ignored: DirectNodePropagate from non-direct source",
                                 "",
                                 "internal",
                             );
@@ -506,7 +531,9 @@ pub fn handle_gossip_event(
                             );
                             if ok {
                                 accepted += 1;
-                                runtime.pending_direct_validation.insert(node.addr.ip());
+                                runtime
+                                    .pending_direct_validation
+                                    .insert(node.addr.ip(), String::new());
                             }
                             for event in events {
                                 tracing::warn!("Seed-store continuity: {}", event);
@@ -536,7 +563,15 @@ pub fn handle_gossip_event(
                             now_ms,
                             SeedUpdateSource::Direct,
                         );
-                        runtime.pending_direct_validation.remove(&node.addr.ip());
+                        let parent_chain = runtime
+                            .pending_direct_validation
+                            .remove(&node.addr.ip())
+                            .unwrap_or_default();
+                        if accepted {
+                            runtime
+                                .pending_bootstrap_validation
+                                .insert(node.addr, parent_chain);
+                        }
                         for event in events {
                             tracing::warn!("Seed-store continuity: {}", event);
                         }
@@ -690,7 +725,9 @@ fn upsert_seed_store_node(
 
     #[cfg(feature = "dht-validation-policy")]
     if let Some(existing) = store.get(&incoming.addr) {
-        let merged_direct = existing.last_direct_seen_ms.max(incoming.last_direct_seen_ms);
+        let merged_direct = existing
+            .last_direct_seen_ms
+            .max(incoming.last_direct_seen_ms);
         let merged_prop = existing
             .last_propagated_seen_ms
             .max(incoming.last_propagated_seen_ms);
@@ -711,7 +748,9 @@ fn upsert_seed_store_node(
             crate::circuit_manager::ValidationState::Unvalidated
         } else {
             match source {
-                SeedUpdateSource::Propagated => crate::circuit_manager::ValidationState::PropagatedOnly,
+                SeedUpdateSource::Propagated => {
+                    crate::circuit_manager::ValidationState::PropagatedOnly
+                }
                 SeedUpdateSource::Direct => crate::circuit_manager::ValidationState::Unvalidated,
             }
         };
@@ -760,7 +799,7 @@ pub async fn drive_swarm_once(
                         },
                     );
                     if let Some(ip) = runtime.peer_ip_reverse.get(&peer_id).copied() {
-                        if runtime.pending_direct_validation.contains(&ip) {
+                        if runtime.pending_direct_validation.contains_key(&ip) {
                             swarm
                                 .behaviour_mut()
                                 .gossip
@@ -857,31 +896,41 @@ pub async fn drive_swarm_once(
             .chain(runtime.engine.state.lazy_peers.iter().copied())
             .collect();
         if !peers.is_empty() {
-            let mut sorted_nodes: Vec<RelayNode> =
-                runtime.seed_store.read().unwrap().values().cloned().collect();
-            sorted_nodes.sort_unstable_by(|a, b| b.last_observed_ms.cmp(&a.last_observed_ms));
-
-            let mut entry_count = (sorted_nodes.len() * runtime.propagate_entry_percent) / 100;
-            entry_count = entry_count.clamp(1, runtime.propagate_max_entries);
-            sorted_nodes.truncate(entry_count);
-
-            if !sorted_nodes.is_empty() {
-                let mut peer_targets = peers;
-                peer_targets.shuffle(&mut rand::thread_rng());
-                let mut peer_count =
-                    (peer_targets.len() * runtime.propagate_peer_percent) / 100;
-                peer_count = peer_count.clamp(1, peer_targets.len());
-                peer_targets.truncate(peer_count);
-                let snapshot_ts_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                for peer in peer_targets {
+            let mut peer_targets = peers;
+            peer_targets.shuffle(&mut rand::thread_rng());
+            let mut peer_count = (peer_targets.len() * runtime.propagate_peer_percent) / 100;
+            peer_count = peer_count.clamp(1, peer_targets.len());
+            peer_targets.truncate(peer_count);
+            let snapshot_ts_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            for peer in peer_targets {
+                let (target_addr, target_state) = runtime
+                    .peer_ip_reverse
+                    .get(&peer)
+                    .and_then(|ip| {
+                        runtime
+                            .seed_store
+                            .read()
+                            .unwrap()
+                            .values()
+                            .find(|node| node.addr.ip() == *ip)
+                            .map(|node| (Some(node.addr), Some(node.validation_state.clone())))
+                    })
+                    .unwrap_or((None, None));
+                let nodes = minimal_bootstrap_snapshot(
+                    &runtime.seed_store,
+                    target_addr,
+                    target_state.as_ref(),
+                    runtime.propagate_max_entries,
+                );
+                if !nodes.is_empty() {
                     swarm.behaviour_mut().gossip.send_request(
                         &peer,
                         GossipRequest::DirectNodePropagate {
                             snapshot_ts_ms,
-                            nodes: sorted_nodes.clone(),
+                            nodes,
                         },
                     );
                 }
@@ -891,8 +940,9 @@ pub async fn drive_swarm_once(
 
     #[cfg(feature = "dht-validation-policy")]
     if !runtime.pending_direct_validation.is_empty() {
-        let probe_ips: Vec<IpAddr> = runtime.pending_direct_validation.iter().copied().collect();
-        for ip in probe_ips {
+        let pending_probes: Vec<IpAddr> =
+            runtime.pending_direct_validation.keys().copied().collect();
+        for ip in pending_probes {
             if let Some(peer) = runtime.peer_ip_map.get(&ip).copied() {
                 swarm
                     .behaviour_mut()
@@ -907,6 +957,37 @@ pub async fn drive_swarm_once(
                 addr.push(Protocol::from(ip));
                 addr.push(Protocol::Tcp(p2p_port));
                 let _ = swarm.dial(addr);
+            }
+        }
+    }
+
+    #[cfg(feature = "dht-validation-policy")]
+    if !runtime.pending_bootstrap_validation.is_empty() {
+        let pending_targets: Vec<(SocketAddr, String)> = runtime
+            .pending_bootstrap_validation
+            .iter()
+            .map(|(guard_addr, parent_chain)| (*guard_addr, parent_chain.clone()))
+            .collect();
+        for (guard_addr, parent_chain) in pending_targets {
+            match bootstrap_validate_unvalidated_node(
+                &runtime.seed_store,
+                runtime.noise_priv_key,
+                guard_addr,
+                &parent_chain,
+            )
+            .await
+            {
+                Ok(promoted) => {
+                    if promoted {
+                        runtime.pending_bootstrap_validation.remove(&guard_addr);
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        "Bootstrap validation attempt failed for {}: {error:#}",
+                        guard_addr
+                    );
+                }
             }
         }
     }
@@ -1177,4 +1258,124 @@ pub async fn discover_publisher_addr_for_exit_relay() -> Result<SocketAddr> {
     *cached_addr = Some(addr);
     *last_refresh = std::time::Instant::now();
     Ok(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::circuit_manager::ValidationState;
+
+    fn test_node(addr: &str, key: u8) -> RelayNode {
+        RelayNode {
+            addr: addr.parse().unwrap(),
+            identity_pub: [key; 32],
+            subnet_tag: "HostileSubnet".to_string(),
+            announce_ts_ms: 1,
+            last_direct_seen_ms: None,
+            last_propagated_seen_ms: None,
+            last_observed_ms: 0,
+            validation_state: ValidationState::PropagatedOnly,
+            validation_score: 0,
+            last_seen_ms: 0,
+        }
+    }
+
+    #[test]
+    fn relay_creator_and_publisher_participate_in_node_announce() {
+        assert!(role_participates_in_node_announce("relay"));
+        assert!(role_participates_in_node_announce("creator"));
+        assert!(role_participates_in_node_announce("publisher"));
+        assert!(!role_participates_in_node_announce("seed"));
+    }
+
+    #[test]
+    fn propagated_updates_start_as_propagated_only() {
+        let mut store = HashMap::new();
+        let node = test_node("10.0.0.10:9001", 1);
+
+        let (accepted, events) =
+            upsert_seed_store_node(&mut store, node.clone(), 100, SeedUpdateSource::Propagated);
+
+        assert!(accepted);
+        assert!(events.is_empty());
+        let saved = store.get(&node.addr).unwrap();
+        assert_eq!(saved.validation_state, ValidationState::PropagatedOnly);
+        assert_eq!(saved.validation_score, 0);
+        assert_eq!(saved.last_propagated_seen_ms, Some(100));
+        assert_eq!(saved.last_direct_seen_ms, None);
+    }
+
+    #[test]
+    fn direct_updates_start_as_unvalidated_with_minimum_score() {
+        let mut store = HashMap::new();
+        let node = test_node("10.0.0.11:9001", 2);
+
+        let (accepted, events) =
+            upsert_seed_store_node(&mut store, node.clone(), 200, SeedUpdateSource::Direct);
+
+        assert!(accepted);
+        assert!(events.is_empty());
+        let saved = store.get(&node.addr).unwrap();
+        assert_eq!(saved.validation_state, ValidationState::Unvalidated);
+        assert_eq!(saved.validation_score, 10);
+        assert_eq!(saved.last_direct_seen_ms, Some(200));
+        assert_eq!(saved.last_propagated_seen_ms, None);
+    }
+
+    #[test]
+    fn propagated_updates_do_not_demote_direct_nodes() {
+        let mut store = HashMap::new();
+        let node = test_node("10.0.0.12:9001", 3);
+
+        let (accepted, _) =
+            upsert_seed_store_node(&mut store, node.clone(), 100, SeedUpdateSource::Direct);
+        assert!(accepted);
+
+        let (accepted, _) =
+            upsert_seed_store_node(&mut store, node.clone(), 200, SeedUpdateSource::Propagated);
+        assert!(accepted);
+
+        let saved = store.get(&node.addr).unwrap();
+        assert_eq!(saved.validation_state, ValidationState::Unvalidated);
+        assert_eq!(saved.validation_score, 10);
+        assert_eq!(saved.last_direct_seen_ms, Some(100));
+        assert_eq!(saved.last_propagated_seen_ms, Some(200));
+    }
+
+    #[test]
+    fn direct_updates_of_existing_direct_nodes_preserve_direct_state() {
+        let mut store = HashMap::new();
+        let node = RelayNode {
+            validation_state: ValidationState::Direct,
+            validation_score: 42,
+            ..test_node("10.0.0.13:9001", 4)
+        };
+        store.insert(node.addr, node.clone());
+
+        let (accepted, events) =
+            upsert_seed_store_node(&mut store, node.clone(), 300, SeedUpdateSource::Direct);
+
+        assert!(accepted);
+        assert!(events.is_empty());
+        let saved = store.get(&node.addr).unwrap();
+        assert_eq!(saved.validation_state, ValidationState::Direct);
+        assert_eq!(saved.validation_score, 42);
+        assert_eq!(saved.last_direct_seen_ms, Some(300));
+    }
+
+    #[test]
+    fn identity_move_replaces_old_address_for_same_key() {
+        let mut store = HashMap::new();
+        let old_node = test_node("10.0.0.14:9001", 5);
+        let new_node = test_node("10.0.0.15:9001", 5);
+        store.insert(old_node.addr, old_node.clone());
+
+        let (accepted, events) =
+            upsert_seed_store_node(&mut store, new_node.clone(), 400, SeedUpdateSource::Direct);
+
+        assert!(accepted);
+        assert!(store.contains_key(&new_node.addr));
+        assert!(!store.contains_key(&old_node.addr));
+        assert!(events.iter().any(|event| event.contains("identity_move")));
+    }
 }

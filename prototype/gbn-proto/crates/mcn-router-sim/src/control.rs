@@ -1,6 +1,10 @@
-use crate::circuit_manager::{CircuitManager, RelayNode, ValidationState};
+use crate::circuit_manager::{
+    bootstrap_snapshot_for_peer, select_default_bootstrap_path, CircuitManager, RelayNode,
+    ValidationState,
+};
 use crate::swarm::SwarmControlCmd;
 use anyhow::{Context, Result};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -191,13 +195,25 @@ fn build_candidate_paths(
 
 fn live_relay_nodes(seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>) -> Vec<RelayNode> {
     let store = seed_store.read().unwrap();
-    let mut peers = store.values().filter(|node| is_relay_node(node)).cloned().collect::<Vec<_>>();
+    let mut peers = store
+        .values()
+        .filter(|node| is_relay_node(node))
+        .cloned()
+        .collect::<Vec<_>>();
     #[cfg(feature = "dht-validation-policy")]
     {
         peers.retain(is_path_eligible_node);
         peers.sort_unstable_by(|a, b| {
-            let a_state = if a.validation_state == ValidationState::Complete { 1 } else { 0 };
-            let b_state = if b.validation_state == ValidationState::Complete { 1 } else { 0 };
+            let a_state = if a.validation_state == ValidationState::Complete {
+                1
+            } else {
+                0
+            };
+            let b_state = if b.validation_state == ValidationState::Complete {
+                1
+            } else {
+                0
+            };
             b_state
                 .cmp(&a_state)
                 .then_with(|| b.validation_score.cmp(&a.validation_score))
@@ -218,10 +234,7 @@ fn live_relay_nodes(seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>) ->
 
 #[cfg(feature = "dht-validation-policy")]
 fn is_path_eligible_node(node: &RelayNode) -> bool {
-    matches!(
-        node.validation_state,
-        ValidationState::Direct | ValidationState::Complete
-    ) && node.validation_score > 0
+    crate::circuit_manager::is_bootstrap_eligible_node(node)
 }
 
 #[cfg(feature = "dht-validation-policy")]
@@ -1026,7 +1039,7 @@ async fn send_chunk_with_retries(
 
         if let Err(error) = chunk_result {
             #[cfg(feature = "dht-validation-policy")]
-        apply_node_path_result(seed_store, &[guard.addr, middle.addr, exit.addr], false);
+            apply_node_path_result(seed_store, &[guard.addr, middle.addr, exit.addr], false);
             last_error = Some(error.to_string());
             push_packet_meta_trace(
                 "ComponentError",
@@ -1065,6 +1078,108 @@ async fn send_chunk_with_retries(
         attempts,
         last_error.unwrap_or_else(|| "unknown error".to_string())
     )
+}
+
+pub(crate) async fn bootstrap_validate_unvalidated_node(
+    seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
+    noise_priv_key: [u8; 32],
+    guard_addr: SocketAddr,
+    parent_chain: &str,
+) -> Result<bool> {
+    let (guard, middle, exit) = {
+        let store = seed_store.read().unwrap();
+        let all_peers: Vec<RelayNode> = store
+            .values()
+            .filter(|node| node.validation_state != ValidationState::Isolated)
+            .cloned()
+            .collect();
+        let Some(guard) = store.get(&guard_addr).cloned() else {
+            return Ok(false);
+        };
+        if guard.validation_state != ValidationState::Unvalidated || guard.validation_score == 0 {
+            return Ok(false);
+        }
+        let Some((middle, exit)) = select_default_bootstrap_path(&all_peers, guard_addr) else {
+            return Ok(false);
+        };
+        (guard, middle, exit)
+    };
+
+    let chain = next_chain(parent_chain);
+    let payload_len = rand::thread_rng().gen_range(256..=2048);
+    let payload = vec![0x42u8; payload_len];
+    let chunk_id = now_millis();
+
+    push_packet_meta_trace(
+        "ComponentInput",
+        payload_len,
+        &format!(
+            "bootstrap.validate INPUT guard={} middle={} exit={} size={}",
+            guard.addr, middle.addr, exit.addr, payload_len
+        ),
+        &chain,
+        "bootstrap.validate",
+    );
+
+    let (publisher_addr, publisher_pub_key) = crate::swarm::discover_publisher_static()
+        .await
+        .context("Bootstrap validation: failed to discover Publisher static endpoint")?;
+
+    let send_result = crate::circuit_manager::send_chunk_via_path(
+        &noise_priv_key,
+        &guard,
+        &middle,
+        &exit,
+        publisher_addr,
+        publisher_pub_key,
+        chunk_id,
+        0,
+        1,
+        Some(&chain),
+        payload,
+    )
+    .await;
+
+    match send_result {
+        Ok(()) => {
+            apply_node_path_result(seed_store, &[guard.addr, middle.addr, exit.addr], true);
+            push_packet_meta_trace(
+                "ComponentOutput",
+                payload_len,
+                &format!(
+                    "bootstrap.validate OUTPUT promoted guard={} middle={} exit={}",
+                    guard.addr, middle.addr, exit.addr
+                ),
+                &chain,
+                "bootstrap.validate",
+            );
+            Ok(true)
+        }
+        Err(error) => {
+            push_packet_meta_trace(
+                "ComponentError",
+                payload_len,
+                &format!(
+                    "bootstrap.validate ERROR guard={} middle={} exit={} err={error:#}",
+                    guard.addr, middle.addr, exit.addr
+                ),
+                &chain,
+                "bootstrap.error",
+            );
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn minimal_bootstrap_snapshot(
+    seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
+    target_addr: Option<SocketAddr>,
+    target_validation_state: Option<&ValidationState>,
+    full_limit: usize,
+) -> Vec<RelayNode> {
+    let store = seed_store.read().unwrap();
+    let all_peers: Vec<RelayNode> = store.values().cloned().collect();
+    bootstrap_snapshot_for_peer(&all_peers, target_validation_state, target_addr, full_limit)
 }
 
 async fn execute_send_scale(
@@ -1171,4 +1286,91 @@ async fn execute_send_scale(
         total,
         elapsed_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::circuit_manager::ValidationState;
+
+    fn test_node(addr: &str, tag: &str, state: ValidationState, score: u32) -> RelayNode {
+        RelayNode {
+            addr: addr.parse().unwrap(),
+            identity_pub: [addr.as_bytes()[0]; 32],
+            subnet_tag: tag.to_string(),
+            announce_ts_ms: 1,
+            last_direct_seen_ms: Some(1),
+            last_propagated_seen_ms: None,
+            last_observed_ms: 1,
+            validation_state: state,
+            validation_score: score,
+            last_seen_ms: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_validation_skips_direct_guards() {
+        let guard = test_node(
+            "127.0.0.1:9101",
+            "HostileSubnet",
+            ValidationState::Direct,
+            25,
+        );
+        let middle = test_node(
+            "127.0.0.1:9102",
+            "HostileSubnet",
+            ValidationState::Complete,
+            30,
+        );
+        let exit = test_node(
+            "127.0.0.1:9201",
+            "FreeSubnet",
+            ValidationState::Complete,
+            35,
+        );
+        let store = Arc::new(RwLock::new(HashMap::from([
+            (guard.addr, guard.clone()),
+            (middle.addr, middle),
+            (exit.addr, exit),
+        ])));
+
+        let promoted = bootstrap_validate_unvalidated_node(&store, [0u8; 32], guard.addr, "")
+            .await
+            .unwrap();
+
+        assert!(!promoted);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_validation_skips_zero_score_guards() {
+        let guard = test_node(
+            "127.0.0.1:9301",
+            "HostileSubnet",
+            ValidationState::Unvalidated,
+            0,
+        );
+        let middle = test_node(
+            "127.0.0.1:9302",
+            "HostileSubnet",
+            ValidationState::Complete,
+            30,
+        );
+        let exit = test_node(
+            "127.0.0.1:9401",
+            "FreeSubnet",
+            ValidationState::Complete,
+            35,
+        );
+        let store = Arc::new(RwLock::new(HashMap::from([
+            (guard.addr, guard.clone()),
+            (middle.addr, middle),
+            (exit.addr, exit),
+        ])));
+
+        let promoted = bootstrap_validate_unvalidated_node(&store, [0u8; 32], guard.addr, "")
+            .await
+            .unwrap();
+
+        assert!(!promoted);
+    }
 }

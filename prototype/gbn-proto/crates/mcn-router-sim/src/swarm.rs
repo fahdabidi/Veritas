@@ -380,23 +380,30 @@ fn apply_seed_update_from_gossip_msg(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            let mut store = runtime.seed_store.write().unwrap();
             let mut accepted = 0usize;
             let mut continuity_events = 0usize;
-            for node in &nodes {
-                let (was_accepted, events) = upsert_seed_store_node(
-                    &mut store,
-                    node.clone(),
-                    now_ms,
-                    SeedUpdateSource::Propagated,
-                );
-                if was_accepted {
-                    accepted += 1;
+            let mut accepted_ips: Vec<std::net::IpAddr> = Vec::new();
+            {
+                let mut store = runtime.seed_store.write().unwrap();
+                for node in &nodes {
+                    let (was_accepted, events) = upsert_seed_store_node(
+                        &mut store,
+                        node.clone(),
+                        now_ms,
+                        SeedUpdateSource::Propagated,
+                    );
+                    if was_accepted {
+                        accepted += 1;
+                        accepted_ips.push(node.addr.ip());
+                    }
+                    continuity_events += events.len();
+                    for event in events {
+                        tracing::warn!("Seed-store continuity: {}", event);
+                    }
                 }
-                continuity_events += events.len();
-                for event in events {
-                    tracing::warn!("Seed-store continuity: {}", event);
-                }
+            }
+            for ip in accepted_ips {
+                runtime.pending_direct_validation.insert(ip, id_chain.to_string());
             }
             crate::control::push_packet_meta_trace(
                 "InternalAction",
@@ -504,13 +511,15 @@ pub fn handle_gossip_event(
                     } => {
                         let source_allowed = matches!(
                             source_validation_state,
-                            Some(ValidationState::Complete) | Some(ValidationState::Direct)
+                            Some(ValidationState::Complete)
+                                | Some(ValidationState::Direct)
+                                | Some(ValidationState::Unvalidated)
                         );
                         if !source_allowed {
                             crate::control::push_packet_meta_trace(
                                 "InternalAction",
                                 0,
-                                "DHT ignored: DirectNodePropagate from non-direct source",
+                                "DHT ignored: DirectNodePropagate from PropagatedOnly/Isolated source",
                                 "",
                                 "internal",
                             );
@@ -919,6 +928,13 @@ pub async fn drive_swarm_once(
                             .map(|node| (Some(node.addr), Some(node.validation_state.clone())))
                     })
                     .unwrap_or((None, None));
+                let should_propagate = matches!(
+                    target_state.as_ref(),
+                    Some(ValidationState::Direct) | Some(ValidationState::Complete)
+                );
+                if !should_propagate {
+                    continue;
+                }
                 let nodes = minimal_bootstrap_snapshot(
                     &runtime.seed_store,
                     target_addr,
@@ -940,8 +956,13 @@ pub async fn drive_swarm_once(
 
     #[cfg(feature = "dht-validation-policy")]
     if !runtime.pending_direct_validation.is_empty() {
-        let pending_probes: Vec<IpAddr> =
-            runtime.pending_direct_validation.keys().copied().collect();
+        const MAX_DIALS_PER_TICK: usize = 5;
+        let pending_probes: Vec<IpAddr> = runtime
+            .pending_direct_validation
+            .keys()
+            .copied()
+            .take(MAX_DIALS_PER_TICK)
+            .collect();
         for ip in pending_probes {
             if let Some(peer) = runtime.peer_ip_map.get(&ip).copied() {
                 swarm
@@ -963,9 +984,11 @@ pub async fn drive_swarm_once(
 
     #[cfg(feature = "dht-validation-policy")]
     if !runtime.pending_bootstrap_validation.is_empty() {
+        const MAX_BOOTSTRAP_PROBES_PER_TICK: usize = 3;
         let pending_targets: Vec<(SocketAddr, String)> = runtime
             .pending_bootstrap_validation
             .iter()
+            .take(MAX_BOOTSTRAP_PROBES_PER_TICK)
             .map(|(guard_addr, parent_chain)| (*guard_addr, parent_chain.clone()))
             .collect();
         for (guard_addr, parent_chain) in pending_targets {

@@ -138,7 +138,7 @@ If you'd like to support Veritas, use the GitHub `Sponsor` button or see [docs/F
 ### Journey of a Video
 
 ```
-  CREATOR                      RELAY NETWORK                       PUBLISHER
+        CREATOR                 RELAY NETWORK (Lattice)                PUBLISHER
   (hostile jurisdiction)       (3-hop onion routing)               (trusted entity)
 
  +---------------------+                                       +---------------------+

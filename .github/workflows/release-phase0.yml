@@ -118,11 +118,27 @@ jobs:
         run: |
           set -euo pipefail
 
-          target_sha="${{ steps.collect.outputs.target_sha }}"
           release_tag="${{ inputs.release_tag }}"
 
-          grep -Fq "$target_sha" docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md
+          # Verify the freeze doc records the release tag.
           grep -Fq "$release_tag" docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md
+
+          # Verify the freeze doc records a baseline_code_sha field and that the
+          # SHA it names is a valid commit reachable from origin/main.
+          # (The release target commit itself cannot know its own SHA before being
+          # committed, so we record the last V1 implementation commit SHA instead.)
+          baseline_code_sha="$(grep -o 'baseline_code_sha: *[0-9a-f]\{7,40\}' \
+            docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md \
+            | awk '{print $NF}' | head -1)"
+          if [[ -z "$baseline_code_sha" ]]; then
+            echo "baseline_code_sha field not found in GBN-PROTO-005-V1-Baseline-Freeze.md" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$baseline_code_sha" origin/main; then
+            echo "baseline_code_sha $baseline_code_sha is not reachable from origin/main" >&2
+            exit 1
+          fi
+
           grep -Fq "cargo check --workspace" docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md
           grep -Fq "cargo test -p mcn-router-sim" docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md
 

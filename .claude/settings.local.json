@@ -65,7 +65,10 @@
       "Bash(wsl -- bash -c 'aws logs describe-log-groups --region us-east-1 --query \"logGroups[*].logGroupName\" --output text 2>&1 | tr \"\\\\t\" \"\\\\n\" | grep -i \"gbn\\\\|relay\\\\|ecs\\\\|scale\" | head -20')",
       "Bash(wsl -- bash -c 'aws ecs describe-task-definition --task-definition gbn-proto-phase1-scale-n100-HostileRelayTask --region us-east-1 --query \"taskDefinition.containerDefinitions[0].logConfiguration\" --output json 2>&1')",
       "Bash(wsl -- bash -c \"source ~/.cargo/env && cd '/mnt/c/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto' && cargo build --workspace 2>&1\")",
-      "WebSearch"
+      "WebSearch",
+      "Bash(gh repo *)",
+      "Bash(where gh.exe)",
+      "Bash(where gh *)"
     ]
   }
 }

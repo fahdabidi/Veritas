@@ -1,4 +1,4 @@
-# Global Broadcast Network (GBN) - Prototype Workspace
+# Veritas - Prototype Workspace
 
 **A decentralized, censorship-resistant video creation, publishing, and distribution platform - designed so truth can travel faster than it can be suppressed.**
 
@@ -79,7 +79,7 @@ Existing options leave major gaps:
 - **Tor + generic file sharing** protects uploader routing but does not provide an integrated publisher trust + distribution pipeline.
 - **VPNs** shift trust to the VPN operator.
 
-The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline - from capture to playback - such that no single point of failure can trivially identify creators or suppress distribution.
+**Veritas** aims to provide a complete, end-to-end pipeline - from capture to playback - such that no single point of failure can trivially identify creators or suppress distribution.
 
 ### Design Principles
 

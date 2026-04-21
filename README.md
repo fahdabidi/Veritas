@@ -8,6 +8,21 @@ Architecture tracks:
 - `Lattice`: V1 onion-mode baseline
 - `Conduit`: V2 bridge-mode architecture in progress
 
+Support the project:
+- Use the GitHub `Sponsor` button
+- Funding policy: [docs/FUNDING.md](docs/FUNDING.md)
+- Sponsor tiers and acknowledgments: [docs/FUNDING.md](docs/FUNDING.md#suggested-github-sponsors-tiers)
+
+<!-- SPONSOR_ACKS:START -->
+## Sponsor Acknowledgments
+
+Veritas is sustained by sponsors who help fund architecture work, testing, security preparation, and prototype infrastructure.
+
+Become our first sponsor.
+
+If you'd like to support Veritas, use the GitHub `Sponsor` button or see [docs/FUNDING.md](docs/FUNDING.md).
+<!-- SPONSOR_ACKS:END -->
+
 > *"The internet treats censorship as damage and routes around it."*
 > - John Gilmore
 

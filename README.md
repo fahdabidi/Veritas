@@ -2,6 +2,12 @@
 
 **A decentralized, censorship-resistant video creation, publishing, and distribution platform - designed so truth can travel faster than it can be suppressed.**
 
+Latest release: [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/latest)
+
+Architecture tracks:
+- `Lattice`: V1 onion-mode baseline
+- `Conduit`: V2 bridge-mode architecture in progress
+
 > *"The internet treats censorship as damage and routes around it."*
 > - John Gilmore
 
@@ -13,10 +19,10 @@ This repository is an **active prototype** (`gbn-proto`) for validating core arc
 
 - Core Rust workspace and crate boundaries are in place
 - Integration test scaffolding exists for metadata stripping, multipath reassembly, tamper detection, end-to-end pipeline, DHT validation, gossip smoke, active heartbeat disconnect, and telescopic sinkhole resilience tests
-- CLI orchestration commands are partially implemented (see `crates/proto-cli/src/main.rs`)
+- CLI orchestration commands are partially implemented (see `prototype/gbn-proto/crates/proto-cli/src/main.rs`)
 - Not production-ready; APIs and protocols are expected to evolve during prototyping
 
-If you are looking for full system design docs (requirements, architecture, security), see [`../../docs/`](../../docs/).
+If you are looking for full system design docs (requirements, architecture, security), see [docs/](docs/).
 
 ---
 
@@ -31,24 +37,26 @@ If you are looking for full system design docs (requirements, architecture, secu
 ### 1) Build the workspace
 
 ```bash
+cd prototype/gbn-proto
 cargo build --workspace
 ```
 
 ### 2) Run tests
 
 ```bash
+cd prototype/gbn-proto
 cargo test --workspace
 ```
 
 ### 3) Add local test videos (for media pipeline tests)
 
-Place `.mp4` files in [`test-vectors/`](./test-vectors/) (this directory is gitignored).
+Place `.mp4` files in [prototype/gbn-proto/test-vectors/](prototype/gbn-proto/test-vectors/) (this directory is gitignored).
 
-See [`test-vectors/README.md`](./test-vectors/README.md) for expected files and guidance.
+See [prototype/gbn-proto/test-vectors/README.md](prototype/gbn-proto/test-vectors/README.md) for expected files and guidance.
 
 ### 4) (Optional) AWS phase infrastructure
 
-For EC2-based prototype runs and teardown, see [`infra/README-infra.md`](./infra/README-infra.md).
+For EC2-based prototype runs and teardown, see [prototype/gbn-proto/infra/README-infra.md](prototype/gbn-proto/infra/README-infra.md).
 
 ### 5) Scan the repo for leaked secrets
 
@@ -97,7 +105,7 @@ Truth is not fragile. It just needs infrastructure worthy of it.
 | **Resilience over Efficiency** | Erasure-coded distribution across geographically diverse nodes |
 | **Legal Responsibility at the Edges** | Editorial/legal responsibility is with Publishers and Content Providers |
 | **Adaptive to Adversaries** | Pluggable transport strategy evolves against censorship techniques |
-| **Sovereign Updates** | Supply-chain hardening via reproducible builds and multi-party governance (see [GBN-SEC-007](../../docs/security/GBN-SEC-007-Software-Supply-Chain.md)) |
+| **Sovereign Updates** | Supply-chain hardening via reproducible builds and multi-party governance (see [GBN-SEC-007](docs/security/GBN-SEC-007-Software-Supply-Chain.md)) |
 
 ---
 
@@ -526,13 +534,13 @@ gbn-proto/
 ## Prototyping Phases
 
 ### Phase 1 - Media Creation Network & zero-trust routing
-Plan: [`../../docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md`](../../docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md)
+Plan: [docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md](docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md)
 
 ### Phase 2 - Publishing & distributed storage
-Plan: [`../../docs/prototyping/GBN-PROTO-002-Phase2-Publishing-Storage.md`](../../docs/prototyping/GBN-PROTO-002-Phase2-Publishing-Storage.md)
+Plan: [docs/prototyping/GBN-PROTO-002-Phase2-Publishing-Storage.md](docs/prototyping/GBN-PROTO-002-Phase2-Publishing-Storage.md)
 
 ### Phase 3 - Overlay broadcast network & playback
-Plan: [`../../docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md`](../../docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md)
+Plan: [docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md](docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md)
 
 ---
 
@@ -541,13 +549,13 @@ Plan: [`../../docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md`](../.
 GBN uses a **Zero-Knowledge Transit** design goal: intermediate nodes should know only what is necessary for forwarding.
 
 Detailed security docs:
-- [GBN-SEC-001 â€” Media Creation Network](../../docs/security/GBN-SEC-001-Media-Creation-Network.md)
-- [GBN-SEC-002 â€” Media Publishing](../../docs/security/GBN-SEC-002-Media-Publishing.md)
-- [GBN-SEC-003 â€” Global Distributed Storage](../../docs/security/GBN-SEC-003-Global-Distributed-Storage.md)
-- [GBN-SEC-004 â€” Video Content Providers](../../docs/security/GBN-SEC-004-Video-Content-Providers.md)
-- [GBN-SEC-005 â€” Video Playback App](../../docs/security/GBN-SEC-005-Video-Playback-App.md)
-- [GBN-SEC-006 â€” Broadcast Network](../../docs/security/GBN-SEC-006-Broadcast-Network.md)
-- [GBN-SEC-007 â€” Software Supply Chain](../../docs/security/GBN-SEC-007-Software-Supply-Chain.md)
+- [GBN-SEC-001 â€” Media Creation Network](docs/security/GBN-SEC-001-Media-Creation-Network.md)
+- [GBN-SEC-002 â€” Media Publishing](docs/security/GBN-SEC-002-Media-Publishing.md)
+- [GBN-SEC-003 â€” Global Distributed Storage](docs/security/GBN-SEC-003-Global-Distributed-Storage.md)
+- [GBN-SEC-004 â€” Video Content Providers](docs/security/GBN-SEC-004-Video-Content-Providers.md)
+- [GBN-SEC-005 â€” Video Playback App](docs/security/GBN-SEC-005-Video-Playback-App.md)
+- [GBN-SEC-006 â€” Broadcast Network](docs/security/GBN-SEC-006-Broadcast-Network.md)
+- [GBN-SEC-007 â€” Software Supply Chain](docs/security/GBN-SEC-007-Software-Supply-Chain.md)
 
 ### Dynamic Circuit Rebuilding & Anonymity
 
@@ -564,13 +572,13 @@ As documented in the security files, the system **does not fully mitigate**:
 
 ## Documentation Index
 
-All system-level docs live under [`../../docs/`](../../docs/):
+All system-level docs live under [docs/](docs/):
 
-- Requirements: `../../docs/requirements/GBN-REQ-*.md`
-- Architecture: `../../docs/architecture/GBN-ARCH-*.md`
-- Security: `../../docs/security/GBN-SEC-*.md`
-- Prototyping: `../../docs/prototyping/GBN-PROTO-*.md`
-- Research: `../../docs/research/GBN-RESEARCH-*.md`
+- Requirements: `docs/requirements/GBN-REQ-*.md`
+- Architecture: `docs/architecture/GBN-ARCH-*.md`
+- Security: `docs/security/GBN-SEC-*.md`
+- Prototyping: `docs/prototyping/GBN-PROTO-*.md`
+- Research: `docs/research/GBN-RESEARCH-*.md`
 
 ---
 

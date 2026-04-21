@@ -150,17 +150,17 @@ This workflow validates the baseline target, checks the Phase 0 docs for the exa
 
 Recommended tag:
 
-`gbn-proto-005-phase0-v1-baseline`
+`veritas-lattice-0.1.0-baseline`
 
 If the team needs to rerun the freeze after a substantive baseline correction, append a revision suffix:
 
-`gbn-proto-005-phase0-v1-baseline-r2`
+`veritas-lattice-0.1.0-baseline-r2`
 
 ### Release Title
 
 Recommended title:
 
-`GBN-PROTO-005 Phase 0 - V1 Baseline Freeze`
+`Veritas Lattice 0.1.0`
 
 ### Release Target
 

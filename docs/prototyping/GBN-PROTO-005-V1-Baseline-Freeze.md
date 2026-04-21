@@ -6,11 +6,11 @@ This document freezes the Veritas V1 onion-mode baseline so all GBN-PROTO-005 V2
 
 baseline_code_sha: 217ec4ab022b4e6b087b920b1e771bdc9caa6a72
 baseline_branch: main
-release_tag: gbn-proto-005-phase0-v1-baseline
+release_tag: veritas-lattice-0.1.0-baseline
 
 - Project: `Veritas`
-- Baseline mode: `V1 onion mode`
-- Release title: `GBN-PROTO-005 Phase 0 — V1 Baseline Freeze`
+- Baseline mode: `Lattice (V1 onion mode)`
+- Release title: `Veritas Lattice 0.1.0`
 - Baseline code commit meaning: last approved V1 implementation commit before the Phase 0 release packaging docs
 
 ## 2. Protected V1 Paths
@@ -51,7 +51,7 @@ The Phase 0 release package is the combination of:
 - this freeze manifest
 - [GBN-PROTO-005-V1-Regression-Suite.md](GBN-PROTO-005-V1-Regression-Suite.md)
 - `.github/workflows/release-phase0.yml`
-- the annotated Git tag `gbn-proto-005-phase0-v1-baseline`
+- the annotated Git tag `veritas-lattice-0.1.0-baseline`
 - the GitHub release published from that tag
 
 ## 6. Approval Gate

@@ -13,12 +13,12 @@ on:
       release_tag:
         description: Annotated git tag to create for the frozen baseline release.
         required: true
-        default: gbn-proto-005-phase0-v1-baseline
+        default: veritas-lattice-0.1.0-baseline
         type: string
       release_title:
         description: GitHub release title.
         required: true
-        default: GBN-PROTO-005 Phase 0 - V1 Baseline Freeze
+        default: Veritas Lattice 0.1.0
         type: string
       publish_release:
         description: When false, run validation and generate notes only. When true, also push the tag and publish the GitHub release.
@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ ! "${{ inputs.release_tag }}" =~ ^gbn-proto-005-phase0-v1-baseline(-r[0-9]+)?$ ]]; then
+          if [[ ! "${{ inputs.release_tag }}" =~ ^veritas-lattice-0\.1\.0-baseline(-r[0-9]+)?$ ]]; then
             echo "Release tag '${{ inputs.release_tag }}' does not match the approved Phase 0 pattern." >&2
             exit 1
           fi

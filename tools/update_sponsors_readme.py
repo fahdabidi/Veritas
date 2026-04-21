@@ -124,6 +124,8 @@ def render_block(groups: dict[str, list[tuple[str, str]]]) -> str:
         "",
         "Veritas is sustained by sponsors who help fund architecture work, testing, security preparation, and prototype infrastructure.",
         "",
+        "[![Sponsor Veritas](https://img.shields.io/badge/Sponsor-Veritas-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/fahdabidi)",
+        "",
     ]
 
     if not groups:

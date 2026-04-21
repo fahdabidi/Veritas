@@ -18,6 +18,8 @@ Support the project:
 
 Veritas is sustained by sponsors who help fund architecture work, testing, security preparation, and prototype infrastructure.
 
+[![Sponsor Veritas](https://img.shields.io/badge/Sponsor-Veritas-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/fahdabidi)
+
 Become our first sponsor.
 
 If you'd like to support Veritas, use the GitHub `Sponsor` button or see [docs/FUNDING.md](docs/FUNDING.md).

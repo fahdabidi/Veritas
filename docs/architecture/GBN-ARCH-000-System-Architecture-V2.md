@@ -1,10 +1,11 @@
-# GBN-ARCH-000-V2 — Global Broadcast Network: Top-Level System Architecture
+# GBN-ARCH-000-V2 — Veritas: Top-Level System Architecture (Conduit)
 
 **Document ID:** GBN-ARCH-000-V2  
+**Architecture Codename:** Conduit  
 **Version:** 0.1 (Draft)  
 **Status:** In Review  
-**Last Updated:** 2026-04-20  
-**Related:** [GBN-ARCH-000](GBN-ARCH-000-System-Architecture.md), [GBN-ARCH-001-V2](GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-PROTO-005](../prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md)
+**Last Updated:** 2026-04-21  
+**Related:** [GBN-ARCH-000 (Lattice)](GBN-ARCH-000-System-Architecture.md), [GBN-ARCH-001-V2](GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-PROTO-005](../prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md)
 
 ---
 
@@ -25,16 +26,16 @@
 
 ## 1. Architecture Philosophy
 
-### 1.1 Why V2 Exists
+### 1.1 Why Conduit Exists
 
-V1 assumes that creators and relay nodes can build onion paths across dialable overlay nodes. V2 introduces a second transport architecture for mobile and carrier-constrained environments where unsolicited inbound reachability cannot be assumed.
+**Lattice** (V1) assumes that creators and relay nodes can build onion paths across dialable overlay nodes. **Conduit** (V2) introduces a second transport architecture for mobile and carrier-constrained environments where unsolicited inbound reachability cannot be assumed.
 
-V2 does not delete V1. It adds a new transport mode:
+Conduit does not replace Lattice. It adds a new transport mode:
 
-- **V1 Onion Mode**
+- **Lattice — Onion Mode (V1)**
   - stronger path anonymity
   - weaker real-world mobile reachability
-- **V2 Bridge Mode**
+- **Conduit — Bridge Mode (V2)**
   - stronger real-world mobile reachability
   - weaker path anonymity
 
@@ -47,7 +48,7 @@ V2 does not delete V1. It adds a new transport mode:
 | **Weak Discovery, Strong Authority** | DHT/discovery suggests candidates; signed bridge catalogs authorize use |
 | **Coordinated UDP Hole Punching** | Creator/bridge reachability is actively repaired after catalog refresh rather than assumed |
 | **Mode Separation** | Bridge Mode and Onion Mode must coexist without destabilizing each other |
-| **Incremental Migration** | V2 is added beside V1, not implemented by mutating V1 runtime paths |
+| **Incremental Migration** | Conduit is added beside Lattice, not implemented by mutating Lattice runtime paths |
 
 ### 1.3 The Five Planes
 
@@ -227,15 +228,15 @@ Bridge failure
 
 ## 5. Network Topology
 
-### 5.1 Topological Shift From V1
+### 5.1 Topological Shift From Lattice
 
-V1:
+Lattice (V1):
 
 ```text
 Creator -> Guard -> Middle -> Exit -> Publisher
 ```
 
-V2:
+Conduit (V2):
 
 ```text
 Creator -> ExitBridge -> Publisher
@@ -311,18 +312,18 @@ The Publisher is authoritative for first-contact bootstrap:
 
 ### 7.1 Coexistence Rule
 
-V2 must be deployed beside V1.
+Conduit must be deployed beside Lattice.
 
 Recommended structure:
 
 ```text
-prototype/gbn-proto/         # V1 onion mode
-prototype/gbn-bridge-proto/  # V2 bridge mode
+prototype/gbn-proto/         # Lattice (V1) onion mode
+prototype/gbn-bridge-proto/  # Conduit (V2) bridge mode
 ```
 
 ### 7.2 Deployment Isolation
 
-| Isolation Concern | V2 Rule |
+| Isolation Concern | Conduit Rule |
 |---|---|
 | Image names | New image names for bridge-mode components |
 | Stack names | Separate CloudFormation stack names |
@@ -343,18 +344,18 @@ prototype/gbn-bridge-proto/  # V2 bridge mode
 ### 8.2 Security Properties Reduced
 
 - bridge sees creator transport endpoint
-- timing correlation is easier than in V1 onion mode
+- timing correlation is easier than in Lattice (V1) onion mode
 - single-hop transport reveals more adjacency information than multi-hop onion
 
 ### 8.3 Security Positioning
 
-V2 is a **mobile viability architecture**, not a full anonymity replacement for V1.
+Conduit is a **mobile viability architecture**, not a full anonymity replacement for Lattice (V1).
 
 ---
 
 ## 9. Scalability Architecture
 
-V2 scales by:
+Conduit scales by:
 
 - allowing many small bridge nodes rather than one central broker
 - pushing authority decisions to signed catalogs
@@ -383,8 +384,8 @@ To scale first-contact onboarding, the Publisher may batch bootstrap fanout:
 
 | Decision | Outcome |
 |---|---|
-| Keep V1 onion implementation untouched | Accepted |
-| Introduce V2 as additive transport mode | Accepted |
+| Keep Lattice (V1) onion implementation untouched | Accepted |
+| Introduce Conduit (V2) as additive transport mode | Accepted |
 | Make Publisher the bridge authority | Accepted |
 | Treat DHT as weak discovery only | Accepted |
 | Model mobile reachability explicitly | Accepted |

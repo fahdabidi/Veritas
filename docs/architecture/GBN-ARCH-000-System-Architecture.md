@@ -1,6 +1,7 @@
-# GBN-ARCH-000 — Global Broadcast Network: Top-Level System Architecture
+# GBN-ARCH-000 — Veritas: Top-Level System Architecture (Lattice)
 
 **Document ID:** GBN-ARCH-000  
+**Architecture Codename:** Lattice  
 **Version:** 0.1 (Draft)  
 **Status:** In Review  
 **Last Updated:** 2026-04-07  

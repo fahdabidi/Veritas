@@ -1,23 +1,24 @@
-# GBN-ARCH-001-V2 — Media Creation Network: Distributed Peer-to-Peer Bridge Architecture
+# GBN-ARCH-001-V2 — Media Creation Network: Conduit Bridge Architecture
 
 **Document ID:** GBN-ARCH-001-V2  
+**Architecture Codename:** Conduit  
 **Version:** 0.1 (Draft)  
 **Status:** In Review  
-**Last Updated:** 2026-04-20  
-**Parent Architecture:** [GBN-ARCH-000-V2](GBN-ARCH-000-System-Architecture-V2.md)  
+**Last Updated:** 2026-04-21  
+**Parent Architecture:** [GBN-ARCH-000-V2 (Conduit)](GBN-ARCH-000-System-Architecture-V2.md)  
 **Related Prototype:** [GBN-PROTO-005](../prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md)
 
 ---
 
 ## 1. Overview
 
-The V2 Media Creation Network redesign introduces a distributed bridge model for creator uploads in environments where creators and relay nodes cannot be treated as stable inbound-reachable overlay nodes.
+The **Conduit** (V2) Media Creation Network redesign introduces a distributed bridge model for creator uploads in environments where creators and relay nodes cannot be treated as stable inbound-reachable overlay nodes.
 
 The core architectural principle becomes:
 
 **A returning creator only needs one reachable, publisher-authorized bridge to refresh its transport view and upload encrypted payloads. A first-time creator needs a one-time host-assisted path to the Publisher so the Publisher can seed the initial bridge set.**
 
-This architecture does not replace the V1 onion design. It defines a parallel **Bridge Mode** transport.
+This architecture does not replace the **Lattice** (V1) onion design. It defines a parallel **Bridge Mode** transport.
 
 After the Publisher returns a bridge update, the creator and the listed ExitBridges must immediately attempt coordinated UDP hole punching so they can talk to each other directly. The default UDP port is `443` unless a bridge-specific override is signed into the bridge entry.
 
@@ -233,9 +234,9 @@ BridgeClose
 - HostCreator may relay bootstrap traffic but cannot authorize bridges or rewrite the Publisher-selected bridge set.
 - Bootstrap DHT entries are valid only while the Publisher signature and expiry remain valid.
 
-### 6.2 Comparison To V1
+### 6.2 Comparison To Lattice (V1)
 
-| Property | V1 Onion Mode | V2 Bridge Mode |
+| Property | Lattice — Onion Mode (V1) | Conduit — Bridge Mode (V2) |
 |---|---|---|
 | Path anonymity | Stronger | Weaker |
 | Mobile reachability | Weaker | Stronger |
@@ -288,13 +289,13 @@ This architecture is intended to be implemented in a new workspace:
 prototype/gbn-bridge-proto/
 ```
 
-while preserving the existing V1 workspace:
+while preserving the existing Lattice (V1) workspace:
 
 ```text
 prototype/gbn-proto/
 ```
 
-### 8.2 New V2 Components
+### 8.2 New Conduit (V2) Components
 
 | Crate | Responsibility |
 |---|---|
@@ -333,14 +334,14 @@ prototype/gbn-proto/
 
 ## 10. Migration Guidance
 
-V2 should be introduced as:
+Conduit should be introduced as:
 
 - a new transport mode
 - a separate workspace
 - a separate infra footprint
 - a separate metrics stream
 
-Only after M3/M4 validation should the project decide whether V2 remains:
+Only after M3/M4 validation should the project decide whether Conduit remains:
 
 - a parallel mobile transport mode
 - or the preferred creator upload mode for later phases

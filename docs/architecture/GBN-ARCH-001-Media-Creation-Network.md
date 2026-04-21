@@ -1,6 +1,7 @@
-# GBN-ARCH-001 — Media Creation Network: Architecture
+# GBN-ARCH-001 — Media Creation Network: Architecture (Lattice)
 
 **Document ID:** GBN-ARCH-001  
+**Architecture Codename:** Lattice  
 **Version:** 0.1 (Draft)  
 **Status:** In Review  
 **Last Updated:** 2026-04-07  

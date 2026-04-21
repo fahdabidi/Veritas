@@ -16,18 +16,6 @@ Support the project:
 - Funding policy: [docs/FUNDING.md](docs/FUNDING.md)
 - Sponsor tiers and acknowledgments: [docs/FUNDING.md](docs/FUNDING.md#suggested-github-sponsors-tiers)
 
-<!-- SPONSOR_ACKS:START -->
-## Sponsor Acknowledgments
-
-Veritas is sustained by sponsors who help fund architecture work, testing, security preparation, and prototype infrastructure.
-
-[![Sponsor Veritas](https://img.shields.io/badge/Sponsor-Veritas-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/fahdabidi)
-
-Become our first sponsor.
-
-If you'd like to support Veritas, use the GitHub `Sponsor` button or see [docs/FUNDING.md](docs/FUNDING.md).
-<!-- SPONSOR_ACKS:END -->
-
 > *"The internet treats censorship as damage and routes around it."*
 > - John Gilmore
 
@@ -128,6 +116,18 @@ Truth is not fragile. It just needs infrastructure worthy of it.
 | **Legal Responsibility at the Edges** | Editorial/legal responsibility is with Publishers and Content Providers |
 | **Adaptive to Adversaries** | Pluggable transport strategy evolves against censorship techniques |
 | **Sovereign Updates** | Supply-chain hardening via reproducible builds and multi-party governance (see [GBN-SEC-007](docs/security/GBN-SEC-007-Software-Supply-Chain.md)) |
+
+<!-- SPONSOR_ACKS:START -->
+## Sponsor Acknowledgments
+
+Veritas is sustained by sponsors who help fund architecture work, testing, security preparation, and prototype infrastructure.
+
+[![Sponsor Veritas](https://img.shields.io/badge/Sponsor-Veritas-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/fahdabidi)
+
+Become our first sponsor.
+
+If you'd like to support Veritas, use the GitHub `Sponsor` button or see [docs/FUNDING.md](docs/FUNDING.md).
+<!-- SPONSOR_ACKS:END -->
 
 ---
 

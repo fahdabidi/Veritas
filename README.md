@@ -72,14 +72,22 @@ documented example on a specific line, add `secretscan:allow` to that line.
 
 ## Vision & Mission
 
-In many countries, a journalist who records police violence, corruption, or protests faces an impossible choice: **publish and be identified, or stay silent and stay safe**.
+Governments shut down the internet during elections. Footage of atrocities disappears from platforms within hours of being posted. Journalists are arrested because their metadata was subpoenaed. Protesters are identified from video they didn't know was being analyzed. Entire populations are cut off from the world at the moment the world most needs to see what is happening to them.
 
-Existing options leave major gaps:
-- **Mainstream platforms** can remove content centrally and log subpoenaable metadata.
-- **Tor + generic file sharing** protects uploader routing but does not provide an integrated publisher trust + distribution pipeline.
-- **VPNs** shift trust to the VPN operator.
+This is not a hypothetical threat model. It is the operating reality for creators, journalists, and witnesses in dozens of countries right now.
 
-**Veritas** aims to provide a complete, end-to-end pipeline - from capture to playback - such that no single point of failure can trivially identify creators or suppress distribution.
+The tools that exist today were not built for this:
+
+- **Mainstream platforms** comply with government takedown orders, log everything, and can identify uploaders on demand.
+- **Tor + file sharing** protects routing anonymity but leaves creators responsible for their own operational security, key management, metadata stripping, and distribution — a burden that gets people killed.
+- **VPNs** shift trust to a single commercial operator who can be compelled, acquired, or compromised.
+- **Encrypted messengers** were designed for communication, not authenticated broadcast at scale.
+
+The gap is not a better app. The gap is a **protocol** — one that treats suppression as a network fault and routes around it by design, not by policy.
+
+**Veritas** (*Latin: truth*) is that protocol. It is a complete, end-to-end pipeline — from the moment a camera records something important, through anonymous multi-hop relay, to a Publisher who signs and distributes it globally — engineered so that no single government, platform, carrier, or attacker can simultaneously identify the creator, intercept the content, and suppress the distribution. All three would have to succeed at once. They won't.
+
+Truth is not fragile. It just needs infrastructure worthy of it.
 
 ### Design Principles
 

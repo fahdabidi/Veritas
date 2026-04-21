@@ -1,8 +1,11 @@
 # GBN-PROTO-005 - Execution Phase 0 Detailed Plan: Freeze The V1 Baseline
 
-**Status:** Ready after the preflight blockers are cleared  
-**Primary Goal:** freeze the current `prototype/gbn-proto/` implementation as the protected V1 baseline for all later GBN-PROTO-005 work  
+**Status:** Completed
+**Primary Goal:** freeze the current `prototype/gbn-proto/` implementation as the protected V1 baseline for all later GBN-PROTO-005 work
 **Source Plan:** [GBN-PROTO-005 Execution Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md)
+**Published Release:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
+**Release Tag:** `veritas-lattice-0.1.0-baseline`
+**Release Target Commit:** `c5dc415124f101e5de3dd20e2eeed608bd6948df`
 
 ---
 
@@ -13,18 +16,18 @@ These findings should drive the Phase 0 plan instead of being discovered halfway
 | Item | Current Value | Why It Matters |
 |---|---|---|
 | Current branch | `main` | the baseline manifest must record the exact branch reference |
-| Current HEAD commit | `149e34e159890d1bea846f8e6fa660cfe4b2a0be` | the freeze manifest and release package need an exact commit target |
-| Existing git tags | none found | Phase 0 will establish the first tag convention for this repo |
-| Existing GitHub remote | `origin = fahdabidi/Global-Broadcast-Network` | the release package should target the GitHub repo already in use |
-| Current worktree status | not clean | a baseline freeze and GitHub release must not be cut from a dirty worktree |
-| Current blocker on protected V1 paths | `prototype/gbn-proto/infra/cloudformation/phase1-scale-stack.yaml` is modified locally | Phase 0 cannot honestly certify a frozen V1 baseline until protected-path drift is resolved or explicitly excluded |
-| Existing GitHub automation | no `.github/` release workflow found | release publication should be planned as a manual GitHub release unless automation is added later |
+| Current HEAD commit | `c5dc415124f101e5de3dd20e2eeed608bd6948df` | this is the commit published as the frozen Lattice baseline |
+| Existing git tags | `veritas-lattice-0.1.0-baseline` | Phase 0 established the first Lattice baseline tag convention for this repo |
+| Existing GitHub remote | `origin = fahdabidi/Global-Broadcast-Network` | the repo remote still uses the legacy URL, but the published release lives under `fahdabidi/Veritas` |
+| Current worktree status | clean | Phase 0 was released from a clean worktree and remains reproducible |
+| Current blocker on protected V1 paths | none | the protected-path diff is clean, so the V1 preservation gate is satisfied |
+| Existing GitHub automation | `.github/workflows/release-phase0.yml` exists and published the baseline release | Phase 0 is now repeatable and externally referenceable |
 
 ---
 
 ## 2. Review Summary
 
-Phase 0 is small in file count, but it is a release-grade control point. The implementation is not complete when the two markdown files exist. It is complete only when the repo can prove:
+Phase 0 is small in file count, but it is a release-grade control point. That control point is now complete. The repo can now prove:
 
 - which exact V1 commit is being frozen
 - which V1 paths are protected from later edits
@@ -60,7 +63,7 @@ The main gaps in the current top-level plan are:
 - changing V1 architecture documents or GBN-PROTO-004 documents
 - refactoring, formatting, or repairing V1 code
 - starting the V2 workspace
-- introducing CI or release automation in this phase
+- introducing unrelated CI or release automation beyond the Phase 0 release workflow
 
 ---
 
@@ -78,7 +81,7 @@ Phase 0 should not begin writing the freeze artifacts until all of these are che
 5. Confirm the minimum V1 regression suite can be run from the current environment.
 6. Confirm Phase 0 remains documentation-only and does not require any edit under `prototype/gbn-proto/`.
 
-The current blocker is step 2. The modified V1 path must be resolved before the freeze can be released.
+All preflight gates are now satisfied for the published Lattice baseline release.
 
 ---
 
@@ -139,6 +142,12 @@ Use this minimum structure for the regression suite doc:
 ## 8. Release Packaging Plan
 
 Phase 0 should end with a GitHub release that makes the frozen baseline referenceable from later work.
+
+Published outcome:
+
+- release: [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
+- tag: `veritas-lattice-0.1.0-baseline`
+- target commit: `c5dc415124f101e5de3dd20e2eeed608bd6948df`
 
 Preferred automation path:
 
@@ -298,7 +307,7 @@ Phase 0 is complete only when all of the following are true:
 
 Current blocker:
 
-- `prototype/gbn-proto/infra/cloudformation/phase1-scale-stack.yaml` is already modified in the local worktree and sits inside a protected V1 path.
+- none; Phase 0 has been published and the protected-path diff is clean
 
 ---
 

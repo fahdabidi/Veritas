@@ -1,8 +1,10 @@
 # GBN-PROTO-005 - Execution Phase 1 Detailed Plan: V2 Workspace Boundary
 
-**Status:** Ready after the Phase 0 gate is satisfied and protected V1 paths are clean  
-**Primary Goal:** create `prototype/gbn-bridge-proto/` as an isolated Rust workspace that compiles without modifying V1  
+**Status:** Ready to start; Phase 0 is published and protected V1 paths are clean
+**Primary Goal:** create `prototype/gbn-bridge-proto/` as an isolated Rust workspace that compiles without modifying V1
 **Source Plan:** [GBN-PROTO-005 Execution Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md)
+**Phase 0 Baseline Release:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
+**Phase 0 Release Tag:** `veritas-lattice-0.1.0-baseline`
 
 ---
 
@@ -13,11 +15,11 @@ These findings should drive Phase 1 execution instead of being rediscovered duri
 | Item | Current Value | Why It Matters |
 |---|---|---|
 | Current branch | `main` | Phase 1 notes should record the branch used to create the V2 workspace |
-| Current HEAD commit | `149e34e159890d1bea846f8e6fa660cfe4b2a0be` | implementation notes should record the exact commit Phase 1 started from |
-| Phase 0 baseline docs | not present | Phase 1 should not begin until the actual Phase 0 freeze artifacts exist or a waiver is recorded |
-| Phase 0 release automation | `.github/workflows/release-phase0.yml` exists | the preferred Phase 1 prerequisite is a completed Phase 0 baseline release, not only draft docs |
+| Current HEAD commit | `c5dc415124f101e5de3dd20e2eeed608bd6948df` | this is the currently validated commit immediately after the published Lattice baseline release |
+| Phase 0 baseline docs | present | Phase 1 now has the required freeze manifest and regression suite docs |
+| Phase 0 release automation | `.github/workflows/release-phase0.yml` exists and has published `veritas-lattice-0.1.0-baseline` | the preferred Phase 1 prerequisite is now satisfied |
 | Existing V2 workspace path | `prototype/gbn-bridge-proto/` does not exist | Phase 1 is still responsible for creating the full sibling workspace boundary |
-| Current protected V1 path drift | `prototype/gbn-proto/crates/mcn-router-sim/src/circuit_manager.rs` and `prototype/gbn-proto/infra/cloudformation/phase1-scale-stack.yaml` are modified locally | Phase 1 must not start from a dirty protected-path baseline because it weakens the V1 preservation check |
+| Current protected V1 path drift | none | the protected-path diff is clean, so Phase 1 can start from a trustworthy preserved V1 baseline |
 
 ---
 
@@ -65,7 +67,7 @@ Phase 1 should not begin code edits until all of these are checked:
 
 1. Confirm `docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md` exists.
 2. Confirm `docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md` exists.
-3. Preferably confirm the Phase 0 release was published from `.github/workflows/release-phase0.yml` or record why it was not.
+3. Confirm the Phase 0 baseline release is [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline) unless an explicit replacement baseline is approved.
 4. Confirm protected V1 paths are clean in the local worktree.
 5. Confirm `prototype/gbn-bridge-proto/` does not already exist.
 6. Capture the V1 file-integrity diff before any edits.
@@ -75,8 +77,7 @@ If any gate fails, Phase 1 should stop. A waiver path is possible, but it should
 
 Current blockers:
 
-- the actual Phase 0 baseline docs are still absent
-- protected V1 paths are already dirty in the current worktree
+- none; Phase 0 is published and the protected-path diff is clean
 
 ---
 
@@ -279,10 +280,7 @@ Phase 1 is complete only when all of the following are true:
 
 Current blockers:
 
-- `docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md` does not yet exist
-- `docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md` does not yet exist
-- `prototype/gbn-proto/crates/mcn-router-sim/src/circuit_manager.rs` is modified locally
-- `prototype/gbn-proto/infra/cloudformation/phase1-scale-stack.yaml` is modified locally
+- none; Phase 1 is ready to begin from the published Lattice baseline
 
 ---
 

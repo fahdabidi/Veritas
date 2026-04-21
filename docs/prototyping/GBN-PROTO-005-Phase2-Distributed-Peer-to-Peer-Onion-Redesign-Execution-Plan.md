@@ -1,8 +1,8 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Draft  
-**Last Updated:** 2026-04-20  
+**Status:** Active - Phase 0 complete, Phase 1 ready
+**Last Updated:** 2026-04-21
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md)
 
 This document expands the GBN-PROTO-005 execution roadmap into concrete implementation phases. It is intentionally additive to the existing `prototype/gbn-proto` workspace and must preserve the V1 onion implementation unchanged.
@@ -174,6 +174,8 @@ If the V2 workspace does not yet contain all crates or tests, run the subset tha
 
 Record the current V1 onion implementation as the baseline that V2 must preserve.
 
+Phase 0 is complete. The frozen Lattice baseline is published as [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline) from commit `c5dc415124f101e5de3dd20e2eeed608bd6948df`.
+
 ### 3.2 Files To Create Or Modify
 
 Create:
@@ -209,7 +211,7 @@ Must not modify:
 - V1 file integrity check passes
 - minimum V1 code regression suite passes
 - baseline manifest includes a concrete commit hash and test command list
-- Phase 0 release tag and release note template are documented
+- Phase 0 release tag and published GitHub release exist
 
 ### 3.5 V1 Preservation Instructions
 
@@ -230,7 +232,7 @@ Do not modify any file under prototype/gbn-proto/. Do not change any V1 architec
 
 ### 3.7 Detailed Execution Reference
 
-Use [GBN-PROTO-005-Execution-Phase0-V1-Baseline-Freeze](GBN-PROTO-005-Execution-Phase0-V1-Baseline-Freeze.md) as the implementation checklist for this phase. It expands the Phase 0 scope into preflight checks, required evidence capture, release packaging, validation gates, and sign-off criteria.
+Use [GBN-PROTO-005-Execution-Phase0-V1-Baseline-Freeze](GBN-PROTO-005-Execution-Phase0-V1-Baseline-Freeze.md) as the implementation checklist for this phase. It expands the Phase 0 scope into preflight checks, required evidence capture, release packaging, validation gates, and sign-off criteria. This phase is now complete; use the published Lattice release as the V1 preservation reference point for all later phases.
 
 ---
 
@@ -239,6 +241,8 @@ Use [GBN-PROTO-005-Execution-Phase0-V1-Baseline-Freeze](GBN-PROTO-005-Execution-
 ### 4.1 Objective
 
 Create a separate V2 workspace that can evolve without changing V1.
+
+Phase 1 is ready to begin. The Phase 0 gate is satisfied by the published baseline release [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline).
 
 ### 4.2 Files To Create Or Modify
 
@@ -281,7 +285,7 @@ Must not modify:
 - `cd prototype/gbn-bridge-proto && cargo fmt --check`
 - `cd prototype/gbn-bridge-proto && cargo check --workspace`
 - `cd prototype/gbn-bridge-proto && cargo test --workspace`
-- Phase 0 baseline artifacts exist or an explicit waiver is recorded in the phase notes
+- the published Phase 0 baseline release exists: [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
 - V1 file integrity check passes
 - minimum V1 code regression suite passes
 
@@ -303,7 +307,7 @@ Do not modify prototype/gbn-proto/Cargo.toml or any V1 source file. The V2 works
 
 ### 4.7 Detailed Execution Reference
 
-Use [GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary](GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary.md) as the implementation checklist for this phase. It expands the Phase 1 scope into current repo findings, preflight gates, evidence capture, workspace-boundary rules, file-by-file minimum content, naming decisions, validation gates, and sign-off criteria.
+Use [GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary](GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary.md) as the implementation checklist for this phase. It expands the Phase 1 scope into current repo findings, preflight gates, evidence capture, workspace-boundary rules, file-by-file minimum content, naming decisions, validation gates, and sign-off criteria. The Phase 0 gate described there is now satisfied.
 
 ---
 

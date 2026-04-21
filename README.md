@@ -2,10 +2,13 @@
 
 **A decentralized, censorship-resistant video creation, publishing, and distribution platform - designed so truth can travel faster than it can be suppressed.**
 
+![Veritas Lattice project image](docs/assets/veritas-social-preview-lattice-v2.png)
+
 Latest release: [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/latest)
+Lattice baseline freeze: [veritas-lattice-0.1.0-baseline](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
 
 Architecture tracks:
-- `Lattice`: V1 onion-mode baseline
+- `Lattice`: V1 onion-mode baseline frozen at [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
 - `Conduit`: V2 bridge-mode architecture in progress
 
 Support the project:
@@ -34,6 +37,8 @@ If you'd like to support Veritas, use the GitHub `Sponsor` button or see [docs/F
 
 This repository is an **active prototype** (`gbn-proto`) for validating core architecture and security assumptions.
 
+- Phase 0 complete: the Lattice V1 baseline is frozen at [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
+- Phase 1 ready: the Conduit workspace-boundary phase can now start from the published Lattice baseline
 - Core Rust workspace and crate boundaries are in place
 - Integration test scaffolding exists for metadata stripping, multipath reassembly, tamper detection, end-to-end pipeline, DHT validation, gossip smoke, active heartbeat disconnect, and telescopic sinkhole resilience tests
 - CLI orchestration commands are partially implemented (see `prototype/gbn-proto/crates/proto-cli/src/main.rs`)
@@ -110,7 +115,7 @@ The tools that exist today were not built for this:
 
 The gap is not a better app. The gap is a **protocol** — one that treats suppression as a network fault and routes around it by design, not by policy.
 
-**Veritas** (*Latin: truth*) is that protocol. It is a complete, end-to-end pipeline — from the moment a camera records something important, through anonymous multi-hop relay, to a Publisher who signs and distributes it globally — engineered so that no single government, platform, carrier, or attacker can simultaneously identify the creator, intercept the content, and suppress the distribution. All three would have to succeed at once. They won't.
+**Veritas** (*Latin: truth*) is that protocol. It is a complete, end-to-end pipeline — from the moment a camera records something important, through anonymous multi-hop relay, to a Publisher who signs and distributes it globally — engineered so that no single government, platform, carrier, or attacker can simultaneously identify the creator, intercept the content, or suppress the distribution.
 
 Truth is not fragile. It just needs infrastructure worthy of it.
 

@@ -9,7 +9,13 @@ Lattice baseline freeze: [veritas-lattice-0.1.0-baseline](https://github.com/fah
 
 Architecture tracks:
 - `Lattice`: V1 onion-mode baseline frozen at [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
-- `Conduit`: V2 bridge-mode architecture in progress
+- `Conduit`: V2 bridge-mode architecture in active development
+
+Conduit references:
+- System architecture: [docs/architecture/GBN-ARCH-000-System-Architecture-V2.md](docs/architecture/GBN-ARCH-000-System-Architecture-V2.md)
+- MCN architecture: [docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md](docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md)
+- Prototype redesign: [docs/prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md](docs/prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md)
+- Execution plan: [docs/prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md](docs/prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md)
 
 Support the project:
 - Use the GitHub `Sponsor` button
@@ -25,8 +31,8 @@ Support the project:
 
 This repository is an **active prototype** (`gbn-proto`) for validating core architecture and security assumptions.
 
-- Phase 0 complete: the Lattice V1 baseline is frozen at [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
-- Phase 1 ready: the Conduit workspace-boundary phase can now start from the published Lattice baseline
+- Lattice V1 is frozen as the protected baseline at [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
+- Conduit V2 is being developed in a separate workspace and tracked in the linked V2 architecture and prototype docs above
 - Core Rust workspace and crate boundaries are in place
 - Integration test scaffolding exists for metadata stripping, multipath reassembly, tamper detection, end-to-end pipeline, DHT validation, gossip smoke, active heartbeat disconnect, and telescopic sinkhole resilience tests
 - CLI orchestration commands are partially implemented (see `prototype/gbn-proto/crates/proto-cli/src/main.rs`)

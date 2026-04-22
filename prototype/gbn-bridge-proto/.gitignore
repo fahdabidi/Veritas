@@ -1,0 +1,9 @@
+target/
+target*/
+.phase1-target*/
+.env
+.env.*
+*.key
+*.pem
+*.p12
+Cargo.lock

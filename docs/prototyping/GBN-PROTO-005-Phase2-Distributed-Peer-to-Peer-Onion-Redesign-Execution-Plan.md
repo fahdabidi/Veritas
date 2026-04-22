@@ -1,9 +1,9 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 ready
-**Last Updated:** 2026-04-21
-**Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md)
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 implemented locally and validated
+**Last Updated:** 2026-04-22
+**Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
 This document expands the GBN-PROTO-005 execution roadmap into concrete implementation phases. It is intentionally additive to the existing `prototype/gbn-proto` workspace and must preserve the V1 onion implementation unchanged.
 
@@ -228,6 +228,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Create documentation-only artifacts that freeze the current V1 onion implementation as the protected baseline for GBN-PROTO-005. Record the exact V1 commit or branch reference, enumerate the V1 no-touch paths, and define the V1 regression suites that must remain green for every later phase.
 
 Do not modify any file under prototype/gbn-proto/. Do not change any V1 architecture or prototype document except to add new V2-only documentation in new files. The output of this phase is a clear baseline manifest and regression checklist, not new code.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ### 3.7 Detailed Execution Reference
@@ -242,7 +244,7 @@ Use [GBN-PROTO-005-Execution-Phase0-V1-Baseline-Freeze](GBN-PROTO-005-Execution-
 
 Create a separate V2 workspace that can evolve without changing V1.
 
-Phase 1 is ready to begin. The Phase 0 gate is satisfied by the published baseline release [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline).
+Phase 1 is complete. The isolated V2 workspace exists under `prototype/gbn-bridge-proto/`, and the Phase 0 gate remains satisfied by the published baseline release [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline).
 
 ### 4.2 Files To Create Or Modify
 
@@ -303,11 +305,13 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Create a new sibling Rust workspace at prototype/gbn-bridge-proto/ with isolated crates for protocol, runtime, publisher, and CLI. Add only the minimum scaffolding needed to compile the empty workspace. Establish V2 naming conventions for environment variables, image names, stack names, and metrics namespaces.
 
 Do not modify prototype/gbn-proto/Cargo.toml or any V1 source file. The V2 workspace must compile independently.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ### 4.7 Detailed Execution Reference
 
-Use [GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary](GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary.md) as the implementation checklist for this phase. It expands the Phase 1 scope into current repo findings, preflight gates, evidence capture, workspace-boundary rules, file-by-file minimum content, naming decisions, validation gates, and sign-off criteria. The Phase 0 gate described there is now satisfied.
+Use [GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary](GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary.md) as the implementation checklist and completion record for this phase. It expands the Phase 1 scope into current repo findings, preflight gates, evidence capture, workspace-boundary rules, file-by-file minimum content, naming decisions, validation gates, and sign-off criteria.
 
 ---
 
@@ -316,6 +320,10 @@ Use [GBN-PROTO-005-Execution-Phase1-V2-Workspace-Boundary](GBN-PROTO-005-Executi
 ### 5.1 Objective
 
 Define the transport, authority, bootstrap, and reachability-repair schemas before runtime logic is implemented.
+
+Phase 2 must lock the canonical M1 wire model so later runtime and authority work do not churn message names or descriptor fields.
+
+Phase 2 is implemented locally and validated against the current plan. The remaining step is to commit the protocol crate, architecture note, and status-document updates before Phase 3 begins.
 
 ### 5.2 Files To Create Or Modify
 
@@ -344,10 +352,20 @@ Must not modify:
 
 ### 5.3 Deliverables
 
-- `BridgeDescriptor` schema including `udp_punch_port`
+- canonical `BridgeDescriptor` schema for M1 including:
+  - `bridge_id`
+  - `identity_pub`
+  - `ingress_endpoints[]`
+  - `udp_punch_port`
+  - `reachability_class`
+  - `lease_expiry_ms`
+  - `capabilities[]`
+  - `publisher_sig`
+- explicit deferral note for `network_type`, `geo_tag`, and `observed_reliability_score` unless separately approved for a later phase
 - publisher-seeded bootstrap entry schema for creators and bridges
 - bridge registration, heartbeat, lease, catalog, and bootstrap response messages
 - creator bootstrap / authority wire types:
+  - `BridgeRefreshHint`
   - `CreatorJoinRequest`
   - `CreatorBootstrapResponse`
   - `BridgeSetRequest`
@@ -389,8 +407,16 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 
 Implement the V2 bridge protocol schemas in the gbn-bridge-protocol crate. Define BridgeDescriptor with udp_punch_port, publisher-seeded bootstrap entry types, registration, heartbeat, lease, catalog, creator-bootstrap, UDP punch, batching, and bridge-session message types together with signing, expiry, and version semantics. Add protocol round-trip and signature validation tests.
 
+For Phase 2, treat the following as the canonical minimal BridgeDescriptor field set: bridge_id, identity_pub, ingress_endpoints[], udp_punch_port, reachability_class, lease_expiry_ms, capabilities[], and publisher_sig. Do not add network_type, geo_tag, or observed_reliability_score in this phase unless explicitly approved. Include BridgeRefreshHint in the creator discovery / refresh message surface so the protocol crate matches the current Conduit architecture docs.
+
 Do not modify any file under prototype/gbn-proto/crates/gbn-protocol/. All V2 wire types must live under prototype/gbn-bridge-proto/.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
+
+### 5.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase2-V2-Wire-Model](GBN-PROTO-005-Execution-Phase2-V2-Wire-Model.md) as the implementation checklist and current execution record for this phase. It expands the Phase 2 scope into current repo findings, canonical wire decisions, module-boundary rules, dependency policy, validation fallback strategy, risks, sign-off criteria, and the current local validation results.
 
 ---
 
@@ -465,6 +491,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Implement the V2 publisher authority service in the gbn-bridge-publisher crate. Add bridge registration handling, signed lease issuance with UDP punch port metadata, bridge liveness tracking through heartbeats, signed catalog generation, first-contact creator bootstrap orchestration, and batched punch fanout assignment. Add tests covering successful registration, rejection, lease expiry, catalog signing, bootstrap issuance, and batch rollover.
 
 Do not modify mpub-receiver or any V1 publisher logic. V2 publisher authority must be implemented in V2-local files only.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -536,6 +564,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Implement the ExitBridge runtime in the V2 runtime crate. The bridge must register outbound to the V2 publisher, maintain lease and heartbeat state, expose creator ingress only when allowed by policy, execute Publisher-directed UDP punching, return publisher-seeded bridge entries when acting as the seed bridge, report tunnel progress, and forward opaque creator payloads upstream.
 
 Do not modify any V1 relay or control-plane implementation. The ExitBridge is a new V2 runtime, not a refactor of the old onion relay.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -612,6 +642,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Implement the V2 creator bootstrap flow. The creator must support returning-creator refresh from cached signed bridge descriptors and first-time bootstrap through a HostCreator path, validate publisher-signed bootstrap entries, establish a seed bridge, update its local DHT / discovery table, and immediately start UDP punch fanout toward newly assigned bridges. Add tests for expiry filtering, invalid signatures, cached reconnect, first-time bootstrap, tunnel ACKs, and retry across bridges.
 
 Do not modify the V1 creator circuit manager or V1 upload path. This is a new bootstrap flow for V2 bridge mode only.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -680,6 +712,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Implement the V2 encrypted upload path from creator to publisher through ExitBridges. Add session open, bridge data transfer, ACK handling, retransmission, progressive fanout across active bridges, reuse of already-live bridges when fanout is incomplete, and failover behavior. Add end-to-end tests for upload success, ACK routing, bridge reuse, failover, and bridge payload opacity.
 
 Do not modify V1 onion message framing, V1 chunk protocol types, or V1 publisher receive code.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -745,6 +779,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Implement a V2 weak-discovery layer that can surface candidate bridge hints without granting trust. A creator may use these hints to find potential bridges, but only publisher-signed bridge descriptors may be used for actual transport. Add tests proving discovery cannot override publisher authorization.
 
 Do not modify the V1 DHT, gossip, or direct-validation logic. V2 weak discovery must be implemented in V2-local code.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -805,6 +841,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Implement V2 reachability classification and policy. The publisher must classify bridges as direct, brokered, or relay_only, and creators must only use direct bridges for first-contact bootstrap. Add tests for class filtering, class downgrade, and catalog update behavior.
 
 Do not change V1 subnet-tag semantics or V1 DHT validation state. Reachability classes are new V2-only transport metadata.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -872,6 +910,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Create a V2-local integration harness and test suite for bridge mode. Add isolated integration tests for bridge registration, catalog refresh, first-time creator bootstrap, UDP punch ACKs, batch onboarding, creator failover, bridge reuse, payload confidentiality, and reachability filtering. Add a V2-local docker-compose smoke environment and a V2-local test runner script.
 
 Do not modify any V1 test file, V1 docker-compose file, or V1 validation script. V2 tests must live entirely under prototype/gbn-bridge-proto/.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -943,6 +983,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Create V2-only deployment assets for bridge mode. Add new Dockerfiles, CloudFormation templates, and deploy/bootstrap-smoke/status/teardown scripts under prototype/gbn-bridge-proto/. Deploy the V2 system with unique stack names, image names, and environment variable prefixes. Validate bridge registration, first-time bootstrap through HostCreator, catalog refresh, and upload flow in AWS.
 
 Do not modify any V1 infra script, CloudFormation template, or Dockerfile. V2 deployment assets must be fully isolated from V1.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -1012,6 +1054,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Add V2-only mobile-network validation tooling and documentation. Measure app restart recovery, first-time bootstrap, UDP punch success, stale bridge handling, network change behavior, batched onboarding, and bridge failover using the V2 AWS deployment or equivalent realistic test environment. Record results in a dedicated V2 test-results document.
 
 Do not change V1 deployment or validation tooling. This phase is about measuring V2 behavior, not rewriting V1 scripts.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---
@@ -1079,6 +1123,8 @@ Ensure the previous phase was completed fully before proceeding and all its vali
 Produce the final GBN-PROTO-005 decision record and coexistence architecture notes. Summarize what was built, what tests passed, how first-time bootstrap and coordinated UDP punching performed, what risks remain, and whether bridge mode should remain experimental, coexist with V1 onion mode, or become the default mobile transport path. Update only V2 documents needed to record that decision.
 
 Do not modify V1 code. Do not overwrite V1 architecture history. This phase is documentation and decision-making only.
+
+Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
 ---

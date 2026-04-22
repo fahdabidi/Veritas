@@ -1,6 +1,6 @@
 # GBN-PROTO-005 - Execution Phase 1 Detailed Plan: V2 Workspace Boundary
 
-**Status:** Ready to start; Phase 0 is published and protected V1 paths are clean
+**Status:** Completed and validated from the published Lattice baseline
 **Primary Goal:** create `prototype/gbn-bridge-proto/` as an isolated Rust workspace that compiles without modifying V1
 **Source Plan:** [GBN-PROTO-005 Execution Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md)
 **Phase 0 Baseline Release:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
@@ -10,16 +10,16 @@
 
 ## 1. Current Repo Findings
 
-These findings should drive Phase 1 execution instead of being rediscovered during implementation:
+These findings record the executed Phase 1 result state and should guide any later revisit of the workspace-boundary decision:
 
 | Item | Current Value | Why It Matters |
 |---|---|---|
-| Current branch | `main` | Phase 1 notes should record the branch used to create the V2 workspace |
-| Current HEAD commit | `c5dc415124f101e5de3dd20e2eeed608bd6948df` | this is the currently validated commit immediately after the published Lattice baseline release |
+| Current branch | `main` | Phase 1 was implemented on the mainline branch without reopening the V1 workspace |
+| Current HEAD commit | `70aadd0ac4d75e63093954a7ccfaeda23f954702` | current repo tip after the committed Phase 1 scaffold and README stabilization work |
 | Phase 0 baseline docs | present | Phase 1 now has the required freeze manifest and regression suite docs |
 | Phase 0 release automation | `.github/workflows/release-phase0.yml` exists and has published `veritas-lattice-0.1.0-baseline` | the preferred Phase 1 prerequisite is now satisfied |
-| Existing V2 workspace path | `prototype/gbn-bridge-proto/` does not exist | Phase 1 is still responsible for creating the full sibling workspace boundary |
-| Current protected V1 path drift | none | the protected-path diff is clean, so Phase 1 can start from a trustworthy preserved V1 baseline |
+| Existing V2 workspace path | `prototype/gbn-bridge-proto/` exists | the full sibling workspace boundary created by Phase 1 is in place |
+| Current protected V1 path drift | none | the protected-path diff remained clean through Phase 1 validation |
 
 ---
 
@@ -63,7 +63,7 @@ Phase 1 already had the right high-level goal, but it needed the same execution 
 
 ## 4. Preflight Gates
 
-Phase 1 should not begin code edits until all of these are checked:
+These were the required preflight gates before Phase 1 code edits began:
 
 1. Confirm `docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md` exists.
 2. Confirm `docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md` exists.
@@ -77,7 +77,20 @@ If any gate fails, Phase 1 should stop. A waiver path is possible, but it should
 
 Current blockers:
 
-- none; Phase 0 is published and the protected-path diff is clean
+- none; Phase 1 is already complete
+
+### 4.1 Execution Result
+
+Phase 1 created the isolated `prototype/gbn-bridge-proto/` workspace with compile-only crates for protocol, runtime, publisher, and CLI, plus V2-local README and infra placeholder files.
+
+Validated results:
+
+- `cargo fmt --check` passed in `prototype/gbn-bridge-proto`
+- `cargo check --workspace` passed in `prototype/gbn-bridge-proto`
+- `cargo test --workspace` passed using a temp `--target-dir` fallback because the OneDrive-backed workspace can throw Windows `os error 5`
+- protected V1 path diff stayed empty
+- `cargo check --workspace` passed in `prototype/gbn-proto`
+- `cargo test -p mcn-router-sim` passed in `prototype/gbn-proto`
 
 ---
 
@@ -280,7 +293,7 @@ Phase 1 is complete only when all of the following are true:
 
 Current blockers:
 
-- none; Phase 1 is ready to begin from the published Lattice baseline
+- none; Phase 1 is complete and later phases can treat the workspace boundary as fixed
 
 ---
 

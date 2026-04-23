@@ -7,8 +7,11 @@ use gbn_bridge_protocol::{
 
 use crate::bridge::ExitBridgeRuntime;
 use crate::catalog_cache::CatalogCache;
+use crate::discovery::{DiscoveryHint, WeakDiscoveryState};
+use crate::hint_merge::{merge_refresh_candidates, RefreshCandidate};
 use crate::local_dht::LocalDht;
 use crate::punch_fanout::{CreatorPunchAck, CreatorPunchAttempt, PunchFanout};
+use crate::seed_catalog::SeedCatalog;
 use crate::selector;
 use crate::{RuntimeError, RuntimeResult};
 
@@ -26,6 +29,7 @@ pub struct CreatorRuntime {
     publisher_trust_root: Option<PublicKeyBytes>,
     catalog_cache: CatalogCache,
     local_dht: LocalDht,
+    weak_discovery: WeakDiscoveryState,
     failed_bridges: BTreeSet<String>,
     punch_fanout: PunchFanout,
     self_entry: Option<BootstrapDhtEntry>,
@@ -38,6 +42,7 @@ impl CreatorRuntime {
             publisher_trust_root: None,
             catalog_cache: CatalogCache::default(),
             local_dht: LocalDht::default(),
+            weak_discovery: WeakDiscoveryState::default(),
             failed_bridges: BTreeSet::default(),
             punch_fanout: PunchFanout::default(),
             self_entry: None,
@@ -58,6 +63,10 @@ impl CreatorRuntime {
 
     pub fn local_dht(&self) -> &LocalDht {
         &self.local_dht
+    }
+
+    pub fn weak_discovery(&self) -> &WeakDiscoveryState {
+        &self.weak_discovery
     }
 
     pub fn punch_fanout(&self) -> &PunchFanout {
@@ -92,6 +101,19 @@ impl CreatorRuntime {
 
         self.publisher_trust_root = Some(publisher_key);
         Ok(())
+    }
+
+    pub fn set_discovery_enabled(&mut self, enabled: bool) {
+        self.weak_discovery.set_enabled(enabled);
+    }
+
+    pub fn seed_discovery(&mut self, seed_catalog: &SeedCatalog) -> usize {
+        self.weak_discovery
+            .ingest(seed_catalog.hints().iter().cloned())
+    }
+
+    pub fn ingest_weak_discovery_hints(&mut self, hints: &[DiscoveryHint]) -> usize {
+        self.weak_discovery.ingest(hints.iter().cloned())
     }
 
     pub fn apply_bootstrap_response(
@@ -202,6 +224,42 @@ impl CreatorRuntime {
             now_ms,
         )?;
         Ok(())
+    }
+
+    pub fn ordered_refresh_candidates(&self, now_ms: u64) -> RuntimeResult<Vec<RefreshCandidate>> {
+        let publisher_key = self.publisher_trust_root_required()?;
+        merge_refresh_candidates(
+            &self.local_dht,
+            &self.catalog_cache,
+            &self.weak_discovery,
+            publisher_key,
+            now_ms,
+            &self.failed_bridges,
+        )
+    }
+
+    pub fn select_refresh_candidate(&self, now_ms: u64) -> RuntimeResult<RefreshCandidate> {
+        self.ordered_refresh_candidates(now_ms)?
+            .into_iter()
+            .next()
+            .ok_or(RuntimeError::NoUsableBridgeCandidate)
+    }
+
+    pub fn refresh_catalog_via_candidate(
+        &mut self,
+        candidate: &RefreshCandidate,
+        bridge: &mut ExitBridgeRuntime,
+        reason: RefreshHintReason,
+        now_ms: u64,
+    ) -> RuntimeResult<BridgeCatalogResponse> {
+        if candidate.bridge_id != bridge.config().bridge_id {
+            return Err(RuntimeError::UnexpectedBridgeRuntime {
+                expected_bridge_id: candidate.bridge_id.clone(),
+                actual_bridge_id: bridge.config().bridge_id.clone(),
+            });
+        }
+
+        self.refresh_catalog_via_bridge(bridge, reason, now_ms)
     }
 
     pub fn begin_refresh_fanout(&mut self, now_ms: u64) -> RuntimeResult<Vec<CreatorPunchAttempt>> {

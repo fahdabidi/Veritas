@@ -9,10 +9,12 @@ pub mod catalog_cache;
 pub mod chunk_sender;
 pub mod creator;
 pub mod creator_listener;
+pub mod discovery;
 pub mod fanout_scheduler;
 pub mod forwarder;
 pub mod framing;
 pub mod heartbeat_loop;
+pub mod hint_merge;
 pub mod host_creator;
 pub mod lease_state;
 pub mod local_dht;
@@ -20,6 +22,7 @@ pub mod progress_reporter;
 pub mod publisher_client;
 pub mod punch;
 pub mod punch_fanout;
+pub mod seed_catalog;
 pub mod selector;
 pub mod session;
 
@@ -38,10 +41,14 @@ pub use catalog_cache::CatalogCache;
 pub use chunk_sender::{ChunkSender, ChunkSenderConfig, UploadResult};
 pub use creator::{CreatorConfig, CreatorRuntime};
 pub use creator_listener::CreatorListener;
+pub use discovery::{DiscoveryHint, DiscoveryHintSource, WeakDiscoveryConfig, WeakDiscoveryState};
 pub use fanout_scheduler::{FanoutPlan, FanoutScheduler, FanoutSchedulerConfig, FrameDispatch};
 pub use forwarder::{ForwardedFrame, PayloadForwarder};
 pub use framing::{frame_payload, FramePayloadConfig};
 pub use heartbeat_loop::HeartbeatLoop;
+pub use hint_merge::{
+    merge_refresh_candidates, RefreshCandidate, RefreshCandidateAuthority, RefreshCandidateSource,
+};
 pub use host_creator::HostCreator;
 pub use lease_state::LeaseState;
 pub use local_dht::{LocalDht, LocalDhtNode, LocalHintSource};
@@ -49,6 +56,7 @@ pub use progress_reporter::ProgressReporter;
 pub use publisher_client::InProcessPublisherClient;
 pub use punch::{ActivePunchAttempt, PunchAuthorization, PunchManager};
 pub use punch_fanout::{CreatorPunchAck, CreatorPunchAttempt, FanoutSource, PunchFanout};
+pub use seed_catalog::SeedCatalog;
 pub use session::{UploadSession, UploadSessionConfig};
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;

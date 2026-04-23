@@ -1,7 +1,7 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 implemented locally and validated
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 implemented locally and validated
 **Last Updated:** 2026-04-22
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -668,7 +668,7 @@ Use [GBN-PROTO-005-Execution-Phase5-V2-Creator-Bootstrap-Flow](GBN-PROTO-005-Exe
 
 Implement encrypted creator upload through the bridge and publisher ACK return path, with progressive 10-bridge fanout and bridge reuse on timeout.
 
-Phase 6 is implemented locally and validated from the committed Phase 5 creator/bootstrap baseline.
+Phase 6 is complete. The bridge-mode data path is committed from the Phase 5 creator/bootstrap baseline and now serves as the runtime baseline for Phase 7 discovery work.
 
 ### 9.2 Files To Create Or Modify
 
@@ -744,6 +744,8 @@ Use [GBN-PROTO-005-Execution-Phase6-V2-Bridge-Mode-Data-Path](GBN-PROTO-005-Exec
 
 Add optional weak discovery as a non-authoritative hint layer that supplements, but never overrides, publisher-signed catalogs and publisher-seeded bootstrap entries.
 
+Phase 7 is implemented locally and validated from the committed Phase 6 bridge-mode data-path baseline.
+
 ### 10.2 Files To Create Or Modify
 
 Create:
@@ -802,6 +804,10 @@ Do not modify the V1 DHT, gossip, or direct-validation logic. V2 weak discovery 
 
 Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
+
+### 10.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase7-V2-Weak-Discovery-Integration](GBN-PROTO-005-Execution-Phase7-V2-Weak-Discovery-Integration.md) as the implementation checklist and current execution record for this phase. It expands the Phase 7 scope into current repo findings, weak-hint trust boundaries, deterministic merge precedence, bootstrap-protection rules, validation fallback strategy, risks, sign-off criteria, and the executed validation results.
 
 ---
 

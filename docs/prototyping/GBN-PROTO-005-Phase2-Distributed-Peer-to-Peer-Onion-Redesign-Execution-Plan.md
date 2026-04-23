@@ -1,7 +1,7 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 implemented locally and validated
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 complete, Phase 9 implemented locally and validated except for the V1 extended local regression, which is blocked here by missing `docker-compose`
 **Last Updated:** 2026-04-22
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -817,7 +817,7 @@ Use [GBN-PROTO-005-Execution-Phase7-V2-Weak-Discovery-Integration](GBN-PROTO-005
 
 Implement the publisher and creator policy for `direct`, `brokered`, and `relay_only` bridges, including seed-bridge eligibility and preferred UDP punch port handling.
 
-Phase 8 is implemented locally and validated from the committed Phase 7 weak-discovery baseline.
+Phase 8 is complete. Reachability classification is committed from the Phase 7 weak-discovery baseline and now serves as the transport-eligibility baseline for Phase 9 test-harness work.
 
 ### 11.2 Files To Create Or Modify
 
@@ -885,6 +885,8 @@ Use [GBN-PROTO-005-Execution-Phase8-V2-Reachability-Classification](GBN-PROTO-00
 
 Create a dedicated V2 integration harness for local and CI-style bridge-mode testing across returning-creator refresh, first-time bootstrap, UDP punching, batching, and progressive upload.
 
+Phase 9 is implemented locally from the committed Phase 8 reachability-classification baseline. The V2 harness, V2 workspace sanity suite, protected V1 diff check, and minimum V1 regression suite passed. The remaining sign-off gap is the V1 extended local regression script `bash validate-scale-test.sh`, which could not complete in this environment because `docker-compose` is unavailable.
+
 ### 12.2 Files To Create Or Modify
 
 Create:
@@ -906,6 +908,8 @@ Create:
 May modify:
 
 - V2 crate tests and local configs
+- `prototype/gbn-bridge-proto/Cargo.toml`
+- minimal V2-local root package files needed to make root integration tests executable under Cargo
 
 Must not modify:
 
@@ -944,7 +948,13 @@ Create a V2-local integration harness and test suite for bridge mode. Add isolat
 Do not modify any V1 test file, V1 docker-compose file, or V1 validation script. V2 tests must live entirely under prototype/gbn-bridge-proto/.
 
 Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
+
+If root-level V2 integration tests are used, make the minimal V2-local Cargo changes required to ensure those tests actually run under `cargo test --workspace`. Do not leave the Phase 9 harness as inert files.
 ```
+
+### 12.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase9-V2-Test-Harness](GBN-PROTO-005-Execution-Phase9-V2-Test-Harness.md) as the implementation checklist and current execution record for this phase. It expands the Phase 9 scope into current repo findings, Cargo harness execution constraints, test-boundary decisions, smoke-topology assumptions, validation fallback strategy, executed validation results, risks, and sign-off criteria.
 
 ---
 

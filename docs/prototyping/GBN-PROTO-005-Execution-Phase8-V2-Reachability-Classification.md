@@ -1,6 +1,6 @@
 # GBN-PROTO-005 - Execution Phase 8 Detailed Plan: Reachability Classification
 
-**Status:** Implemented locally and validated from the committed Phase 7 weak-discovery baseline
+**Status:** Completed from the committed Phase 7 weak-discovery baseline
 **Primary Goal:** implement V2 reachability classification and policy for `direct`, `brokered`, and `relay_only` bridges without mutating the frozen V1 role/tag semantics or allowing non-direct bridges to leak into first-contact bootstrap and immediate creator-ingress paths
 **Source Plan:** [GBN-PROTO-005 Execution Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md)
 **Phase 0 Baseline Release:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)

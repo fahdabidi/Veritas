@@ -1,6 +1,7 @@
 target/
 target*/
 .phase1-target*/
+artifacts/
 .env
 .env.*
 *.key

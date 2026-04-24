@@ -1,6 +1,6 @@
 # GBN-PROTO-006 - Execution Phase 9 Detailed Plan: Distributed End-To-End Harness And Fault Injection
 
-**Status:** Ready to start after Phase 8 real deployment images and AWS control plane are implemented and validated  
+**Status:** Complete and validated locally after Phase 8 real deployment images and AWS control plane implementation
 **Primary Goal:** build a real distributed end-to-end Conduit harness that exercises the full control and data paths across actual service boundaries, adds deterministic fault injection, and proves `chain_id` continuity through realistic multi-service scenarios  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
@@ -15,15 +15,15 @@ These findings should drive Phase 9 instead of being rediscovered during impleme
 
 | Item | Current Value | Why It Matters |
 |---|---|---|
-| Current branch | `main` | Phase 9 should record the mainline commit used to begin the distributed harness cutover |
-| Current HEAD commit | `2b6d5c5d24e269e96e3fdc820f3f90669607414a` | current committed Conduit baseline still validates mostly through local or in-process harnesses |
-| Current root integration harness | [`tests/integration.rs`](../../../prototype/gbn-bridge-proto/tests/integration.rs) wires the existing `tests/integration/test_*.rs` files into one root harness | the current test surface is still one local Rust harness, not a true distributed e2e suite |
-| Current integration coverage | existing tests cover batch bootstrap, registration, refresh, first bootstrap, payload confidentiality, reachability, and UDP punch ACK | coverage exists, but it is still rooted in the earlier local harness model |
-| Current local bridge test script | [`run-local-bridge-tests.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/run-local-bridge-tests.sh) runs fmt/check/test and optionally validates compose syntax | current script is still a local smoke wrapper, not a distributed scenario runner |
-| Current local compose stack | [`docker-compose.bridge-smoke.yml`](../../../prototype/gbn-bridge-proto/docker-compose.bridge-smoke.yml) is still placeholder-only | there is not yet a local distributed service topology suitable for full fault-injection scenarios |
-| Current V2 docs surface | there is no `tests/e2e/` tree and no dedicated e2e design doc | the repo still lacks a stable distributed harness boundary |
-| Current fault-injection surface | no deterministic harness files exist for bridge failure, timeout, restart recovery, or reassignment injection | Phase 9 must add this explicitly instead of relying on incidental failures |
-| Current trace-specific coverage | no dedicated distributed `trace.rs` or `test_chain_id.rs` e2e harness exists yet | `chain_id` continuity still lacks a true multi-service test boundary |
+| Current branch | `main` | Phase 9 was implemented on the mainline branch and validated there |
+| Current HEAD commit | `b0aa4f2` | starting committed baseline for the Phase 9 distributed harness cutover |
+| Current root integration harness | [`tests/integration.rs`](../../../prototype/gbn-bridge-proto/tests/integration.rs) still exists for fast local regression | distributed assertions are now separated into a dedicated `tests/e2e/` surface |
+| Current integration coverage | legacy integration tests still cover local correctness for bootstrap, registration, confidentiality, reachability, and UDP ACK paths | Phase 9 preserves them as fast checks while moving distributed assertions to the new e2e harness |
+| Current local bridge test script | [`run-local-bridge-tests.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/run-local-bridge-tests.sh) remains the fast local smoke wrapper | Phase 9 adds a distinct distributed runner instead of overloading the old script |
+| Current local compose stack | [`docker-compose.conduit-e2e.yml`](../../../prototype/gbn-bridge-proto/docker-compose.conduit-e2e.yml) and [`run-conduit-e2e.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/run-conduit-e2e.sh) now provide the local distributed topology entrypoint | the distributed harness can exercise real authority, receiver, bridge, and creator boundaries |
+| Current V2 docs surface | `tests/e2e/` now exists with dedicated bootstrap, refresh, data-path, failover, and trace scenarios | the repo now has a stable distributed e2e boundary |
+| Current fault-injection surface | deterministic scenarios now cover bridge timeout, seed reassignment, and authority restart recovery | failure handling is asserted instead of being left to incidental behavior |
+| Current trace-specific coverage | dedicated distributed trace scenarios now exist in [`tests/e2e/trace.rs`](../../../prototype/gbn-bridge-proto/tests/e2e/trace.rs) | `chain_id` continuity is now asserted across multi-service bootstrap and upload flows |
 
 ---
 
@@ -79,9 +79,12 @@ Phase 9 should not begin code edits until all of these are checked:
 
 If any gate fails, Phase 9 should stop.
 
-Current blocker:
+Current phase result:
 
-- Phases 1 through 8 are not yet implemented in this full-implementation track, so Phase 9 remains planning-ready only
+- all Phase 1 through 8 prerequisites were present and validated before the Phase 9 harness cutover
+- the distributed e2e harness was added under `tests/e2e/`
+- the dedicated WSL-backed runner succeeded
+- full `cargo test --workspace` succeeded after moving the target directory to `D:\veritas-proto006-phase9-target` because `C:` was full on this host
 
 ---
 
@@ -260,6 +263,12 @@ cargo check --workspace
 cargo test --workspace
 ```
 
+If the default Windows temp or target location on `C:` is space-constrained, rerun the workspace suite with an explicit alternate target directory and record it, for example:
+
+```bash
+cargo test --workspace --target-dir D:\veritas-proto006-phase9-target
+```
+
 Distributed harness checks:
 
 ```bash
@@ -306,6 +315,7 @@ Expected outcome:
 - the local full topology can be exercised through one harness entrypoint
 - protected V1 paths show no drift
 - minimum V1 regression suite remains green
+- the full V2 workspace suite is green, using an alternate target directory if the default Windows temp path is space-constrained
 
 ---
 
@@ -345,10 +355,10 @@ The correct Phase 9 sign-off is:
 - Conduit now has a real distributed e2e harness
 - failure and recovery behavior are tested deterministically
 - one distributed trace can be correlated end-to-end by `chain_id`
+- the dedicated WSL runner and full V2 workspace suite both pass, with the workspace suite allowed to use an alternate non-`C:` target directory on space-constrained hosts
 
 The correct Phase 9 sign-off is not:
 
 - adding more local-only integration tests
 - relying on placeholder smoke containers
 - claiming distributed behavior without fault-injection coverage
-

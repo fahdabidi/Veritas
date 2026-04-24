@@ -35,3 +35,4 @@ ed25519-dalek.workspace = true
 gbn-bridge-protocol = { path = "crates/gbn-bridge-protocol" }
 gbn-bridge-publisher = { path = "crates/gbn-bridge-publisher" }
 gbn-bridge-runtime = { path = "crates/gbn-bridge-runtime" }
+postgres.workspace = true

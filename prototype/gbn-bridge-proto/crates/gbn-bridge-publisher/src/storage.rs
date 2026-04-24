@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use gbn_bridge_protocol::{
-    BootstrapDhtEntry, BridgeCapability, BridgeCloseReason, BridgeData, BridgeHeartbeat,
-    BridgeIngressEndpoint, BridgeLease, BridgeOpen, CreatorJoinRequest, PublicKeyBytes,
-    ReachabilityClass, RevocationReason, UnixTimestampMs,
+    BootstrapDhtEntry, BootstrapProgress, BridgeCapability, BridgeCloseReason, BridgeData,
+    BridgeHeartbeat, BridgeIngressEndpoint, BridgeLease, BridgeOpen, CreatorJoinRequest,
+    PublicKeyBytes, ReachabilityClass, RevocationReason, UnixTimestampMs,
 };
 
 #[derive(Debug, Clone)]
@@ -40,6 +40,7 @@ pub struct BootstrapSessionRecord {
     pub bridge_ids: Vec<String>,
     pub created_at_ms: UnixTimestampMs,
     pub response_expiry_ms: UnixTimestampMs,
+    pub progress_events: Vec<BootstrapProgress>,
 }
 
 #[derive(Debug, Clone)]

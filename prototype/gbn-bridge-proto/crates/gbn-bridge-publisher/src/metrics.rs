@@ -7,6 +7,7 @@ pub struct AuthorityMetricsSnapshot {
     pub issued_catalogs: u64,
     pub bootstrap_requests: u64,
     pub rejected_bootstrap_requests: u64,
+    pub bootstrap_progress_reports: u64,
     pub issued_batches: u64,
     pub batch_rollovers: u64,
 }
@@ -47,6 +48,10 @@ impl AuthorityMetrics {
 
     pub fn record_bootstrap_rejection(&mut self) {
         self.snapshot.rejected_bootstrap_requests += 1;
+    }
+
+    pub fn record_progress_report(&mut self) {
+        self.snapshot.bootstrap_progress_reports += 1;
     }
 
     pub fn record_batch_emitted(&mut self) {

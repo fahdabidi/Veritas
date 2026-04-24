@@ -3,13 +3,14 @@ use gbn_bridge_protocol::{
     BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BridgeSetResponse, BridgeSetResponseUnsigned,
     CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned, CreatorJoinRequest, PublicKeyBytes,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::policy;
 use crate::punch;
 use crate::storage::{BootstrapSessionRecord, BridgeRecord, InMemoryAuthorityStorage};
 use crate::{AuthorityConfig, AuthorityError, AuthorityPolicy, AuthorityResult};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityBootstrapPlan {
     pub creator_entry: BootstrapDhtEntry,
     pub response: CreatorBootstrapResponse,
@@ -146,6 +147,7 @@ pub fn begin_bootstrap(
                 .collect(),
             created_at_ms: now_ms,
             response_expiry_ms: now_ms + config.bootstrap_response_ttl_ms,
+            progress_events: Vec::new(),
         },
     );
 

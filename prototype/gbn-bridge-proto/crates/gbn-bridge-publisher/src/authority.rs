@@ -1,10 +1,12 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    publisher_identity, BridgeAck, BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose,
-    BridgeData, BridgeHeartbeat, BridgeLease, BridgeOpen, BridgeRegister, BridgeRevoke,
-    CreatorJoinRequest, PublicKeyBytes, ReachabilityClass, RevocationReason,
+    publisher_identity, BootstrapProgress, BridgeAck, BridgeCatalogRequest, BridgeCatalogResponse,
+    BridgeClose, BridgeData, BridgeHeartbeat, BridgeLease, BridgeOpen, BridgeRegister,
+    BridgeRevoke, CreatorJoinRequest, PublicKeyBytes, ReachabilityClass, RevocationReason,
 };
+use serde::Serialize;
 
+use crate::api::{AuthorityApiResponse, AuthorityApiResponseUnsigned};
 use crate::batching::{self, FinalizedBatch};
 use crate::bootstrap::{self, AuthorityBootstrapPlan};
 use crate::catalog;
@@ -53,12 +55,29 @@ impl PublisherAuthority {
         &self.publisher_pub
     }
 
+    pub fn sign_api_response<T>(
+        &self,
+        unsigned: AuthorityApiResponseUnsigned<T>,
+    ) -> AuthorityResult<AuthorityApiResponse<T>>
+    where
+        T: Serialize + Clone,
+    {
+        AuthorityApiResponse::sign(unsigned, &self.signing_key).map_err(Into::into)
+    }
+
     pub fn metrics_snapshot(&self) -> AuthorityMetricsSnapshot {
         self.metrics.snapshot()
     }
 
     pub fn active_bridge_count(&self, now_ms: u64) -> usize {
         crate::registry::active_bridge_records(&self.storage, now_ms, false).len()
+    }
+
+    pub fn bridge_identity_pub(&self, bridge_id: &str) -> Option<PublicKeyBytes> {
+        self.storage
+            .bridges
+            .get(bridge_id)
+            .map(|record| record.identity_pub.clone())
     }
 
     pub fn current_batch_size(&self) -> usize {
@@ -225,6 +244,22 @@ impl PublisherAuthority {
 
     pub fn close_bridge_session(&mut self, close: BridgeClose) -> AuthorityResult<()> {
         ingest::close_session(&mut self.storage, close)
+    }
+
+    pub fn report_bootstrap_progress(
+        &mut self,
+        progress: BootstrapProgress,
+    ) -> AuthorityResult<usize> {
+        let session = self
+            .storage
+            .bootstrap_sessions
+            .get_mut(&progress.bootstrap_session_id)
+            .ok_or_else(|| crate::AuthorityError::BootstrapSessionNotFound {
+                bootstrap_session_id: progress.bootstrap_session_id.clone(),
+            })?;
+        session.progress_events.push(progress);
+        self.metrics.record_progress_report();
+        Ok(session.progress_events.len())
     }
 
     pub fn upload_session(&self, session_id: &str) -> Option<&UploadSessionRecord> {

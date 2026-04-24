@@ -1,11 +1,15 @@
 //! Conduit publisher authority plane for registration, lease, catalog, and bootstrap issuance.
 
 pub mod ack;
+pub mod api;
+pub mod auth;
 pub mod authority;
 pub mod batching;
 pub mod bootstrap;
 pub mod bridge_scoring;
 pub mod catalog;
+pub mod config;
+pub mod http;
 pub mod ingest;
 pub mod lease;
 pub mod metrics;
@@ -13,16 +17,26 @@ pub mod policy;
 pub mod punch;
 pub mod registry;
 pub mod server;
+pub mod service;
 pub mod storage;
 
 use gbn_bridge_protocol::{ProtocolError, DEFAULT_UDP_PUNCH_PORT};
 use thiserror::Error;
 
+pub use api::{
+    AuthorityApiAuth, AuthorityApiErrorBody, AuthorityApiRequest, AuthorityApiRequestUnsigned,
+    AuthorityApiResponse, AuthorityApiResponseUnsigned, BootstrapJoinBody, BootstrapJoinResponse,
+    BootstrapProgressBody, BootstrapProgressReceipt, BootstrapProgressResponse,
+    BridgeHeartbeatBody, BridgeRegisterBody, CreatorCatalogBody, CreatorCatalogResponse,
+    EmptyResponse, HealthResponse, HeartbeatResponse, RegisterBridgeResponse,
+};
 pub use authority::PublisherAuthority;
 pub use batching::FinalizedBatch;
 pub use bootstrap::AuthorityBootstrapPlan;
+pub use config::PublisherServiceConfig;
 pub use metrics::{AuthorityMetrics, AuthorityMetricsSnapshot};
-pub use server::AuthorityServer;
+pub use server::{AuthorityServer, AuthorityServerHandle, BoundAuthorityServer};
+pub use service::{AuthorityService, ServiceError};
 pub use storage::{
     BatchWindowState, BootstrapSessionRecord, BridgeRecord, InMemoryAuthorityStorage,
     IngestedFrameRecord, UploadSessionRecord,

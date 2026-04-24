@@ -8,4 +8,6 @@ repository.workspace = true
 [dependencies]
 ed25519-dalek = { workspace = true }
 gbn-bridge-protocol = { path = "../gbn-bridge-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }

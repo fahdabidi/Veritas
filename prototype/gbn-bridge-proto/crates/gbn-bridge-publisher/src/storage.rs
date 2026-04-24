@@ -141,10 +141,10 @@ pub struct UploadSessionRecord {
 }
 
 impl UploadSessionRecord {
-    pub fn new(open: &BridgeOpen) -> Self {
+    pub fn new(open: &BridgeOpen, chain_id: Option<String>) -> Self {
         Self {
             session_id: open.session_id.clone(),
-            chain_id: None,
+            chain_id,
             creator_id: open.creator_id.clone(),
             creator_session_pub: open.creator_session_pub.clone(),
             expected_chunks: open.expected_chunks,

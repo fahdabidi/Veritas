@@ -13,6 +13,7 @@ pub mod creator_listener;
 pub mod discovery;
 pub mod fanout_scheduler;
 pub mod forwarder;
+pub mod forwarder_client;
 pub mod framing;
 pub mod heartbeat_loop;
 pub mod hint_merge;
@@ -51,6 +52,7 @@ pub use creator_listener::CreatorListener;
 pub use discovery::{DiscoveryHint, DiscoveryHintSource, WeakDiscoveryConfig, WeakDiscoveryState};
 pub use fanout_scheduler::{FanoutPlan, FanoutScheduler, FanoutSchedulerConfig, FrameDispatch};
 pub use forwarder::{ForwardedFrame, PayloadForwarder};
+pub use forwarder_client::ForwarderClient;
 pub use framing::{frame_payload, FramePayloadConfig};
 pub use heartbeat_loop::HeartbeatLoop;
 pub use hint_merge::{

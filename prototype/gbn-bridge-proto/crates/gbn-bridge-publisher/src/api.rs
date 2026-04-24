@@ -1,8 +1,9 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    sign_payload, verify_payload, BootstrapJoinReply, BootstrapProgress, BridgeCatalogRequest,
-    BridgeCatalogResponse, BridgeHeartbeat, BridgeLease, BridgeRegister, CreatorJoinRequest,
-    ProtocolError, PublicKeyBytes, ReachabilityClass, SignatureBytes,
+    sign_payload, verify_payload, BootstrapJoinReply, BootstrapProgress, BridgeAck,
+    BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeData, BridgeHeartbeat,
+    BridgeLease, BridgeOpen, BridgeRegister, CreatorJoinRequest, ProtocolError, PublicKeyBytes,
+    ReachabilityClass, SignatureBytes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -173,6 +174,24 @@ pub struct BootstrapProgressBody {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverOpenBody {
+    pub open: BridgeOpen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverFrameBody {
+    pub via_bridge_id: String,
+    pub frame: BridgeData,
+    pub received_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverCloseBody {
+    pub bridge_id: String,
+    pub close: BridgeClose,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapProgressReceipt {
     pub bootstrap_session_id: String,
     pub reporter_id: String,
@@ -190,6 +209,9 @@ pub enum AuthorityRoute {
     BridgeProgress,
     CreatorCatalog,
     BootstrapJoin,
+    ReceiverOpen,
+    ReceiverFrame,
+    ReceiverClose,
 }
 
 impl AuthorityRoute {
@@ -202,6 +224,9 @@ impl AuthorityRoute {
             Self::BridgeProgress => "/v1/bridge/progress",
             Self::CreatorCatalog => "/v1/creator/catalog",
             Self::BootstrapJoin => "/v1/bootstrap/join",
+            Self::ReceiverOpen => "/v1/receiver/open",
+            Self::ReceiverFrame => "/v1/receiver/frame",
+            Self::ReceiverClose => "/v1/receiver/close",
         }
     }
 }
@@ -211,3 +236,6 @@ pub type HeartbeatResponse = AuthorityApiResponse<BridgeLease>;
 pub type CreatorCatalogResponse = AuthorityApiResponse<BridgeCatalogResponse>;
 pub type BootstrapJoinResponse = AuthorityApiResponse<BootstrapJoinReply>;
 pub type BootstrapProgressResponse = AuthorityApiResponse<BootstrapProgressReceipt>;
+pub type ReceiverOpenResponse = AuthorityApiResponse<EmptyResponse>;
+pub type ReceiverFrameResponse = AuthorityApiResponse<BridgeAck>;
+pub type ReceiverCloseResponse = AuthorityApiResponse<EmptyResponse>;

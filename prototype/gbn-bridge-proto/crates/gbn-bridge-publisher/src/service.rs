@@ -12,10 +12,12 @@ use crate::api::{
     AuthorityApiErrorBody, AuthorityApiRequest, AuthorityApiResponse, AuthorityApiResponseUnsigned,
     BootstrapJoinBody, BootstrapProgressBody, BootstrapProgressReceipt, BridgeHeartbeatBody,
     BridgeRegisterBody, CreatorCatalogBody, CreatorCatalogResponse, EmptyResponse, HealthResponse,
+    ReceiverCloseBody, ReceiverFrameBody, ReceiverOpenBody,
 };
 use crate::auth::{AuthError, RequestAuthenticator};
 use crate::control::ControlSessionRegistry;
 use crate::dispatcher;
+use crate::{ack_service, receiver};
 use crate::{AuthorityError, PublisherAuthority, PublisherServiceConfig};
 
 #[derive(Debug)]
@@ -476,6 +478,75 @@ impl AuthorityService {
             latest_stage: bootstrap_stage_name(progress.stage),
         };
         self.success_response(&request.chain_id, &request.request_id, receipt)
+    }
+
+    pub fn handle_receiver_open(
+        &mut self,
+        request: AuthorityApiRequest<ReceiverOpenBody>,
+    ) -> Result<AuthorityApiResponse<EmptyResponse>, ServiceError> {
+        self.authenticator
+            .verify_signed_request(&request, now_ms())
+            .map_err(map_auth_error)?;
+        self.authenticator
+            .ensure_actor_id_matches(&request.body.open.bridge_id, &request.actor_id)
+            .map_err(map_auth_error)?;
+        if let Some(expected_key) = self.authority.bridge_identity_pub(&request.actor_id) {
+            self.authenticator
+                .ensure_actor_key_matches(&request.actor_id, &expected_key, &request.auth.actor_pub)
+                .map_err(map_auth_error)?;
+        }
+
+        receiver::open_session(&mut self.authority, &request.chain_id, request.body.open)
+            .map_err(map_authority_error)?;
+        self.success_response(&request.chain_id, &request.request_id, EmptyResponse)
+    }
+
+    pub fn handle_receiver_frame(
+        &mut self,
+        request: AuthorityApiRequest<ReceiverFrameBody>,
+    ) -> Result<AuthorityApiResponse<gbn_bridge_protocol::BridgeAck>, ServiceError> {
+        self.authenticator
+            .verify_signed_request(&request, now_ms())
+            .map_err(map_auth_error)?;
+        self.authenticator
+            .ensure_actor_id_matches(&request.body.via_bridge_id, &request.actor_id)
+            .map_err(map_auth_error)?;
+        if let Some(expected_key) = self.authority.bridge_identity_pub(&request.actor_id) {
+            self.authenticator
+                .ensure_actor_key_matches(&request.actor_id, &expected_key, &request.auth.actor_pub)
+                .map_err(map_auth_error)?;
+        }
+
+        let ack = ack_service::ingest_frame(
+            &mut self.authority,
+            &request.chain_id,
+            &request.body.via_bridge_id,
+            request.body.frame,
+            request.body.received_at_ms,
+        )
+        .map_err(map_authority_error)?;
+        self.success_response(&request.chain_id, &request.request_id, ack)
+    }
+
+    pub fn handle_receiver_close(
+        &mut self,
+        request: AuthorityApiRequest<ReceiverCloseBody>,
+    ) -> Result<AuthorityApiResponse<EmptyResponse>, ServiceError> {
+        self.authenticator
+            .verify_signed_request(&request, now_ms())
+            .map_err(map_auth_error)?;
+        self.authenticator
+            .ensure_actor_id_matches(&request.body.bridge_id, &request.actor_id)
+            .map_err(map_auth_error)?;
+        if let Some(expected_key) = self.authority.bridge_identity_pub(&request.actor_id) {
+            self.authenticator
+                .ensure_actor_key_matches(&request.actor_id, &expected_key, &request.auth.actor_pub)
+                .map_err(map_auth_error)?;
+        }
+
+        receiver::close_session(&mut self.authority, &request.chain_id, request.body.close)
+            .map_err(map_authority_error)?;
+        self.success_response(&request.chain_id, &request.request_id, EmptyResponse)
     }
 
     fn success_response<T>(

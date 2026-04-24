@@ -9,7 +9,8 @@ use serde::Serialize;
 
 use crate::api::{
     AuthorityApiRequest, AuthorityRoute, BootstrapJoinBody, BootstrapProgressBody,
-    BridgeHeartbeatBody, BridgeRegisterBody, CreatorCatalogBody,
+    BridgeHeartbeatBody, BridgeRegisterBody, CreatorCatalogBody, ReceiverCloseBody,
+    ReceiverFrameBody, ReceiverOpenBody,
 };
 use crate::control::{handle_control_connection, looks_like_control_upgrade};
 use crate::service::{AuthorityService, ServiceError};
@@ -190,6 +191,36 @@ fn route_request(service: &Arc<Mutex<AuthorityService>>, request: HttpRequest) -
         ("POST", path) if path == AuthorityRoute::BridgeProgress.path() => {
             match deserialize_and_handle::<BootstrapProgressBody, _, _>(&request.body, |payload| {
                 service.handle_progress_report(payload)
+            }) {
+                Ok(response) => ok_json_response(&response),
+                Err((chain_id, request_id, error)) => {
+                    error_json_response(&service, &chain_id, &request_id, error)
+                }
+            }
+        }
+        ("POST", path) if path == AuthorityRoute::ReceiverOpen.path() => {
+            match deserialize_and_handle::<ReceiverOpenBody, _, _>(&request.body, |payload| {
+                service.handle_receiver_open(payload)
+            }) {
+                Ok(response) => ok_json_response(&response),
+                Err((chain_id, request_id, error)) => {
+                    error_json_response(&service, &chain_id, &request_id, error)
+                }
+            }
+        }
+        ("POST", path) if path == AuthorityRoute::ReceiverFrame.path() => {
+            match deserialize_and_handle::<ReceiverFrameBody, _, _>(&request.body, |payload| {
+                service.handle_receiver_frame(payload)
+            }) {
+                Ok(response) => ok_json_response(&response),
+                Err((chain_id, request_id, error)) => {
+                    error_json_response(&service, &chain_id, &request_id, error)
+                }
+            }
+        }
+        ("POST", path) if path == AuthorityRoute::ReceiverClose.path() => {
+            match deserialize_and_handle::<ReceiverCloseBody, _, _>(&request.body, |payload| {
+                service.handle_receiver_close(payload)
             }) {
                 Ok(response) => ok_json_response(&response),
                 Err((chain_id, request_id, error)) => {

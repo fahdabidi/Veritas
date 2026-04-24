@@ -8,6 +8,7 @@ use crate::{RuntimeError, RuntimeResult, UploadSession};
 #[derive(Debug, Clone)]
 pub struct AckTracker {
     session_id: String,
+    chain_id: String,
     expected_frame_count: usize,
     outstanding: BTreeMap<u32, String>,
     acked: BTreeSet<u32>,
@@ -18,6 +19,7 @@ impl AckTracker {
     pub fn new(session: &UploadSession) -> Self {
         Self {
             session_id: session.session_id().to_string(),
+            chain_id: session.chain_id().to_string(),
             expected_frame_count: session.frame_count(),
             outstanding: BTreeMap::new(),
             acked: BTreeSet::new(),
@@ -65,6 +67,10 @@ impl AckTracker {
 
     pub fn all_acked(&self) -> bool {
         self.acked.len() == self.expected_frame_count
+    }
+
+    pub fn chain_id(&self) -> &str {
+        &self.chain_id
     }
 
     pub fn completed(&self) -> bool {

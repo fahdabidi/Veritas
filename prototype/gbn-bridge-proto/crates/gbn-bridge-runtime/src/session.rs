@@ -4,6 +4,7 @@ use gbn_bridge_protocol::{BridgeClose, BridgeCloseReason, BridgeData, BridgeOpen
 
 use crate::creator::CreatorRuntime;
 use crate::framing::{frame_payload, FramePayloadConfig};
+use crate::network_transport::default_chain_id;
 use crate::{RuntimeError, RuntimeResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,7 @@ impl Default for UploadSessionConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadSession {
     session_id: String,
+    chain_id: String,
     creator_id: String,
     creator_session_pub: PublicKeyBytes,
     opened_at_ms: u64,
@@ -37,9 +39,11 @@ impl UploadSession {
         config: UploadSessionConfig,
     ) -> RuntimeResult<Self> {
         let frames = frame_payload(&session_id, payload, opened_at_ms, config.frame_payload)?;
+        let chain_id = default_chain_id("upload", &creator.config().creator_id, &session_id);
 
         Ok(Self {
             session_id,
+            chain_id,
             creator_id: creator.config().creator_id.clone(),
             creator_session_pub: creator.config().pub_key.clone(),
             opened_at_ms,
@@ -49,6 +53,10 @@ impl UploadSession {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn chain_id(&self) -> &str {
+        &self.chain_id
     }
 
     pub fn frame_count(&self) -> usize {
@@ -91,7 +99,13 @@ impl UploadSession {
 
 #[derive(Debug, Clone, Default)]
 pub struct BridgeSessionRegistry {
-    sessions: BTreeMap<String, BridgeOpen>,
+    sessions: BTreeMap<String, BridgeSessionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BridgeSessionRecord {
+    chain_id: String,
+    open: BridgeOpen,
 }
 
 impl BridgeSessionRegistry {
@@ -99,13 +113,29 @@ impl BridgeSessionRegistry {
         self.sessions.len()
     }
 
-    pub fn open(&mut self, open: BridgeOpen) {
-        self.sessions.insert(open.session_id.clone(), open);
+    pub fn open(&mut self, chain_id: impl Into<String>, open: BridgeOpen) {
+        self.sessions.insert(
+            open.session_id.clone(),
+            BridgeSessionRecord {
+                chain_id: chain_id.into(),
+                open,
+            },
+        );
     }
 
     pub fn require_session(&self, session_id: &str) -> RuntimeResult<&BridgeOpen> {
         self.sessions
             .get(session_id)
+            .map(|record| &record.open)
+            .ok_or_else(|| RuntimeError::UploadSessionNotTracked {
+                session_id: session_id.to_string(),
+            })
+    }
+
+    pub fn require_chain_id(&self, session_id: &str) -> RuntimeResult<&str> {
+        self.sessions
+            .get(session_id)
+            .map(|record| record.chain_id.as_str())
             .ok_or_else(|| RuntimeError::UploadSessionNotTracked {
                 session_id: session_id.to_string(),
             })

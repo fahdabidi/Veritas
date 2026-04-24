@@ -1,6 +1,7 @@
 //! Conduit publisher authority plane for registration, lease, catalog, and bootstrap issuance.
 
 pub mod ack;
+pub mod ack_service;
 pub mod api;
 pub mod assignment;
 pub mod auth;
@@ -18,6 +19,7 @@ pub mod lease;
 pub mod metrics;
 pub mod policy;
 pub mod punch;
+pub mod receiver;
 pub mod registry;
 pub mod server;
 pub mod service;
@@ -32,7 +34,9 @@ pub use api::{
     AuthorityApiResponse, AuthorityApiResponseUnsigned, BootstrapJoinBody, BootstrapJoinResponse,
     BootstrapProgressBody, BootstrapProgressReceipt, BootstrapProgressResponse,
     BridgeHeartbeatBody, BridgeRegisterBody, CreatorCatalogBody, CreatorCatalogResponse,
-    EmptyResponse, HealthResponse, HeartbeatResponse, RegisterBridgeResponse,
+    EmptyResponse, HealthResponse, HeartbeatResponse, ReceiverCloseBody, ReceiverCloseResponse,
+    ReceiverFrameBody, ReceiverFrameResponse, ReceiverOpenBody, ReceiverOpenResponse,
+    RegisterBridgeResponse,
 };
 pub use authority::PublisherAuthority;
 pub use batching::FinalizedBatch;

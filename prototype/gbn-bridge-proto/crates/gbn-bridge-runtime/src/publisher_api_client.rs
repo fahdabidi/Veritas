@@ -15,6 +15,8 @@ use crate::network_transport::{
 };
 use crate::{RuntimeError, RuntimeResult};
 
+const HTTP_TIMESTAMP_GUARD_MS: u64 = 25;
+
 #[derive(Debug, Clone)]
 pub struct PublisherApiClient {
     actor_id: String,
@@ -53,6 +55,14 @@ impl PublisherApiClient {
         &self.publisher_pub
     }
 
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
+
+    pub fn transport(&self) -> &HttpJsonTransport {
+        &self.transport
+    }
+
     pub fn register_bridge(
         &mut self,
         register: BridgeRegister,
@@ -67,7 +77,7 @@ impl PublisherApiClient {
                 chain_id,
                 request_id,
                 actor_id: self.actor_id.clone(),
-                sent_at_ms: now_ms,
+                sent_at_ms: guarded_sent_at(now_ms),
             },
             BridgeRegisterBody {
                 register,
@@ -90,7 +100,7 @@ impl PublisherApiClient {
                 chain_id,
                 request_id,
                 actor_id: self.actor_id.clone(),
-                sent_at_ms: heartbeat.heartbeat_at_ms,
+                sent_at_ms: guarded_sent_at(heartbeat.heartbeat_at_ms),
             },
             BridgeHeartbeatBody { heartbeat },
         )
@@ -109,7 +119,7 @@ impl PublisherApiClient {
                 chain_id: chain_id.to_string(),
                 request_id,
                 actor_id: self.actor_id.clone(),
-                sent_at_ms: now_ms,
+                sent_at_ms: guarded_sent_at(now_ms),
             },
             CreatorCatalogBody {
                 request: request.clone(),
@@ -131,7 +141,7 @@ impl PublisherApiClient {
                 chain_id: chain_id.to_string(),
                 request_id,
                 actor_id: self.actor_id.clone(),
-                sent_at_ms: now_ms,
+                sent_at_ms: guarded_sent_at(now_ms),
             },
             BootstrapJoinBody { request, now_ms },
         )
@@ -150,7 +160,7 @@ impl PublisherApiClient {
                 chain_id: chain_id.to_string(),
                 request_id,
                 actor_id: self.actor_id.clone(),
-                sent_at_ms: progress.reported_at_ms,
+                sent_at_ms: guarded_sent_at(progress.reported_at_ms),
             },
             BootstrapProgressBody { progress },
         )
@@ -222,4 +232,8 @@ impl PublisherApiClient {
                 detail: "authority response had no success body".into(),
             })
     }
+}
+
+fn guarded_sent_at(now_ms: u64) -> u64 {
+    now_ms.saturating_sub(HTTP_TIMESTAMP_GUARD_MS)
 }

@@ -28,6 +28,10 @@ impl AuthorityServer {
         Self { config, service }
     }
 
+    pub fn service_handle(&self) -> Arc<Mutex<AuthorityService>> {
+        Arc::clone(&self.service)
+    }
+
     pub fn bind(self) -> io::Result<BoundAuthorityServer> {
         let bind_addr = self
             .config

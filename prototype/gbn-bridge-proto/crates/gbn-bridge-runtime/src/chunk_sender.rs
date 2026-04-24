@@ -73,7 +73,11 @@ impl ChunkSender {
     ) -> RuntimeResult<()> {
         for bridge_id in bridge_ids {
             let bridge = find_bridge_mut(bridges, bridge_id)?;
-            bridge.open_data_session(session.open_for_bridge(bridge_id), now_ms)?;
+            bridge.open_data_session_with_chain_id(
+                session.chain_id(),
+                session.open_for_bridge(bridge_id),
+                now_ms,
+            )?;
         }
 
         Ok(())
@@ -90,7 +94,8 @@ impl ChunkSender {
         for dispatch in dispatches {
             ack_tracker.register_dispatch(dispatch);
             let bridge = find_bridge_mut(bridges, &dispatch.bridge_id)?;
-            let ack = bridge.forward_session_frame(
+            let ack = bridge.forward_session_frame_with_chain_id(
+                ack_tracker.chain_id(),
                 dispatch.frame.clone(),
                 now_ms + dispatch.frame.sequence as u64,
             )?;
@@ -111,7 +116,8 @@ impl ChunkSender {
         let close = session.close(BridgeCloseReason::Completed, now_ms);
         for bridge_id in bridge_ids {
             let bridge = find_bridge_mut(bridges, bridge_id)?;
-            let _ = bridge.close_data_session(close.clone(), now_ms);
+            let _ =
+                bridge.close_data_session_with_chain_id(session.chain_id(), close.clone(), now_ms);
         }
 
         Ok(())

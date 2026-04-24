@@ -13,6 +13,7 @@ use crate::bootstrap_bridge::BootstrapBridgeState;
 use crate::control_client::BridgeControlClient;
 use crate::creator_listener::CreatorListener;
 use crate::forwarder::PayloadForwarder;
+use crate::forwarder_client::ForwarderClient;
 use crate::heartbeat_loop::HeartbeatLoop;
 use crate::lease_state::LeaseState;
 use crate::progress_reporter::ProgressReporter;
@@ -53,6 +54,7 @@ pub struct ExitBridgeRuntime {
     punch_manager: PunchManager,
     progress_reporter: ProgressReporter,
     forwarder: PayloadForwarder,
+    forwarder_client: Option<ForwarderClient>,
     data_sessions: BridgeSessionRegistry,
     control_client: Option<BridgeControlClient>,
     bootstrap_chain_ids: BTreeMap<String, String>,
@@ -67,9 +69,19 @@ impl ExitBridgeRuntime {
     where
         C: Into<PublisherClient>,
     {
+        let publisher_client = publisher_client.into();
+        let forwarder_client = match &publisher_client {
+            PublisherClient::Network(client) => Some(ForwarderClient::new(
+                client.actor_id().to_string(),
+                client.signing_key().clone(),
+                client.publisher_public_key().clone(),
+                client.transport().clone(),
+            )),
+            PublisherClient::Simulation(_) => None,
+        };
         Self {
             config,
-            publisher_client: publisher_client.into(),
+            publisher_client,
             lease_state: LeaseState::default(),
             creator_listener: CreatorListener::default(),
             heartbeat_loop: HeartbeatLoop,
@@ -77,6 +89,7 @@ impl ExitBridgeRuntime {
             punch_manager: PunchManager::default(),
             progress_reporter: ProgressReporter::default(),
             forwarder: PayloadForwarder::default(),
+            forwarder_client,
             data_sessions: BridgeSessionRegistry::default(),
             control_client: None,
             bootstrap_chain_ids: BTreeMap::new(),
@@ -118,6 +131,10 @@ impl ExitBridgeRuntime {
 
     pub fn attach_control_client(&mut self, client: BridgeControlClient) {
         self.control_client = Some(client);
+    }
+
+    pub fn attach_forwarder_client(&mut self, client: ForwarderClient) {
+        self.forwarder_client = Some(client);
     }
 
     pub fn control_client(&self) -> Option<&BridgeControlClient> {
@@ -350,6 +367,16 @@ impl ExitBridgeRuntime {
     }
 
     pub fn open_data_session(&mut self, open: BridgeOpen, now_ms: u64) -> RuntimeResult<()> {
+        let chain_id = open.session_id.clone();
+        self.open_data_session_with_chain_id(&chain_id, open, now_ms)
+    }
+
+    pub fn open_data_session_with_chain_id(
+        &mut self,
+        chain_id: &str,
+        open: BridgeOpen,
+        now_ms: u64,
+    ) -> RuntimeResult<()> {
         let _lease = self.require_direct_ingress(now_ms)?;
         if open.bridge_id != self.config.bridge_id {
             return Err(RuntimeError::UnexpectedBridgeRuntime {
@@ -358,13 +385,17 @@ impl ExitBridgeRuntime {
             });
         }
 
-        self.publisher_client
-            .simulation_mut()
-            .ok_or(RuntimeError::SimulationOnlyPath {
-                operation: "open_data_session",
-            })?
-            .open_bridge_session(open.clone())?;
-        self.data_sessions.open(open);
+        if let Some(client) = self.forwarder_client.as_mut() {
+            client.open_session(chain_id, open.clone(), now_ms)?;
+        } else {
+            self.publisher_client
+                .simulation_mut()
+                .ok_or(RuntimeError::SimulationOnlyPath {
+                    operation: "open_data_session",
+                })?
+                .open_bridge_session_with_chain_id(chain_id, open.clone())?;
+        }
+        self.data_sessions.open(chain_id.to_string(), open);
         Ok(())
     }
 
@@ -373,31 +404,65 @@ impl ExitBridgeRuntime {
         frame: BridgeData,
         now_ms: u64,
     ) -> RuntimeResult<BridgeAck> {
+        let chain_id = self
+            .data_sessions
+            .require_chain_id(&frame.session_id)?
+            .to_string();
+        self.forward_session_frame_with_chain_id(&chain_id, frame, now_ms)
+    }
+
+    pub fn forward_session_frame_with_chain_id(
+        &mut self,
+        chain_id: &str,
+        frame: BridgeData,
+        now_ms: u64,
+    ) -> RuntimeResult<BridgeAck> {
         let _lease = self.require_direct_ingress(now_ms)?;
         self.data_sessions.require_session(&frame.session_id)?;
-        self.publisher_client
-            .simulation_mut()
-            .ok_or(RuntimeError::SimulationOnlyPath {
-                operation: "forward_session_frame",
-            })?
-            .forward_frame(frame.clone());
         self.forwarder.forward(frame.clone());
-        self.publisher_client
-            .simulation_mut()
-            .expect("simulation publisher client should exist for session forwarding")
-            .ingest_bridge_frame(&self.config.bridge_id, frame, now_ms)
-            .map_err(Into::into)
+        if let Some(client) = self.forwarder_client.as_mut() {
+            client.forward_frame(chain_id, &self.config.bridge_id, frame, now_ms)
+        } else {
+            self.publisher_client
+                .simulation_mut()
+                .ok_or(RuntimeError::SimulationOnlyPath {
+                    operation: "forward_session_frame",
+                })?
+                .forward_frame(frame.clone());
+            self.publisher_client
+                .simulation_mut()
+                .expect("simulation publisher client should exist for session forwarding")
+                .ingest_bridge_frame_with_chain_id(chain_id, &self.config.bridge_id, frame, now_ms)
+                .map_err(Into::into)
+        }
     }
 
     pub fn close_data_session(&mut self, close: BridgeClose, now_ms: u64) -> RuntimeResult<()> {
+        let chain_id = self
+            .data_sessions
+            .require_chain_id(&close.session_id)?
+            .to_string();
+        self.close_data_session_with_chain_id(&chain_id, close, now_ms)
+    }
+
+    pub fn close_data_session_with_chain_id(
+        &mut self,
+        chain_id: &str,
+        close: BridgeClose,
+        now_ms: u64,
+    ) -> RuntimeResult<()> {
         let _lease = self.require_direct_ingress(now_ms)?;
         self.data_sessions.close(&close)?;
-        self.publisher_client
-            .simulation_mut()
-            .ok_or(RuntimeError::SimulationOnlyPath {
-                operation: "close_data_session",
-            })?
-            .close_bridge_session(close)?;
+        if let Some(client) = self.forwarder_client.as_mut() {
+            client.close_session(chain_id, &self.config.bridge_id, close, now_ms)?;
+        } else {
+            self.publisher_client
+                .simulation_mut()
+                .ok_or(RuntimeError::SimulationOnlyPath {
+                    operation: "close_data_session",
+                })?
+                .close_bridge_session_with_chain_id(chain_id, close)?;
+        }
         Ok(())
     }
 

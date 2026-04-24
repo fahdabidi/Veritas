@@ -1,11 +1,11 @@
 # GBN-PROTO-006 - Execution Phase 6 Detailed Plan: Real Publisher Receiver And ACK Path
 
-**Status:** Ready to start after Phase 5 real bootstrap distribution and fanout is implemented and validated  
+**Status:** Implemented and validated locally on 2026-04-24
 **Primary Goal:** replace the current simulated bridge-to-publisher forwarding path with a real publisher receiver service and ACK path, while preserving the Phase 1 authority API, the Phase 2 durable storage model, the Phase 3 bridge control sessions, the Phase 4 runtime network clients, and the Phase 5 real bootstrap distribution flow  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
 **Phase 5 Detailed Plan:** [GBN-PROTO-006-Execution-Phase5-Real-Bootstrap-Distribution-And-Fanout](GBN-PROTO-006-Execution-Phase5-Real-Bootstrap-Distribution-And-Fanout.md)  
-**Starting Conduit Baseline:** `2b6d5c5d24e269e96e3fdc820f3f90669607414a`
+**Starting Conduit Baseline:** `f28741d05400e6f18ee82e29b7d612f7bf08ea98`
 
 ---
 
@@ -16,17 +16,17 @@ These findings should drive Phase 6 instead of being rediscovered during impleme
 | Item | Current Value | Why It Matters |
 |---|---|---|
 | Current branch | `main` | Phase 6 should record the mainline commit used to begin the receiver-path cutover |
-| Current HEAD commit | `2b6d5c5d24e269e96e3fdc820f3f90669607414a` | current committed Conduit baseline still models bridge-to-publisher forwarding locally |
-| Current runtime forwarder | [`forwarder.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/forwarder.rs) forwards `BridgeData` by calling `InProcessPublisherClient::forward_frame(...)` directly | proves the bridge-to-publisher payload path still bypasses a real network boundary |
-| Current runtime session model | [`session.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/session.rs) creates `BridgeOpen`, `BridgeData`, and `BridgeClose` records locally for selected bridges | session framing exists, but it is not yet coupled to a real receiver service |
-| Current chunk sending path | [`chunk_sender.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/chunk_sender.rs) opens sessions, forwards frames, and receives ACKs synchronously through local `ExitBridgeRuntime` calls | payload dispatch and ACK handling are still modeled as local bridge/runtime interaction rather than networked forwarding |
-| Current publisher ingest path | [`ingest.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/ingest.rs) exposes `open_session`, `ingest_frame`, and `close_session` as direct library functions over `InMemoryAuthorityStorage` | publisher receiver behavior exists logically, but there is no real receiver service boundary |
-| Current publisher ACK generation | [`ack.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/ack.rs) builds `BridgeAck` in-process | ACK semantics exist, but ACK emission is not yet tied to a real receiver service |
-| Current publisher receiver modules | no `receiver.rs` or `ack_service.rs` exist under `gbn-bridge-publisher/src/` | the Publisher still lacks the real receiver service and ACK emission surface required by the architecture |
-| Current runtime network forwarder module | no `forwarder_client.rs` exists under `gbn-bridge-runtime/src/` | the bridge runtime still lacks a real network client for receiver open/data/close flows |
-| Current delivery semantics | `ChunkSender::send_dispatches(...)` expects immediate `BridgeAck` return per frame | proves the runtime still assumes a synchronous local ACK path rather than a real receiver boundary with correlation and retry rules |
+| Current HEAD commit | `f28741d05400e6f18ee82e29b7d612f7bf08ea98` | records the committed Conduit baseline Phase 6 started from; the worktree now carries the Phase 6 receiver-path cutover on top |
+| Current runtime forwarder | [`forwarder.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/forwarder.rs) now records locally forwarded `BridgeData` while [`forwarder_client.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/forwarder_client.rs) sends receiver open/data/close requests over the real authority HTTP surface | the production bridge-to-publisher payload path now crosses a real network boundary instead of mutating publisher state in process |
+| Current runtime session model | [`session.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/session.rs) now binds one canonical upload `chain_id` to each `UploadSession`, and `BridgeSessionRegistry` preserves that `chain_id` across open/data/close calls | session framing is now coupled to a real receiver service with consistent per-session correlation |
+| Current chunk sending path | [`chunk_sender.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/chunk_sender.rs) now opens sessions, forwards frames, and closes sessions through chain-aware bridge runtime methods that drive the receiver client | payload dispatch and ACK handling now ride the real receiver boundary instead of local authority mutation |
+| Current publisher ingest path | [`receiver.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/receiver.rs), [`ack_service.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/ack_service.rs), and [`ingest.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/ingest.rs) now sit behind the authority HTTP service routes for receiver open/frame/close | publisher receiver behavior is now exposed over a real service boundary while keeping ingest domain logic isolated |
+| Current publisher ACK generation | [`ack.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/ack.rs) and [`ack_service.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/ack_service.rs) now emit real `BridgeAck` responses through `/v1/receiver/frame` | ACK semantics are now tied to the receiver service instead of remaining local helper-only behavior |
+| Current publisher receiver modules | `receiver.rs` and `ack_service.rs` now exist under `gbn-bridge-publisher/src/`, and [`service.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/service.rs) routes signed receiver requests through them | the Publisher now exposes the receiver service and ACK emission surface required by the architecture |
+| Current runtime network forwarder module | [`forwarder_client.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/forwarder_client.rs) now exists and is auto-attached for network-mode bridges in [`bridge.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/bridge.rs) | the bridge runtime now has a real network client for receiver open/data/close flows |
+| Current delivery semantics | `ChunkSender::send_dispatches(...)` still expects a correlated `BridgeAck` per frame, but those ACKs are now returned from the receiver service after durable ingest and duplicate handling | runtime correlation remains synchronous for this phase, but it no longer depends on a simulated in-process ACK path |
 | Current durable ingest requirement | Phase 2 is intended to make upload session and frame state durable | Phase 6 must store receiver session state, ingested frames, and ACK correlation records durably rather than assuming in-memory-only authority state |
-| Current `chain_id` state | `BridgeOpen`, `BridgeData`, `BridgeAck`, and `BridgeClose` paths still do not carry a fully enforced distributed `chain_id` | Phase 6 must preserve the same `chain_id` from session open through frame ingest, ACK emission, and close/error paths |
+| Current `chain_id` state | upload sessions now originate a root `chain_id`, receiver open/frame/close requests carry it in signed authority envelopes, and upload session / frame records persist it durably | Phase 6 now preserves one `chain_id` from session open through frame ingest, ACK emission, and close/error paths while leaving broader cross-system enforcement for Phase 7 |
 
 ---
 
@@ -90,9 +90,14 @@ Phase 6 should not begin code edits until all of these are checked:
 
 If any gate fails, Phase 6 should stop.
 
-Current blocker:
+Implementation outcome:
 
-- Phases 1 through 5 are not yet implemented in this full-implementation track, so Phase 6 remains planning-ready only
+- Phase 6 is now implemented locally and validated with:
+  - V2 `cargo fmt --all --check`
+  - V2 `cargo test --workspace --manifest-path prototype/gbn-bridge-proto/Cargo.toml --target-dir %LOCALAPPDATA%\\Temp\\veritas-proto006-phase6-target`
+  - protected V1 path diff clean
+  - V1 `cargo check --workspace`
+  - V1 `cargo test -p mcn-router-sim`
 
 ---
 

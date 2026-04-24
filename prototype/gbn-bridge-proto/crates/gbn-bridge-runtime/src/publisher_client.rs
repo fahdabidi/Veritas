@@ -206,6 +206,16 @@ impl InProcessPublisherClient {
         self.authority.borrow_mut().open_bridge_session(open)
     }
 
+    pub fn open_bridge_session_with_chain_id(
+        &mut self,
+        chain_id: &str,
+        open: BridgeOpen,
+    ) -> AuthorityResult<()> {
+        self.authority
+            .borrow_mut()
+            .open_bridge_session_with_chain_id(Some(chain_id), open)
+    }
+
     pub fn ingest_bridge_frame(
         &mut self,
         via_bridge_id: &str,
@@ -217,8 +227,30 @@ impl InProcessPublisherClient {
             .ingest_bridge_frame(via_bridge_id, frame, received_at_ms)
     }
 
+    pub fn ingest_bridge_frame_with_chain_id(
+        &mut self,
+        chain_id: &str,
+        via_bridge_id: &str,
+        frame: BridgeData,
+        received_at_ms: u64,
+    ) -> AuthorityResult<BridgeAck> {
+        self.authority
+            .borrow_mut()
+            .ingest_bridge_frame_with_chain_id(Some(chain_id), via_bridge_id, frame, received_at_ms)
+    }
+
     pub fn close_bridge_session(&mut self, close: BridgeClose) -> AuthorityResult<()> {
         self.authority.borrow_mut().close_bridge_session(close)
+    }
+
+    pub fn close_bridge_session_with_chain_id(
+        &mut self,
+        chain_id: &str,
+        close: BridgeClose,
+    ) -> AuthorityResult<()> {
+        self.authority
+            .borrow_mut()
+            .close_bridge_session_with_chain_id(Some(chain_id), close)
     }
 
     pub fn report_progress(

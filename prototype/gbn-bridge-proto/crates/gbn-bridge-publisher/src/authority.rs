@@ -424,7 +424,15 @@ impl PublisherAuthority {
     }
 
     pub fn open_bridge_session(&mut self, open: BridgeOpen) -> AuthorityResult<()> {
-        let result = ingest::open_session(&mut self.storage, open);
+        self.open_bridge_session_with_chain_id(None, open)
+    }
+
+    pub fn open_bridge_session_with_chain_id(
+        &mut self,
+        chain_id: Option<&str>,
+        open: BridgeOpen,
+    ) -> AuthorityResult<()> {
+        let result = ingest::open_session_with_chain_id(&mut self.storage, chain_id, open);
         if result.is_ok() {
             self.persist_state()?;
         }
@@ -437,13 +445,37 @@ impl PublisherAuthority {
         frame: BridgeData,
         received_at_ms: u64,
     ) -> AuthorityResult<BridgeAck> {
-        let ack = ingest::ingest_frame(&mut self.storage, via_bridge_id, frame, received_at_ms)?;
+        self.ingest_bridge_frame_with_chain_id(None, via_bridge_id, frame, received_at_ms)
+    }
+
+    pub fn ingest_bridge_frame_with_chain_id(
+        &mut self,
+        chain_id: Option<&str>,
+        via_bridge_id: &str,
+        frame: BridgeData,
+        received_at_ms: u64,
+    ) -> AuthorityResult<BridgeAck> {
+        let ack = ingest::ingest_frame_with_chain_id(
+            &mut self.storage,
+            chain_id,
+            via_bridge_id,
+            frame,
+            received_at_ms,
+        )?;
         self.persist_state()?;
         Ok(ack)
     }
 
     pub fn close_bridge_session(&mut self, close: BridgeClose) -> AuthorityResult<()> {
-        let result = ingest::close_session(&mut self.storage, close);
+        self.close_bridge_session_with_chain_id(None, close)
+    }
+
+    pub fn close_bridge_session_with_chain_id(
+        &mut self,
+        chain_id: Option<&str>,
+        close: BridgeClose,
+    ) -> AuthorityResult<()> {
+        let result = ingest::close_session_with_chain_id(&mut self.storage, chain_id, close);
         if result.is_ok() {
             self.persist_state()?;
         }

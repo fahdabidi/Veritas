@@ -114,7 +114,7 @@ fn authority_queues_control_commands_for_seed_batch_revoke_and_refresh() {
     assert_eq!(seed_commands[0].chain_id, "chain-bootstrap-seed");
     assert!(matches!(
         seed_commands[0].payload,
-        gbn_bridge_protocol::BridgeCommandPayload::PunchStart(_)
+        gbn_bridge_protocol::BridgeCommandPayload::SeedAssign(_)
     ));
     assert_eq!(
         bootstrap.response.seed_bridge.node_id,

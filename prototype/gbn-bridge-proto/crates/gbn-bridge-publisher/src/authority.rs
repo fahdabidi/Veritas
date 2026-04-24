@@ -1,8 +1,9 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    publisher_identity, BootstrapProgress, BridgeAck, BridgeCatalogRequest, BridgeCatalogResponse,
-    BridgeClose, BridgeCommandAck, BridgeCommandAckStatus, BridgeData, BridgeHeartbeat,
-    BridgeLease, BridgeOpen, BridgeRegister, BridgeRevoke, CreatorJoinRequest, PublicKeyBytes,
+    publisher_identity, BootstrapJoinReply, BootstrapProgress, BootstrapProgressStage, BridgeAck,
+    BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCommandAck,
+    BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeHeartbeat, BridgeLease,
+    BridgeOpen, BridgeRegister, BridgeRevoke, CreatorJoinRequest, PublicKeyBytes,
     ReachabilityClass, RevocationReason,
 };
 use serde::Serialize;
@@ -10,7 +11,7 @@ use serde::Serialize;
 use crate::api::{AuthorityApiResponse, AuthorityApiResponseUnsigned};
 use crate::assignment;
 use crate::batching::{self, FinalizedBatch};
-use crate::bootstrap::{self, AuthorityBootstrapPlan};
+use crate::bootstrap::{self, session as bootstrap_session, AuthorityBootstrapPlan};
 use crate::catalog;
 use crate::ingest;
 use crate::lease;
@@ -33,6 +34,12 @@ pub struct PublisherAuthority {
     durable_storage: Option<PostgresAuthorityStorage>,
     last_recovery_summary: RecoverySummary,
     metrics: AuthorityMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapProgressUpdate {
+    pub stored_event_count: usize,
+    pub activated_bridge_ids: Vec<String>,
 }
 
 impl PublisherAuthority {
@@ -311,11 +318,55 @@ impl PublisherAuthority {
             self.metrics.record_bootstrap_rejection();
         } else {
             if let Ok(plan) = &result {
-                self.queue_seed_punch_command(chain_id, now_ms, plan.seed_punch.clone());
+                self.queue_seed_assignment_command(chain_id, now_ms, plan.seed_assignment.clone());
             }
             self.persist_state()?;
         }
         result
+    }
+
+    pub fn begin_bootstrap_reply(
+        &mut self,
+        request: CreatorJoinRequest,
+        now_ms: u64,
+    ) -> AuthorityResult<BootstrapJoinReply> {
+        let chain_id = request.request_id.clone();
+        self.begin_bootstrap_reply_with_chain_id(&chain_id, request, now_ms)
+    }
+
+    pub fn begin_bootstrap_reply_with_chain_id(
+        &mut self,
+        chain_id: &str,
+        request: CreatorJoinRequest,
+        now_ms: u64,
+    ) -> AuthorityResult<BootstrapJoinReply> {
+        let plan = self.begin_bootstrap_with_chain_id(chain_id, request, now_ms)?;
+        Ok(plan.join_reply())
+    }
+
+    pub fn mark_bootstrap_response_returned(
+        &mut self,
+        chain_id: &str,
+        bootstrap_session_id: &str,
+        returned_at_ms: u64,
+    ) -> AuthorityResult<()> {
+        let session = self
+            .storage
+            .bootstrap_sessions
+            .get_mut(bootstrap_session_id)
+            .ok_or_else(|| AuthorityError::BootstrapSessionNotFound {
+                bootstrap_session_id: bootstrap_session_id.to_string(),
+            })?;
+        if session.chain_id != chain_id {
+            return Err(AuthorityError::ChainIdMismatch {
+                context: "bootstrap response return",
+                expected: session.chain_id.clone(),
+                actual: chain_id.to_string(),
+            });
+        }
+        bootstrap_session::mark_response_returned(session, returned_at_ms);
+        self.persist_state()?;
+        Ok(())
     }
 
     pub fn enqueue_join_request_for_batch(
@@ -402,7 +453,7 @@ impl PublisherAuthority {
     pub fn report_bootstrap_progress(
         &mut self,
         progress: BootstrapProgress,
-    ) -> AuthorityResult<usize> {
+    ) -> AuthorityResult<BootstrapProgressUpdate> {
         let chain_id = self
             .storage
             .bootstrap_sessions
@@ -418,7 +469,9 @@ impl PublisherAuthority {
         &mut self,
         chain_id: &str,
         progress: BootstrapProgress,
-    ) -> AuthorityResult<usize> {
+    ) -> AuthorityResult<BootstrapProgressUpdate> {
+        let reported_at_ms = progress.reported_at_ms;
+        let mut fanout_session = None;
         let stored_event_count = {
             let session = self
                 .storage
@@ -435,11 +488,66 @@ impl PublisherAuthority {
                 });
             }
             session.progress_events.push(progress);
+            let latest_progress = session
+                .progress_events
+                .last()
+                .cloned()
+                .expect("progress event was just pushed");
+            match latest_progress.stage {
+                BootstrapProgressStage::SeedTunnelEstablished
+                    if latest_progress.reporter_id == session.seed_bridge_id =>
+                {
+                    bootstrap_session::mark_seed_tunnel_reported(
+                        session,
+                        latest_progress.reported_at_ms,
+                    );
+                    if session.fanout_activated_at_ms.is_none() {
+                        bootstrap_session::mark_fanout_activated(
+                            session,
+                            latest_progress.reported_at_ms,
+                        );
+                        fanout_session = Some(session.clone());
+                    }
+                }
+                BootstrapProgressStage::SeedPayloadReceived
+                    if latest_progress.reporter_id == session.seed_bridge_id =>
+                {
+                    bootstrap_session::mark_bridge_set_delivered(
+                        session,
+                        latest_progress.reported_at_ms,
+                    );
+                }
+                BootstrapProgressStage::BridgeSetComplete => {
+                    bootstrap_session::mark_completed(session, latest_progress.reported_at_ms);
+                }
+                _ => {}
+            }
             session.progress_events.len()
         };
+        let mut activated_bridge_ids = Vec::new();
+        if let Some(session) = fanout_session {
+            let fanout_commands = bootstrap::fanout::build_remaining_bridge_assignments(
+                &self.signing_key,
+                &self.config,
+                &session,
+                reported_at_ms,
+            )?;
+            for command in fanout_commands {
+                activated_bridge_ids.push(command.bridge_id.clone());
+                assignment::queue_batch_assignment_command(
+                    &mut self.storage,
+                    &session.chain_id,
+                    reported_at_ms,
+                    command,
+                );
+            }
+        }
         self.metrics.record_progress_report();
         self.persist_state()?;
-        Ok(stored_event_count)
+        Ok(BootstrapProgressUpdate {
+            stored_event_count,
+            activated_bridge_ids,
+        })
     }
 
     pub fn queue_catalog_refresh_notification(
@@ -533,28 +641,52 @@ impl PublisherAuthority {
     }
 
     pub fn acknowledge_bridge_command(&mut self, ack: &BridgeCommandAck) -> AuthorityResult<()> {
-        let record = self
-            .storage
-            .bridge_commands
-            .get_mut(&ack.command_id)
-            .ok_or_else(|| AuthorityError::BridgeCommandNotFound {
-                bridge_id: ack.bridge_id.clone(),
-                command_id: ack.command_id.clone(),
-            })?;
-        if record.bridge_id != ack.bridge_id || record.seq_no != ack.seq_no {
-            return Err(AuthorityError::BridgeCommandNotFound {
-                bridge_id: ack.bridge_id.clone(),
-                command_id: ack.command_id.clone(),
-            });
+        let (payload, chain_id) = {
+            let record = self
+                .storage
+                .bridge_commands
+                .get_mut(&ack.command_id)
+                .ok_or_else(|| AuthorityError::BridgeCommandNotFound {
+                    bridge_id: ack.bridge_id.clone(),
+                    command_id: ack.command_id.clone(),
+                })?;
+            if record.bridge_id != ack.bridge_id || record.seq_no != ack.seq_no {
+                return Err(AuthorityError::BridgeCommandNotFound {
+                    bridge_id: ack.bridge_id.clone(),
+                    command_id: ack.command_id.clone(),
+                });
+            }
+            if record.chain_id != ack.chain_id {
+                return Err(AuthorityError::ChainIdMismatch {
+                    context: "bridge command ack",
+                    expected: record.chain_id.clone(),
+                    actual: ack.chain_id.clone(),
+                });
+            }
+            let payload = record.payload.clone();
+            let chain_id = record.chain_id.clone();
+            assignment::mark_command_acked(record, ack.status, ack.acked_at_ms);
+            (payload, chain_id)
+        };
+        if matches!(ack.status, BridgeCommandAckStatus::Applied) {
+            if let BridgeCommandPayload::SeedAssign(seed_assign) = payload {
+                let session = self
+                    .storage
+                    .bootstrap_sessions
+                    .get_mut(&seed_assign.bootstrap_session_id)
+                    .ok_or_else(|| AuthorityError::BootstrapSessionNotFound {
+                        bootstrap_session_id: seed_assign.bootstrap_session_id.clone(),
+                    })?;
+                if session.chain_id != chain_id {
+                    return Err(AuthorityError::ChainIdMismatch {
+                        context: "seed assignment ack",
+                        expected: session.chain_id.clone(),
+                        actual: chain_id,
+                    });
+                }
+                bootstrap_session::mark_seed_acknowledged(session, ack.acked_at_ms);
+            }
         }
-        if record.chain_id != ack.chain_id {
-            return Err(AuthorityError::ChainIdMismatch {
-                context: "bridge command ack",
-                expected: record.chain_id.clone(),
-                actual: ack.chain_id.clone(),
-            });
-        }
-        assignment::mark_command_acked(record, ack.status, ack.acked_at_ms);
         self.persist_state()?;
         Ok(())
     }
@@ -563,13 +695,128 @@ impl PublisherAuthority {
         self.storage.upload_sessions.get(session_id)
     }
 
-    fn queue_seed_punch_command(
+    pub fn process_bootstrap_timeouts(&mut self, now_ms: u64) -> AuthorityResult<Vec<String>> {
+        let timed_out_sessions = self
+            .storage
+            .bootstrap_sessions
+            .values()
+            .filter(|session| bootstrap_session::should_reassign_seed(session, now_ms))
+            .map(|session| session.bootstrap_session_id.clone())
+            .collect::<Vec<_>>();
+
+        let mut reassigned_bridges = Vec::new();
+        let had_timed_out_sessions = !timed_out_sessions.is_empty();
+        for bootstrap_session_id in timed_out_sessions {
+            let Some(current) = self
+                .storage
+                .bootstrap_sessions
+                .get(&bootstrap_session_id)
+                .cloned()
+            else {
+                continue;
+            };
+
+            if current.reassignment_count >= current.max_reassignment_count {
+                if let Some(session) = self
+                    .storage
+                    .bootstrap_sessions
+                    .get_mut(&bootstrap_session_id)
+                {
+                    bootstrap_session::mark_failed(session, now_ms);
+                }
+                continue;
+            }
+
+            let Some(new_seed_record) =
+                crate::policy::bootstrap_candidates(&self.storage, now_ms, &self.policy)
+                    .into_iter()
+                    .find(|record| {
+                        !current
+                            .attempted_seed_bridge_ids
+                            .iter()
+                            .any(|attempted| attempted == &record.bridge_id)
+                            && record.bridge_id != current.relay_bridge_id
+                    })
+            else {
+                if let Some(session) = self
+                    .storage
+                    .bootstrap_sessions
+                    .get_mut(&bootstrap_session_id)
+                {
+                    bootstrap_session::mark_failed(session, now_ms);
+                }
+                continue;
+            };
+
+            let creator_entry = current.creator_entry.clone();
+            let new_seed_entry = bootstrap::bridge_bootstrap_entry(
+                &new_seed_record,
+                &self.signing_key,
+                &self.config,
+                now_ms,
+            )?;
+            let creator_response = gbn_bridge_protocol::CreatorBootstrapResponse::sign(
+                gbn_bridge_protocol::CreatorBootstrapResponseUnsigned {
+                    bootstrap_session_id: bootstrap_session_id.clone(),
+                    seed_bridge: new_seed_entry,
+                    publisher_pub: self.publisher_pub.clone(),
+                    response_expiry_ms: now_ms + self.config.bootstrap_response_ttl_ms,
+                    assigned_bridge_count: current.creator_response.assigned_bridge_count,
+                },
+                &self.signing_key,
+            )?;
+            let seed_punch = crate::punch::issue_seed_punch_instruction(
+                &self.signing_key,
+                &bootstrap_session_id,
+                &new_seed_record.bridge_id,
+                creator_entry.clone(),
+                &self.config,
+                now_ms,
+            )?;
+            let seed_assignment = crate::bootstrap::distribution::issue_seed_assignment(
+                &self.signing_key,
+                &new_seed_record.bridge_id,
+                creator_entry,
+                current.bridge_set.clone(),
+                seed_punch,
+                now_ms + self.config.bootstrap_response_ttl_ms,
+            )?;
+            if let Some(session) = self
+                .storage
+                .bootstrap_sessions
+                .get_mut(&bootstrap_session_id)
+            {
+                session.creator_response = creator_response;
+                bootstrap_session::mark_reassigned(
+                    session,
+                    &new_seed_record.bridge_id,
+                    now_ms,
+                    now_ms + self.config.bootstrap_seed_ack_timeout_ms,
+                    now_ms + self.config.bootstrap_seed_tunnel_timeout_ms,
+                );
+            }
+            self.queue_seed_assignment_command(&current.chain_id, now_ms, seed_assignment);
+            reassigned_bridges.push(new_seed_record.bridge_id);
+        }
+
+        if !reassigned_bridges.is_empty() || had_timed_out_sessions {
+            self.persist_state()?;
+        }
+        Ok(reassigned_bridges)
+    }
+
+    fn queue_seed_assignment_command(
         &mut self,
         chain_id: &str,
         issued_at_ms: u64,
-        payload: gbn_bridge_protocol::BridgePunchStart,
+        payload: gbn_bridge_protocol::BridgeSeedAssign,
     ) {
-        assignment::queue_seed_punch_command(&mut self.storage, chain_id, issued_at_ms, payload);
+        assignment::queue_seed_assignment_command(
+            &mut self.storage,
+            chain_id,
+            issued_at_ms,
+            payload,
+        );
     }
 
     fn queue_batch_commands(&mut self, issued_at_ms: u64, batch: &FinalizedBatch) {

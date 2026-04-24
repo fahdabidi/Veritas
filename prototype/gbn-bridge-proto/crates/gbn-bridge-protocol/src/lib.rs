@@ -12,9 +12,9 @@ pub mod session;
 pub mod signing;
 
 pub use bootstrap::{
-    BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BridgeSetRequest, BridgeSetResponse,
-    BridgeSetResponseUnsigned, CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned,
-    CreatorJoinRequest, PendingCreator,
+    BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BootstrapJoinReply, BridgeSeedAssign,
+    BridgeSeedAssignUnsigned, BridgeSetRequest, BridgeSetResponse, BridgeSetResponseUnsigned,
+    CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned, CreatorJoinRequest, PendingCreator,
 };
 pub use catalog::{
     BridgeCatalogRequest, BridgeCatalogResponse, BridgeCatalogResponseUnsigned, BridgeRefreshHint,

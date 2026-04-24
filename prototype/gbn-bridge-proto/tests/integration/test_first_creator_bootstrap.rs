@@ -27,17 +27,17 @@ fn first_creator_bootstrap_completes_seed_and_bridge_set_flow() {
     );
 
     let mut creator = creator_runtime("creator-bootstrap", 45, "203.0.113.20");
-    let host_creator = host_creator();
+    let mut host_creator = host_creator();
 
     let plan = request_first_contact(
         &mut creator,
-        &host_creator,
+        &mut host_creator,
         &mut relay_bridge,
         "join-bootstrap",
         2_000,
     )
     .unwrap();
-    assert_eq!(plan.response.seed_bridge.node_id, "bridge-a-seed");
+    assert_eq!(plan.reply.response.seed_bridge.node_id, "bridge-a-seed");
     assert!(creator.publisher_trust_root().is_some());
     assert_eq!(creator.self_entry().unwrap().node_id, "creator-bootstrap");
 
@@ -50,7 +50,7 @@ fn first_creator_bootstrap_completes_seed_and_bridge_set_flow() {
     let bridge_set = fetch_bridge_set(&mut creator, &mut seed_bridge, &plan, 2_020).unwrap();
     assert_eq!(
         bridge_set.bootstrap_session_id,
-        plan.response.bootstrap_session_id
+        plan.reply.response.bootstrap_session_id
     );
     assert!(!bridge_set.bridge_entries.is_empty());
     assert!(creator.local_dht().len() >= 2);

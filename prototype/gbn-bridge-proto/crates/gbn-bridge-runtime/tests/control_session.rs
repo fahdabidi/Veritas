@@ -4,15 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    publisher_identity, BridgeCapability, BridgeIngressEndpoint, BridgeLease, BridgeRegister,
-    CreatorJoinRequest, PendingCreator, PublicKeyBytes, ReachabilityClass,
+    publisher_identity, BootstrapJoinReply, BridgeCapability, BridgeIngressEndpoint, BridgeLease,
+    BridgeRegister, CreatorJoinRequest, PendingCreator, PublicKeyBytes, ReachabilityClass,
 };
 use gbn_bridge_publisher::{
     api::{
         AuthorityApiRequest, AuthorityApiRequestUnsigned, AuthorityApiResponse, BootstrapJoinBody,
         BridgeRegisterBody,
     },
-    AuthorityBootstrapPlan, AuthorityServer, PublisherAuthority, PublisherServiceConfig,
+    AuthorityServer, PublisherAuthority, PublisherServiceConfig,
 };
 use gbn_bridge_runtime::{
     BridgeControlClient, ExitBridgeConfig, ExitBridgeRuntime, InProcessPublisherClient,
@@ -254,7 +254,7 @@ fn control_session_receives_seed_commands_and_resumes_after_reconnect() {
         &host_key,
     )
     .unwrap();
-    let (status, response): (u16, AuthorityApiResponse<AuthorityBootstrapPlan>) =
+    let (status, response): (u16, AuthorityApiResponse<BootstrapJoinReply>) =
         post_json(handle.local_addr(), "/v1/bootstrap/join", &join_request);
     assert_eq!(status, 200);
     let plan = response.body.unwrap();
@@ -295,28 +295,29 @@ fn control_session_receives_seed_commands_and_resumes_after_reconnect() {
         &publisher_pub,
         "control-chain-002",
         "control-hello-002",
-        base_now_ms + 150,
+        now_ms(),
         Some(last_acked_seq_no),
         30_000,
     )
     .unwrap();
     bridge.attach_control_client(replacement_client);
 
+    let second_join_now_ms = now_ms();
     let second_join = AuthorityApiRequest::sign(
         AuthorityApiRequestUnsigned {
             chain_id: "chain-bootstrap-002".into(),
             request_id: "join-002".into(),
-            sent_at_ms: base_now_ms + 200,
+            sent_at_ms: second_join_now_ms,
             actor_id: "host-creator-01".into(),
             body: BootstrapJoinBody {
                 request: creator_join_request("join-002", "bridge-relay", 72),
-                now_ms: base_now_ms + 200,
+                now_ms: second_join_now_ms,
             },
         },
         &host_key,
     )
     .unwrap();
-    let (status, _response): (u16, AuthorityApiResponse<AuthorityBootstrapPlan>) =
+    let (status, _response): (u16, AuthorityApiResponse<BootstrapJoinReply>) =
         post_json(handle.local_addr(), "/v1/bootstrap/join", &second_join);
     assert_eq!(status, 200);
 

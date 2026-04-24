@@ -1,6 +1,6 @@
 # GBN-PROTO-006 - Execution Phase 4 Detailed Plan: Replace In-Process Clients With Network Clients
 
-**Status:** Ready to start after Phase 3 bridge control sessions and command delivery are implemented and validated  
+**Status:** Completed and validated locally on 2026-04-23
 **Primary Goal:** replace `InProcessPublisherClient` and the remaining in-process creator/host-creator/bridge production coupling with real network clients and transport abstractions, while preserving the Phase 1 authority API and the Phase 3 bridge control-session model and isolating any remaining simulation path to explicit dev-only use  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
@@ -87,7 +87,7 @@ If any gate fails, Phase 4 should stop.
 
 Current blocker:
 
-- Phases 1 and 3 are not yet implemented, so Phase 4 remains planning-ready only
+- none; Phase 4 runtime client replacement, network-path tests, V2 workspace validation, and protected V1 regression checks are complete
 
 ---
 

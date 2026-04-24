@@ -1,6 +1,6 @@
 # GBN-PROTO-006 - Execution Phase 5 Detailed Plan: Real Bootstrap Distribution And Fanout
 
-**Status:** Ready to start after Phase 4 runtime network-client replacement is implemented and validated  
+**Status:** Implemented and validated locally on 2026-04-24
 **Primary Goal:** replace the current in-process bootstrap handoff with a real publisher-owned bootstrap session, seed-assignment delivery path, bridge-set distribution path, and remaining-bridge fanout activation path, while preserving the Phase 1 authority API, the Phase 2 durable state model, the Phase 3 bridge control sessions, and the Phase 4 runtime network clients  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
@@ -16,17 +16,17 @@ These findings should drive Phase 5 instead of being rediscovered during impleme
 | Item | Current Value | Why It Matters |
 |---|---|---|
 | Current branch | `main` | Phase 5 should record the mainline commit used to begin the bootstrap cutover |
-| Current HEAD commit | `2b6d5c5d24e269e96e3fdc820f3f90669607414a` | current committed Conduit baseline still models bootstrap distribution locally |
-| Current publisher bootstrap output | [`bootstrap.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/bootstrap.rs) returns `AuthorityBootstrapPlan` directly | proves the Publisher currently computes bootstrap decisions, but does not distribute them over real service boundaries |
-| Current host-creator first-contact path | [`host_creator.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/host_creator.rs) returns `AuthorityBootstrapPlan` by direct runtime call | first-contact bootstrap is still a local object handoff, not a real host-creator to publisher to bridge flow |
-| Current creator bootstrap path | [`bootstrap.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/bootstrap.rs) applies the returned plan directly to the creator and seed bridge | creator first-contact behavior still assumes a local authority plan is already present |
-| Current seed-bridge state | [`bootstrap_bridge.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/bootstrap_bridge.rs) stores `SeedBridgeAssignment` objects in a local map via `assign_from_plan(...)` | the seed bridge still learns bootstrap state from a local plan object, not from a publisher-issued control command |
-| Current bridge-set delivery | [`bootstrap_bridge.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/bootstrap_bridge.rs) serves a locally cached `BridgeSetResponse` | bridge-set distribution is still a local cache lookup, not a real publisher-to-bridge distribution path |
-| Current remaining-bridge fanout | [`punch_fanout.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/punch_fanout.rs) tracks creator punch attempts entirely in local runtime state | remaining-bridge fanout is still creator-local bookkeeping rather than publisher-driven orchestration across real bridge sessions |
-| Current publisher bootstrap modules | no `bootstrap/session.rs`, `bootstrap/distribution.rs`, or `bootstrap/fanout.rs` exist under `gbn-bridge-publisher/src/bootstrap/` | the publisher-side bootstrap state machine, distribution logic, and fanout logic are not yet factored into production modules |
-| Current bridge command path | Phase 3 is intended to provide real publisher-to-bridge control sessions | Phase 5 must reuse that control plane for seed assignment and fanout instead of inventing a second bridge command channel |
-| Current runtime network path | Phase 4 is intended to replace `InProcessPublisherClient` in production paths | Phase 5 should assume creator, host-creator, and bridge requests already cross real authority/service boundaries |
-| Current `chain_id` state | `chain_id` is still absent from bootstrap session creation, seed assignment, bridge-set delivery, and fanout activation | Phase 5 must make bootstrap tracing continuous across every hop in the first-contact flow |
+| Current HEAD commit | `2b6d5c5d24e269e96e3fdc820f3f90669607414a` | records the committed Conduit baseline Phase 5 started from; the worktree now carries the Phase 5 bootstrap cutover on top |
+| Current publisher bootstrap output | [`bootstrap.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/bootstrap.rs) now produces a production `BootstrapJoinReply` plus signed `BridgeSeedAssign` payloads while keeping `AuthorityBootstrapPlan` internal to authority orchestration | the Publisher now computes and distributes bootstrap decisions over real service boundaries instead of handing a plan object to runtime callers |
+| Current host-creator first-contact path | [`host_creator.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/host_creator.rs) and [`host_creator_client.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/host_creator_client.rs) now relay a `BootstrapJoinReply` through the real authority client path | first-contact bootstrap no longer depends on a local `AuthorityBootstrapPlan` handoff |
+| Current creator bootstrap path | [`bootstrap.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/bootstrap.rs) now establishes the seed tunnel only after the seed bridge applies a publisher-issued `SeedAssign` control command | creator first-contact behavior now consumes publisher-owned bootstrap state over the real command path |
+| Current seed-bridge state | [`bootstrap_bridge.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/bootstrap_bridge.rs) now stores `SeedBridgeAssignment` from signed `BridgeSeedAssign` commands via `assign_from_command(...)` | the seed bridge now learns bootstrap state from publisher-issued commands instead of local plan injection |
+| Current bridge-set delivery | [`bootstrap_bridge.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/bootstrap_bridge.rs) serves the signed bridge-set payload bound to the bootstrap session created by the Publisher | bridge-set distribution is now session-bound publisher state delivered through the seed bridge path |
+| Current remaining-bridge fanout | [`bootstrap/fanout.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/bootstrap/fanout.rs) and [`authority.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/authority.rs) now activate remaining bridges after seed-tunnel progress is reported | remaining-bridge fanout is now publisher-driven over bridge control sessions instead of being purely creator-local bookkeeping |
+| Current publisher bootstrap modules | [`bootstrap/session.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/bootstrap/session.rs), [`bootstrap/distribution.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/bootstrap/distribution.rs), and [`bootstrap/fanout.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/bootstrap/fanout.rs) now exist and are wired into publisher orchestration | the bootstrap state machine, distribution logic, and fanout logic are now factored into production modules |
+| Current bridge command path | Phase 3 now provides real publisher-to-bridge control sessions through the publisher dispatcher and bridge control client | Phase 5 reuses that control plane for seed assignment and fanout instead of inventing a second bridge command channel |
+| Current runtime network path | Phase 4 replaced production `InProcessPublisherClient` coupling with runtime network clients and explicit simulation-only fallbacks | Phase 5 can assume creator, host-creator, and bridge requests already cross real authority/service boundaries |
+| Current `chain_id` state | `chain_id` is now persisted on bootstrap sessions, carried in `BootstrapJoinReply`, propagated in `BridgeSeedAssign`, and preserved in progress reporting and test assertions | Phase 5 now provides continuous bootstrap tracing across the first-contact flow instead of dropping correlation between hops |
 
 ---
 
@@ -93,7 +93,7 @@ If any gate fails, Phase 5 should stop.
 
 Current blocker:
 
-- Phases 1 through 4 are not yet implemented in this full-implementation track, so Phase 5 remains planning-ready only
+- none; Phase 5 bootstrap distribution, reassignment, and fanout cutover is implemented and validated locally
 
 ---
 
@@ -441,7 +441,7 @@ Phase 5 is not complete if:
 
 ## 13. Sign-Off Recommendation
 
-The correct Phase 5 sign-off is:
+The current Phase 5 sign-off is:
 
 - bootstrap distribution is now a real publisher-owned distributed workflow
 - `ExitBridgeB` learns its assignment from the Publisher over the control plane

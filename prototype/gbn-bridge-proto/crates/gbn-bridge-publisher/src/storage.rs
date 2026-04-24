@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use gbn_bridge_protocol::{
     BootstrapDhtEntry, BootstrapProgress, BridgeCapability, BridgeCatalogResponse,
     BridgeCloseReason, BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeHeartbeat,
-    BridgeIngressEndpoint, BridgeLease, BridgeOpen, CreatorJoinRequest, PublicKeyBytes,
-    ReachabilityClass, RevocationReason, UnixTimestampMs,
+    BridgeIngressEndpoint, BridgeLease, BridgeOpen, BridgeSetResponse, CreatorBootstrapResponse,
+    CreatorJoinRequest, PublicKeyBytes, ReachabilityClass, RevocationReason, UnixTimestampMs,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -52,16 +52,52 @@ impl BridgeRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapSessionState {
+    Created,
+    SeedAssigned,
+    SeedAcknowledged,
+    BootstrapResponseReturned,
+    SeedTunnelReported,
+    BridgeSetDelivered,
+    FanoutActivated,
+    Completed,
+    Expired,
+    Reassigned,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapSessionRecord {
     pub bootstrap_session_id: String,
     pub chain_id: String,
+    pub creator_request_id: String,
     pub creator_entry: BootstrapDhtEntry,
+    pub creator_response: CreatorBootstrapResponse,
+    pub bridge_set: BridgeSetResponse,
     pub host_creator_id: String,
     pub relay_bridge_id: String,
     pub seed_bridge_id: String,
     pub bridge_ids: Vec<String>,
+    pub attempted_seed_bridge_ids: Vec<String>,
+    pub state: BootstrapSessionState,
     pub created_at_ms: UnixTimestampMs,
+    pub seed_assigned_at_ms: Option<UnixTimestampMs>,
+    pub seed_acknowledged_at_ms: Option<UnixTimestampMs>,
+    pub response_returned_at_ms: Option<UnixTimestampMs>,
+    pub seed_tunnel_reported_at_ms: Option<UnixTimestampMs>,
+    pub bridge_set_delivered_at_ms: Option<UnixTimestampMs>,
+    pub fanout_activated_at_ms: Option<UnixTimestampMs>,
+    pub completed_at_ms: Option<UnixTimestampMs>,
+    pub expired_at_ms: Option<UnixTimestampMs>,
+    pub failed_at_ms: Option<UnixTimestampMs>,
+    pub reassigned_at_ms: Option<UnixTimestampMs>,
     pub response_expiry_ms: UnixTimestampMs,
+    pub seed_ack_deadline_ms: UnixTimestampMs,
+    pub seed_tunnel_deadline_ms: UnixTimestampMs,
+    pub bridge_set_delivery_deadline_ms: UnixTimestampMs,
+    pub reassignment_count: u32,
+    pub max_reassignment_count: u32,
     pub progress_events: Vec<BootstrapProgress>,
 }
 

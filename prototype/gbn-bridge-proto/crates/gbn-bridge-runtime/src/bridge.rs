@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 
 use gbn_bridge_protocol::{
     BootstrapDhtEntry, BootstrapProgressStage, BridgeAck, BridgeBatchAssign, BridgeCapability,
-    BridgeCatalogResponse, BridgeClose, BridgeCommandAckStatus, BridgeCommandPayload,
-    BridgeControlCommand, BridgeData, BridgeIngressEndpoint, BridgeLease, BridgeOpen,
-    BridgePunchAck, BridgePunchProbe, BridgePunchStart, BridgeRegister, BridgeRevoke,
-    BridgeSetRequest, BridgeSetResponse, ReachabilityClass,
+    BridgeCatalogResponse, BridgeClose, BridgeCommandAck, BridgeCommandAckStatus,
+    BridgeCommandPayload, BridgeControlCommand, BridgeData, BridgeIngressEndpoint, BridgeLease,
+    BridgeOpen, BridgePunchAck, BridgePunchProbe, BridgePunchStart, BridgeRegister, BridgeRevoke,
+    BridgeSeedAssign, BridgeSetRequest, BridgeSetResponse, ReachabilityClass,
 };
-use gbn_bridge_publisher::{AuthorityBootstrapPlan, AuthorityError};
+use gbn_bridge_publisher::AuthorityError;
 
 use crate::bootstrap_bridge::BootstrapBridgeState;
 use crate::control_client::BridgeControlClient;
@@ -16,7 +16,7 @@ use crate::forwarder::PayloadForwarder;
 use crate::heartbeat_loop::HeartbeatLoop;
 use crate::lease_state::LeaseState;
 use crate::progress_reporter::ProgressReporter;
-use crate::publisher_client::InProcessPublisherClient;
+use crate::publisher_client::{InProcessPublisherClient, PublisherClient};
 use crate::punch::{PunchManager, PunchSource};
 use crate::session::BridgeSessionRegistry;
 use crate::{RuntimeError, RuntimeResult};
@@ -45,7 +45,7 @@ impl ExitBridgeConfig {
 #[derive(Debug)]
 pub struct ExitBridgeRuntime {
     config: ExitBridgeConfig,
-    publisher_client: InProcessPublisherClient,
+    publisher_client: PublisherClient,
     lease_state: LeaseState,
     creator_listener: CreatorListener,
     heartbeat_loop: HeartbeatLoop,
@@ -63,10 +63,13 @@ pub struct ExitBridgeRuntime {
 }
 
 impl ExitBridgeRuntime {
-    pub fn new(config: ExitBridgeConfig, publisher_client: InProcessPublisherClient) -> Self {
+    pub fn new<C>(config: ExitBridgeConfig, publisher_client: C) -> Self
+    where
+        C: Into<PublisherClient>,
+    {
         Self {
             config,
-            publisher_client,
+            publisher_client: publisher_client.into(),
             lease_state: LeaseState::default(),
             creator_listener: CreatorListener::default(),
             heartbeat_loop: HeartbeatLoop,
@@ -89,11 +92,28 @@ impl ExitBridgeRuntime {
     }
 
     pub fn publisher_client(&self) -> &InProcessPublisherClient {
-        &self.publisher_client
+        self.publisher_client
+            .simulation()
+            .expect("simulation publisher client is not attached to this runtime")
     }
 
     pub fn publisher_client_mut(&mut self) -> &mut InProcessPublisherClient {
+        self.publisher_client
+            .simulation_mut()
+            .expect("simulation publisher client is not attached to this runtime")
+    }
+
+    pub fn authority_client_mut(&mut self) -> &mut PublisherClient {
         &mut self.publisher_client
+    }
+
+    pub fn has_simulation_publisher_client(&self) -> bool {
+        self.publisher_client.simulation().is_some()
+    }
+
+    pub fn remember_bootstrap_chain_id(&mut self, bootstrap_session_id: &str, chain_id: &str) {
+        self.bootstrap_chain_ids
+            .insert(bootstrap_session_id.to_string(), chain_id.to_string());
     }
 
     pub fn attach_control_client(&mut self, client: BridgeControlClient) {
@@ -188,7 +208,7 @@ impl ExitBridgeRuntime {
                 self.apply_lease(lease.clone(), now_ms);
                 Ok(Some(lease))
             }
-            Err(AuthorityError::BridgeNotFound { .. }) => {
+            Err(RuntimeError::Authority(AuthorityError::BridgeNotFound { .. })) => {
                 let reachability_class =
                     self.registered_reachability_class.clone().ok_or_else(|| {
                         RuntimeError::MissingReachabilityClass {
@@ -204,27 +224,14 @@ impl ExitBridgeRuntime {
                 self.apply_lease(lease.clone(), now_ms);
                 Ok(Some(lease))
             }
-            Err(err @ AuthorityError::BridgeRevoked { .. })
-            | Err(err @ AuthorityError::LeaseExpired { .. }) => {
+            Err(err @ RuntimeError::Authority(AuthorityError::BridgeRevoked { .. }))
+            | Err(err @ RuntimeError::Authority(AuthorityError::LeaseExpired { .. })) => {
                 self.lease_state.clear();
                 self.creator_listener.disable(now_ms);
-                Err(err.into())
+                Err(err)
             }
-            Err(err) => Err(err.into()),
+            Err(err) => Err(err),
         }
-    }
-
-    pub fn apply_seed_assignment(
-        &mut self,
-        plan: &AuthorityBootstrapPlan,
-        now_ms: u64,
-    ) -> RuntimeResult<bool> {
-        self.bootstrap_bridge.assign_from_plan(
-            &self.config.bridge_id,
-            &self.publisher_client.publisher_public_key(),
-            plan,
-            now_ms,
-        )
     }
 
     pub fn begin_publisher_directed_punch(
@@ -279,15 +286,16 @@ impl ExitBridgeRuntime {
         };
         if self.control_client.is_some() {
             self.report_progress_control_path(bootstrap_session_id, stage, 1, established_at_ms)?;
-        } else {
+        } else if let Some(chain_id) = self.bootstrap_chain_ids.get(bootstrap_session_id).cloned() {
             self.progress_reporter.report(
                 &mut self.publisher_client,
+                &chain_id,
                 &self.config.bridge_id,
                 bootstrap_session_id,
                 stage,
                 1,
                 established_at_ms,
-            );
+            )?;
         }
 
         Ok(ack)
@@ -310,22 +318,34 @@ impl ExitBridgeRuntime {
                 response.bridge_entries.len() as u16,
                 now_ms,
             )?;
-        } else {
+        } else if let Some(chain_id) = self
+            .bootstrap_chain_ids
+            .get(&request.bootstrap_session_id)
+            .cloned()
+        {
             self.progress_reporter.report(
                 &mut self.publisher_client,
+                &chain_id,
                 &self.config.bridge_id,
                 &request.bootstrap_session_id,
                 BootstrapProgressStage::SeedPayloadReceived,
                 response.bridge_entries.len() as u16,
                 now_ms,
-            );
+            )?;
         }
         Ok(response)
     }
 
     pub fn forward_creator_frame(&mut self, frame: BridgeData, now_ms: u64) -> RuntimeResult<()> {
         let _lease = self.require_direct_ingress(now_ms)?;
-        self.forwarder.forward(&mut self.publisher_client, frame);
+        if let Some(simulation_client) = self.publisher_client.simulation_mut() {
+            simulation_client.forward_frame(frame.clone());
+        } else {
+            return Err(RuntimeError::SimulationOnlyPath {
+                operation: "forward_creator_frame",
+            });
+        }
+        self.forwarder.forward(frame);
         Ok(())
     }
 
@@ -338,7 +358,12 @@ impl ExitBridgeRuntime {
             });
         }
 
-        self.publisher_client.open_bridge_session(open.clone())?;
+        self.publisher_client
+            .simulation_mut()
+            .ok_or(RuntimeError::SimulationOnlyPath {
+                operation: "open_data_session",
+            })?
+            .open_bridge_session(open.clone())?;
         self.data_sessions.open(open);
         Ok(())
     }
@@ -350,9 +375,16 @@ impl ExitBridgeRuntime {
     ) -> RuntimeResult<BridgeAck> {
         let _lease = self.require_direct_ingress(now_ms)?;
         self.data_sessions.require_session(&frame.session_id)?;
-        self.forwarder
-            .forward(&mut self.publisher_client, frame.clone());
         self.publisher_client
+            .simulation_mut()
+            .ok_or(RuntimeError::SimulationOnlyPath {
+                operation: "forward_session_frame",
+            })?
+            .forward_frame(frame.clone());
+        self.forwarder.forward(frame.clone());
+        self.publisher_client
+            .simulation_mut()
+            .expect("simulation publisher client should exist for session forwarding")
             .ingest_bridge_frame(&self.config.bridge_id, frame, now_ms)
             .map_err(Into::into)
     }
@@ -360,7 +392,12 @@ impl ExitBridgeRuntime {
     pub fn close_data_session(&mut self, close: BridgeClose, now_ms: u64) -> RuntimeResult<()> {
         let _lease = self.require_direct_ingress(now_ms)?;
         self.data_sessions.close(&close)?;
-        self.publisher_client.close_bridge_session(close)?;
+        self.publisher_client
+            .simulation_mut()
+            .ok_or(RuntimeError::SimulationOnlyPath {
+                operation: "close_data_session",
+            })?
+            .close_bridge_session(close)?;
         Ok(())
     }
 
@@ -412,25 +449,37 @@ impl ExitBridgeRuntime {
         &mut self,
         now_ms: u64,
     ) -> RuntimeResult<Option<gbn_bridge_protocol::BridgeCommandAck>> {
-        if self.control_client.is_none() {
-            return Err(RuntimeError::MissingControlClient);
-        }
-        let command = {
-            let client = self
-                .control_client
-                .as_mut()
-                .expect("control client should exist");
+        let command = if let Some(client) = self.control_client.as_mut() {
             client.receive_command(now_ms)?
+        } else if let Some(simulation_client) = self.publisher_client.simulation_mut() {
+            simulation_client
+                .take_pending_control_commands(&self.config.bridge_id, now_ms)?
+                .into_iter()
+                .next()
+        } else {
+            return Err(RuntimeError::MissingControlClient);
         };
         let Some(command) = command else {
             return Ok(None);
         };
         let status = self.apply_control_command(&command, now_ms)?;
-        let ack = self
-            .control_client
-            .as_mut()
-            .expect("control client should exist")
-            .acknowledge_command(&command, status, now_ms)?;
+        let ack = if let Some(client) = self.control_client.as_mut() {
+            client.acknowledge_command(&command, status, now_ms)?
+        } else if let Some(simulation_client) = self.publisher_client.simulation_mut() {
+            let ack = BridgeCommandAck {
+                session_id: command.session_id.clone(),
+                bridge_id: self.config.bridge_id.clone(),
+                command_id: command.command_id.clone(),
+                seq_no: command.seq_no,
+                acked_at_ms: now_ms,
+                chain_id: command.chain_id.clone(),
+                status,
+            };
+            simulation_client.acknowledge_control_command(&ack)?;
+            ack
+        } else {
+            return Err(RuntimeError::MissingControlClient);
+        };
         Ok(Some(ack))
     }
 
@@ -447,6 +496,20 @@ impl ExitBridgeRuntime {
         now_ms: u64,
     ) -> RuntimeResult<BridgeCommandAckStatus> {
         match &command.payload {
+            BridgeCommandPayload::SeedAssign(payload) => {
+                self.bootstrap_chain_ids.insert(
+                    payload.bootstrap_session_id.clone(),
+                    command.chain_id.clone(),
+                );
+                if !self.apply_seed_assignment(payload, now_ms)? {
+                    return Err(RuntimeError::UnexpectedBridgeRuntime {
+                        expected_bridge_id: self.config.bridge_id.clone(),
+                        actual_bridge_id: payload.seed_bridge_id.clone(),
+                    });
+                }
+                self.begin_publisher_directed_punch(payload.seed_punch.clone(), now_ms)?;
+                Ok(BridgeCommandAckStatus::Applied)
+            }
             BridgeCommandPayload::PunchStart(payload) => {
                 self.bootstrap_chain_ids.insert(
                     payload.bootstrap_session_id.clone(),
@@ -488,6 +551,19 @@ impl ExitBridgeRuntime {
                 Ok(BridgeCommandAckStatus::Applied)
             }
         }
+    }
+
+    fn apply_seed_assignment(
+        &mut self,
+        assignment: &BridgeSeedAssign,
+        now_ms: u64,
+    ) -> RuntimeResult<bool> {
+        self.bootstrap_bridge.assign_from_command(
+            &self.config.bridge_id,
+            &self.publisher_client.publisher_public_key(),
+            assignment,
+            now_ms,
+        )
     }
 
     fn report_progress_control_path(

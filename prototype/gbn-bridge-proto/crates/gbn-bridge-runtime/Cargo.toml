@@ -9,6 +9,7 @@ repository.workspace = true
 ed25519-dalek = { workspace = true }
 gbn-bridge-protocol = { path = "../gbn-bridge-protocol" }
 gbn-bridge-publisher = { path = "../gbn-bridge-publisher" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tungstenite = { workspace = true }

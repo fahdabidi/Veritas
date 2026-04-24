@@ -4,9 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    publisher_identity, BootstrapProgress, BootstrapProgressStage, BridgeCapability,
-    BridgeCatalogRequest, BridgeIngressEndpoint, BridgeRegister, PendingCreator, PublicKeyBytes,
-    ReachabilityClass,
+    publisher_identity, BootstrapJoinReply, BootstrapProgress, BootstrapProgressStage,
+    BridgeCapability, BridgeCatalogRequest, BridgeIngressEndpoint, BridgeRegister, PendingCreator,
+    PublicKeyBytes, ReachabilityClass,
 };
 use gbn_bridge_publisher::{
     api::{
@@ -279,10 +279,8 @@ fn catalog_and_join_routes_accept_signed_requests() {
         &host_key,
     )
     .unwrap();
-    let (status, response): (
-        u16,
-        AuthorityApiResponse<gbn_bridge_publisher::AuthorityBootstrapPlan>,
-    ) = post_json(handle.local_addr(), "/v1/bootstrap/join", &join_request);
+    let (status, response): (u16, AuthorityApiResponse<BootstrapJoinReply>) =
+        post_json(handle.local_addr(), "/v1/bootstrap/join", &join_request);
     assert_eq!(status, 200);
     assert_eq!(response.chain_id, "chain-bootstrap-01");
     response.verify_authority(&publisher_pub).unwrap();
@@ -350,10 +348,8 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
         &host_key,
     )
     .unwrap();
-    let (status, join_response): (
-        u16,
-        AuthorityApiResponse<gbn_bridge_publisher::AuthorityBootstrapPlan>,
-    ) = post_json(handle.local_addr(), "/v1/bootstrap/join", &join_request);
+    let (status, join_response): (u16, AuthorityApiResponse<BootstrapJoinReply>) =
+        post_json(handle.local_addr(), "/v1/bootstrap/join", &join_request);
     assert_eq!(status, 200);
     let bootstrap_session_id = join_response.body.unwrap().response.bootstrap_session_id;
 

@@ -1,15 +1,11 @@
 use std::collections::BTreeMap;
 
-use gbn_bridge_protocol::{
-    BridgeSetRequest, BridgeSetResponse, CreatorBootstrapResponse, PublicKeyBytes,
-};
-use gbn_bridge_publisher::AuthorityBootstrapPlan;
+use gbn_bridge_protocol::{BridgeSeedAssign, BridgeSetRequest, BridgeSetResponse, PublicKeyBytes};
 
 use crate::{RuntimeError, RuntimeResult};
 
 #[derive(Debug, Clone)]
 pub struct SeedBridgeAssignment {
-    pub response: CreatorBootstrapResponse,
     pub bridge_set: BridgeSetResponse,
 }
 
@@ -19,28 +15,24 @@ pub struct BootstrapBridgeState {
 }
 
 impl BootstrapBridgeState {
-    pub fn assign_from_plan(
+    pub fn assign_from_command(
         &mut self,
         bridge_id: &str,
         publisher_key: &PublicKeyBytes,
-        plan: &AuthorityBootstrapPlan,
+        assignment: &BridgeSeedAssign,
         now_ms: u64,
     ) -> RuntimeResult<bool> {
-        plan.response.verify_authority(publisher_key, now_ms)?;
-        plan.bridge_set.verify_authority(publisher_key, now_ms)?;
-        plan.seed_punch.verify_authority(publisher_key, now_ms)?;
+        assignment.verify_authority(publisher_key, now_ms)?;
 
-        if plan.response.seed_bridge.node_id != bridge_id
-            || plan.seed_punch.initiator_id != bridge_id
+        if assignment.seed_bridge_id != bridge_id || assignment.seed_punch.initiator_id != bridge_id
         {
             return Ok(false);
         }
 
         self.assignments.insert(
-            plan.response.bootstrap_session_id.clone(),
+            assignment.bootstrap_session_id.clone(),
             SeedBridgeAssignment {
-                response: plan.response.clone(),
-                bridge_set: plan.bridge_set.clone(),
+                bridge_set: assignment.bridge_set.clone(),
             },
         );
         Ok(true)

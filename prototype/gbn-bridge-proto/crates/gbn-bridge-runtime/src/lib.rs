@@ -17,9 +17,12 @@ pub mod framing;
 pub mod heartbeat_loop;
 pub mod hint_merge;
 pub mod host_creator;
+pub mod host_creator_client;
 pub mod lease_state;
 pub mod local_dht;
+pub mod network_transport;
 pub mod progress_reporter;
+pub mod publisher_api_client;
 pub mod publisher_client;
 pub mod punch;
 pub mod punch_fanout;
@@ -34,7 +37,8 @@ use thiserror::Error;
 
 pub use ack_tracker::AckTracker;
 pub use bootstrap::{
-    establish_seed_tunnel, fetch_bridge_set, request_first_contact, SeedTunnelOutcome,
+    establish_seed_tunnel, fetch_bridge_set, request_first_contact, BootstrapJoinPlan,
+    SeedTunnelOutcome,
 };
 pub use bootstrap_bridge::{BootstrapBridgeState, SeedBridgeAssignment};
 pub use bridge::{ExitBridgeConfig, ExitBridgeRuntime};
@@ -53,10 +57,15 @@ pub use hint_merge::{
     merge_refresh_candidates, RefreshCandidate, RefreshCandidateAuthority, RefreshCandidateSource,
 };
 pub use host_creator::HostCreator;
+pub use host_creator_client::HostCreatorClient;
 pub use lease_state::LeaseState;
 pub use local_dht::{LocalDht, LocalDhtNode, LocalHintSource};
+pub use network_transport::{
+    default_chain_id, default_request_id, HttpJsonTransport, HttpTransportConfig, TransportMetadata,
+};
 pub use progress_reporter::ProgressReporter;
-pub use publisher_client::InProcessPublisherClient;
+pub use publisher_api_client::PublisherApiClient;
+pub use publisher_client::{InProcessPublisherClient, PublisherClient};
 pub use punch::{ActivePunchAttempt, PunchAuthorization, PunchManager};
 pub use punch_fanout::{CreatorPunchAck, CreatorPunchAttempt, FanoutSource, PunchFanout};
 pub use seed_catalog::SeedCatalog;
@@ -181,6 +190,32 @@ pub enum RuntimeError {
 
     #[error("control protocol error: {detail}")]
     ControlProtocol { detail: String },
+
+    #[error("authority transport error during {operation}: {detail}")]
+    AuthorityTransport {
+        operation: &'static str,
+        detail: String,
+    },
+
+    #[error("authority protocol error: {detail}")]
+    AuthorityProtocol { detail: String },
+
+    #[error("simulation-only runtime path was used for {operation}")]
+    SimulationOnlyPath { operation: &'static str },
+
+    #[error("creator `{creator_id}` has no attached publisher client")]
+    MissingCreatorPublisherClient { creator_id: String },
+
+    #[error("host creator `{host_creator_id}` has no attached network client")]
+    MissingHostCreatorClient { host_creator_id: String },
+
+    #[error(
+        "host creator client mismatch: expected host creator `{expected_host_creator_id}`, got actor `{actual_actor_id}`"
+    )]
+    HostCreatorClientMismatch {
+        expected_host_creator_id: String,
+        actual_actor_id: String,
+    },
 
     #[error(transparent)]
     Authority(#[from] AuthorityError),

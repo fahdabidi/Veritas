@@ -1,12 +1,10 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    sign_payload, verify_payload, BootstrapProgress, BridgeCatalogRequest, BridgeCatalogResponse,
-    BridgeHeartbeat, BridgeLease, BridgeRegister, CreatorJoinRequest, ProtocolError,
-    PublicKeyBytes, ReachabilityClass, SignatureBytes,
+    sign_payload, verify_payload, BootstrapJoinReply, BootstrapProgress, BridgeCatalogRequest,
+    BridgeCatalogResponse, BridgeHeartbeat, BridgeLease, BridgeRegister, CreatorJoinRequest,
+    ProtocolError, PublicKeyBytes, ReachabilityClass, SignatureBytes,
 };
 use serde::{Deserialize, Serialize};
-
-use crate::bootstrap::AuthorityBootstrapPlan;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityApiAuth {
@@ -211,5 +209,5 @@ impl AuthorityRoute {
 pub type RegisterBridgeResponse = AuthorityApiResponse<BridgeLease>;
 pub type HeartbeatResponse = AuthorityApiResponse<BridgeLease>;
 pub type CreatorCatalogResponse = AuthorityApiResponse<BridgeCatalogResponse>;
-pub type BootstrapJoinResponse = AuthorityApiResponse<AuthorityBootstrapPlan>;
+pub type BootstrapJoinResponse = AuthorityApiResponse<BootstrapJoinReply>;
 pub type BootstrapProgressResponse = AuthorityApiResponse<BootstrapProgressReceipt>;

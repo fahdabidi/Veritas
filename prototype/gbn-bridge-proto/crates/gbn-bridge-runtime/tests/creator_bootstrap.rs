@@ -189,23 +189,9 @@ fn creator_rejects_invalid_signature_and_expired_cached_catalogs() {
 
 #[test]
 fn host_creator_bootstrap_establishes_seed_tunnel_and_updates_local_dht() {
-    let mut bootstrap_authority = publisher();
-    bootstrap_authority
-        .register_bridge(
-            bridge_register("bridge-a-seed", 81, "198.51.100.30"),
-            ReachabilityClass::Direct,
-            1_000,
-        )
-        .unwrap();
-    bootstrap_authority
-        .register_bridge(
-            bridge_register("bridge-z-extra", 82, "198.51.100.31"),
-            ReachabilityClass::Direct,
-            1_000,
-        )
-        .unwrap();
-
-    let relay_client = InProcessPublisherClient::new(bootstrap_authority);
+    let relay_client = InProcessPublisherClient::new(publisher());
+    let seed_client = relay_client.clone();
+    let extra_client = relay_client.clone();
     let mut relay_bridge = ExitBridgeRuntime::new(
         bridge_config("bridge-relay", 83, "198.51.100.32"),
         relay_client,
@@ -214,21 +200,33 @@ fn host_creator_bootstrap_establishes_seed_tunnel_and_updates_local_dht() {
         .startup(ReachabilityClass::Direct, 1_500)
         .unwrap();
 
-    let mut seed_bridge = startup_bridge("bridge-a-seed", 81, "198.51.100.30", 1_500);
-    let mut extra_bridge = startup_bridge("bridge-z-extra", 82, "198.51.100.31", 1_500);
+    let mut seed_bridge = ExitBridgeRuntime::new(
+        bridge_config("bridge-a-seed", 81, "198.51.100.30"),
+        seed_client,
+    );
+    seed_bridge
+        .startup(ReachabilityClass::Direct, 1_500)
+        .unwrap();
+    let mut extra_bridge = ExitBridgeRuntime::new(
+        bridge_config("bridge-z-extra", 82, "198.51.100.31"),
+        extra_client,
+    );
+    extra_bridge
+        .startup(ReachabilityClass::Direct, 1_500)
+        .unwrap();
 
     let mut creator = creator_runtime("creator-join-001", 84, "203.0.113.30");
-    let host_creator = HostCreator::new("host-creator-01");
+    let mut host_creator = HostCreator::new("host-creator-01");
 
     let plan = request_first_contact(
         &mut creator,
-        &host_creator,
+        &mut host_creator,
         &mut relay_bridge,
         "join-001",
         2_000,
     )
     .unwrap();
-    assert_eq!(plan.response.seed_bridge.node_id, "bridge-a-seed");
+    assert_eq!(plan.reply.response.seed_bridge.node_id, "bridge-a-seed");
     assert!(creator.publisher_trust_root().is_some());
     assert_eq!(creator.self_entry().unwrap().node_id, "creator-join-001");
     assert!(creator.local_dht().node("bridge-a-seed").is_some());
@@ -247,12 +245,16 @@ fn host_creator_bootstrap_establishes_seed_tunnel_and_updates_local_dht() {
     let bridge_set = fetch_bridge_set(&mut creator, &mut seed_bridge, &plan, 2_020).unwrap();
     assert_eq!(
         bridge_set.bootstrap_session_id,
-        plan.response.bootstrap_session_id
+        plan.reply.response.bootstrap_session_id
     );
     assert!(creator.local_dht().node("bridge-z-extra").is_some());
 
     let attempts = creator
-        .begin_bootstrap_fanout(&plan.response.bootstrap_session_id, &bridge_set, 2_030)
+        .begin_bootstrap_fanout(
+            &plan.reply.response.bootstrap_session_id,
+            &bridge_set,
+            2_030,
+        )
         .unwrap();
     let extra_attempt = attempts
         .iter()
@@ -286,39 +288,40 @@ fn host_creator_bootstrap_establishes_seed_tunnel_and_updates_local_dht() {
 
 #[test]
 fn creator_rejects_tampered_bridge_sets() {
-    let mut bootstrap_authority = publisher();
-    bootstrap_authority
-        .register_bridge(
-            bridge_register("bridge-a-seed", 91, "198.51.100.40"),
-            ReachabilityClass::Direct,
-            1_000,
-        )
-        .unwrap();
-    let relay_client = InProcessPublisherClient::new(bootstrap_authority);
+    let relay_client = InProcessPublisherClient::new(publisher());
+    let seed_client = relay_client.clone();
     let mut relay_bridge = ExitBridgeRuntime::new(
         bridge_config("bridge-relay", 92, "198.51.100.41"),
         relay_client,
     );
+    let mut seed_bridge = ExitBridgeRuntime::new(
+        bridge_config("bridge-a-seed", 91, "198.51.100.40"),
+        seed_client,
+    );
     relay_bridge
+        .startup(ReachabilityClass::Direct, 1_500)
+        .unwrap();
+    seed_bridge
         .startup(ReachabilityClass::Direct, 1_500)
         .unwrap();
 
     let mut creator = creator_runtime("creator-join-002", 93, "203.0.113.40");
-    let host_creator = HostCreator::new("host-creator-02");
+    let mut host_creator = HostCreator::new("host-creator-02");
     let plan = request_first_contact(
         &mut creator,
-        &host_creator,
+        &mut host_creator,
         &mut relay_bridge,
         "join-002",
         2_000,
     )
     .unwrap();
 
-    let mut tampered = plan.bridge_set.clone();
+    establish_seed_tunnel(&mut creator, &mut seed_bridge, &plan, 2_001).unwrap();
+    let mut tampered = fetch_bridge_set(&mut creator, &mut seed_bridge, &plan, 2_002).unwrap();
     tampered.publisher_sig = gbn_bridge_protocol::SignatureBytes(vec![7; 64]);
 
     assert!(matches!(
-        creator.store_bridge_set(&tampered, 2_001),
+        creator.store_bridge_set(&tampered, 2_002),
         Err(RuntimeError::Protocol(
             gbn_bridge_protocol::ProtocolError::InvalidSignature
         ))

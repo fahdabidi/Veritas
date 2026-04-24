@@ -2,9 +2,9 @@ use std::sync::mpsc::Sender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gbn_bridge_protocol::{
-    BootstrapProgressStage, BridgeCommandAck, BridgeControlCommand, BridgeControlFrame,
-    BridgeControlHello, BridgeControlKeepalive, BridgeControlProgress, BridgeControlWelcome,
-    BridgeControlWelcomeUnsigned, ProtocolError,
+    BootstrapJoinReply, BootstrapProgressStage, BridgeCommandAck, BridgeControlCommand,
+    BridgeControlFrame, BridgeControlHello, BridgeControlKeepalive, BridgeControlProgress,
+    BridgeControlWelcome, BridgeControlWelcomeUnsigned, ProtocolError,
 };
 use serde::Serialize;
 
@@ -267,12 +267,17 @@ impl AuthorityService {
                 session.bridge_id, progress.progress.reporter_id
             )));
         }
-        self.authority
-            .report_bootstrap_progress_with_chain_id(&progress.chain_id, progress.progress)
+        let update = self
+            .authority
+            .report_bootstrap_progress_with_chain_id(&progress.chain_id, progress.progress.clone())
             .map_err(map_authority_error)?;
         let _ = self
             .control_sessions
             .touch_session(&progress.session_id, seen_at_ms);
+        for bridge_id in update.activated_bridge_ids {
+            self.push_pending_commands_for_bridge(&bridge_id, seen_at_ms)
+                .map_err(map_authority_error)?;
+        }
         dispatcher::dispatch_pending_commands(&mut self.authority, &session, seen_at_ms)
             .map_err(map_authority_error)
     }
@@ -408,7 +413,7 @@ impl AuthorityService {
     pub fn handle_bootstrap_join(
         &mut self,
         request: AuthorityApiRequest<BootstrapJoinBody>,
-    ) -> Result<AuthorityApiResponse<crate::AuthorityBootstrapPlan>, ServiceError> {
+    ) -> Result<AuthorityApiResponse<BootstrapJoinReply>, ServiceError> {
         self.authenticator
             .verify_signed_request(&request, now_ms())
             .map_err(map_auth_error)?;
@@ -424,9 +429,19 @@ impl AuthorityService {
                 request.body.now_ms,
             )
             .map_err(map_authority_error)?;
-        self.push_pending_commands_for_bridge(&plan.seed_punch.initiator_id, request.body.now_ms)
+        self.push_pending_commands_for_bridge(
+            &plan.seed_assignment.seed_bridge_id,
+            request.body.now_ms,
+        )
+        .map_err(map_authority_error)?;
+        self.authority
+            .mark_bootstrap_response_returned(
+                &request.chain_id,
+                &plan.response.bootstrap_session_id,
+                request.body.now_ms,
+            )
             .map_err(map_authority_error)?;
-        self.success_response(&request.chain_id, &request.request_id, plan)
+        self.success_response(&request.chain_id, &request.request_id, plan.join_reply())
     }
 
     pub fn handle_progress_report(
@@ -446,14 +461,18 @@ impl AuthorityService {
         }
 
         let progress = request.body.progress;
-        let stored_event_count = self
+        let update = self
             .authority
             .report_bootstrap_progress_with_chain_id(&request.chain_id, progress.clone())
             .map_err(map_authority_error)?;
+        for bridge_id in &update.activated_bridge_ids {
+            self.push_pending_commands_for_bridge(bridge_id, progress.reported_at_ms)
+                .map_err(map_authority_error)?;
+        }
         let receipt = BootstrapProgressReceipt {
             bootstrap_session_id: progress.bootstrap_session_id,
             reporter_id: progress.reporter_id,
-            stored_event_count,
+            stored_event_count: update.stored_event_count,
             latest_stage: bootstrap_stage_name(progress.stage),
         };
         self.success_response(&request.chain_id, &request.request_id, receipt)

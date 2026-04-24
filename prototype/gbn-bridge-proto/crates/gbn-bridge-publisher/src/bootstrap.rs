@@ -1,13 +1,18 @@
+pub mod distribution;
+pub mod fanout;
+pub mod session;
+
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BridgeSetResponse, BridgeSetResponseUnsigned,
-    CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned, CreatorJoinRequest, PublicKeyBytes,
+    BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BootstrapJoinReply, BridgeSeedAssign,
+    BridgeSetResponse, BridgeSetResponseUnsigned, CreatorBootstrapResponse,
+    CreatorBootstrapResponseUnsigned, CreatorJoinRequest, PublicKeyBytes,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::policy;
 use crate::punch;
-use crate::storage::{BootstrapSessionRecord, BridgeRecord, InMemoryAuthorityStorage};
+use crate::storage::{BridgeRecord, InMemoryAuthorityStorage};
 use crate::{AuthorityConfig, AuthorityError, AuthorityPolicy, AuthorityResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +21,13 @@ pub struct AuthorityBootstrapPlan {
     pub response: CreatorBootstrapResponse,
     pub bridge_set: BridgeSetResponse,
     pub seed_punch: gbn_bridge_protocol::BridgePunchStart,
+    pub seed_assignment: BridgeSeedAssign,
+}
+
+impl AuthorityBootstrapPlan {
+    pub fn join_reply(&self) -> BootstrapJoinReply {
+        distribution::join_reply(self.creator_entry.clone(), self.response.clone())
+    }
 }
 
 pub fn creator_bootstrap_entry(
@@ -133,24 +145,33 @@ pub fn begin_bootstrap(
         config,
         now_ms,
     )?;
+    let seed_assignment = distribution::issue_seed_assignment(
+        signing_key,
+        &seed_record.bridge_id,
+        creator_entry.clone(),
+        bridge_set.clone(),
+        seed_punch.clone(),
+        now_ms + config.bootstrap_response_ttl_ms,
+    )?;
 
     storage.bootstrap_sessions.insert(
         bootstrap_session_id.clone(),
-        BootstrapSessionRecord {
-            bootstrap_session_id: bootstrap_session_id.clone(),
-            chain_id: chain_id.to_string(),
-            creator_entry: creator_entry.clone(),
-            host_creator_id: request.host_creator_id,
-            relay_bridge_id: request.relay_bridge_id,
-            seed_bridge_id: seed_record.bridge_id.clone(),
-            bridge_ids: bridge_entries
+        session::build_session_record(
+            config,
+            chain_id,
+            &request.request_id,
+            creator_entry.clone(),
+            response.clone(),
+            bridge_set.clone(),
+            request.host_creator_id,
+            request.relay_bridge_id,
+            seed_record.bridge_id.clone(),
+            bridge_entries
                 .iter()
                 .map(|entry| entry.node_id.clone())
                 .collect(),
-            created_at_ms: now_ms,
-            response_expiry_ms: now_ms + config.bootstrap_response_ttl_ms,
-            progress_events: Vec::new(),
-        },
+            now_ms,
+        ),
     );
 
     Ok(AuthorityBootstrapPlan {
@@ -158,5 +179,6 @@ pub fn begin_bootstrap(
         response,
         bridge_set,
         seed_punch,
+        seed_assignment,
     })
 }

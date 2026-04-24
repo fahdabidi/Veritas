@@ -2,6 +2,7 @@ use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ProtocolError;
+use crate::punch::BridgePunchStart;
 use crate::signing::{
     ensure_not_expired, sign_payload, verify_payload, PublicKeyBytes, SignatureBytes,
 };
@@ -153,6 +154,23 @@ impl CreatorBootstrapResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapJoinReply {
+    pub creator_entry: BootstrapDhtEntry,
+    pub response: CreatorBootstrapResponse,
+}
+
+impl BootstrapJoinReply {
+    pub fn verify_authority(
+        &self,
+        publisher_key: &PublicKeyBytes,
+        now_ms: u64,
+    ) -> Result<(), ProtocolError> {
+        self.creator_entry.verify_authority(publisher_key, now_ms)?;
+        self.response.verify_authority(publisher_key, now_ms)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeSetRequest {
     pub bootstrap_session_id: String,
     pub creator_id: String,
@@ -220,5 +238,96 @@ impl BridgeSetResponse {
         }
         verify_payload(&unsigned, publisher_key, &self.publisher_sig)?;
         ensure_not_expired("bridge set response", self.response_expiry_ms, now_ms)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeSeedAssignUnsigned {
+    pub bootstrap_session_id: String,
+    pub seed_bridge_id: String,
+    pub creator_entry: BootstrapDhtEntry,
+    pub bridge_set: BridgeSetResponse,
+    pub seed_punch: BridgePunchStart,
+    pub assignment_expiry_ms: u64,
+}
+
+impl BridgeSeedAssignUnsigned {
+    pub fn validate_shape(&self) -> Result<(), ProtocolError> {
+        if self.bootstrap_session_id.trim().is_empty() || self.seed_bridge_id.trim().is_empty() {
+            return Err(ProtocolError::Serialization(
+                "bridge seed assignment requires non-empty identifiers".into(),
+            ));
+        }
+        if self.bridge_set.bootstrap_session_id != self.bootstrap_session_id {
+            return Err(ProtocolError::Serialization(
+                "bridge seed assignment bridge set session mismatch".into(),
+            ));
+        }
+        if self.seed_punch.bootstrap_session_id != self.bootstrap_session_id {
+            return Err(ProtocolError::Serialization(
+                "bridge seed assignment punch session mismatch".into(),
+            ));
+        }
+        if self.seed_punch.initiator_id != self.seed_bridge_id {
+            return Err(ProtocolError::Serialization(
+                "bridge seed assignment punch initiator mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeSeedAssign {
+    pub bootstrap_session_id: String,
+    pub seed_bridge_id: String,
+    pub creator_entry: BootstrapDhtEntry,
+    pub bridge_set: BridgeSetResponse,
+    pub seed_punch: BridgePunchStart,
+    pub assignment_expiry_ms: u64,
+    pub publisher_sig: SignatureBytes,
+}
+
+impl BridgeSeedAssign {
+    pub fn sign(
+        unsigned: BridgeSeedAssignUnsigned,
+        signing_key: &SigningKey,
+    ) -> Result<Self, ProtocolError> {
+        unsigned.validate_shape()?;
+        let publisher_sig = sign_payload(&unsigned, signing_key)?;
+        Ok(Self {
+            bootstrap_session_id: unsigned.bootstrap_session_id,
+            seed_bridge_id: unsigned.seed_bridge_id,
+            creator_entry: unsigned.creator_entry,
+            bridge_set: unsigned.bridge_set,
+            seed_punch: unsigned.seed_punch,
+            assignment_expiry_ms: unsigned.assignment_expiry_ms,
+            publisher_sig,
+        })
+    }
+
+    pub fn unsigned_payload(&self) -> BridgeSeedAssignUnsigned {
+        BridgeSeedAssignUnsigned {
+            bootstrap_session_id: self.bootstrap_session_id.clone(),
+            seed_bridge_id: self.seed_bridge_id.clone(),
+            creator_entry: self.creator_entry.clone(),
+            bridge_set: self.bridge_set.clone(),
+            seed_punch: self.seed_punch.clone(),
+            assignment_expiry_ms: self.assignment_expiry_ms,
+        }
+    }
+
+    pub fn verify_authority(
+        &self,
+        publisher_key: &PublicKeyBytes,
+        now_ms: u64,
+    ) -> Result<(), ProtocolError> {
+        let unsigned = self.unsigned_payload();
+        unsigned.validate_shape()?;
+        self.creator_entry.verify_authority(publisher_key, now_ms)?;
+        self.bridge_set.verify_authority(publisher_key, now_ms)?;
+        self.seed_punch.verify_authority(publisher_key, now_ms)?;
+        verify_payload(&unsigned, publisher_key, &self.publisher_sig)?;
+        ensure_not_expired("bridge seed assignment", self.assignment_expiry_ms, now_ms)
     }
 }

@@ -14,9 +14,10 @@ fn seed_and_follow_on_punch_acks_are_correlated_to_the_right_targets() {
     let _extra = startup_bridge("bridge-z-extra", 53, "198.51.100.42", &shared_client, 1_000);
 
     let mut creator = creator_runtime("creator-punch", 54, "203.0.113.30");
+    let mut host_creator = host_creator();
     let plan = request_first_contact(
         &mut creator,
-        &host_creator(),
+        &mut host_creator,
         &mut relay_bridge,
         "join-punch",
         2_000,
@@ -31,7 +32,11 @@ fn seed_and_follow_on_punch_acks_are_correlated_to_the_right_targets() {
 
     let bridge_set = fetch_bridge_set(&mut creator, &mut seed_bridge, &plan, 2_020).unwrap();
     let attempts = creator
-        .begin_bootstrap_fanout(&plan.response.bootstrap_session_id, &bridge_set, 2_030)
+        .begin_bootstrap_fanout(
+            &plan.reply.response.bootstrap_session_id,
+            &bridge_set,
+            2_030,
+        )
         .unwrap();
     let follow_on = attempts
         .into_iter()

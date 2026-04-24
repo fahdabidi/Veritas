@@ -10,6 +10,8 @@ use crate::catalog_cache::CatalogCache;
 use crate::discovery::{DiscoveryHint, WeakDiscoveryState};
 use crate::hint_merge::{merge_refresh_candidates, RefreshCandidate};
 use crate::local_dht::LocalDht;
+use crate::network_transport::default_chain_id;
+use crate::publisher_client::PublisherClient;
 use crate::punch_fanout::{CreatorPunchAck, CreatorPunchAttempt, PunchFanout};
 use crate::seed_catalog::SeedCatalog;
 use crate::selector;
@@ -33,6 +35,7 @@ pub struct CreatorRuntime {
     failed_bridges: BTreeSet<String>,
     punch_fanout: PunchFanout,
     self_entry: Option<BootstrapDhtEntry>,
+    publisher_client: Option<PublisherClient>,
 }
 
 impl CreatorRuntime {
@@ -46,6 +49,7 @@ impl CreatorRuntime {
             failed_bridges: BTreeSet::default(),
             punch_fanout: PunchFanout::default(),
             self_entry: None,
+            publisher_client: None,
         }
     }
 
@@ -75,6 +79,13 @@ impl CreatorRuntime {
 
     pub fn self_entry(&self) -> Option<&BootstrapDhtEntry> {
         self.self_entry.as_ref()
+    }
+
+    pub fn attach_publisher_client<C>(&mut self, client: C)
+    where
+        C: Into<PublisherClient>,
+    {
+        self.publisher_client = Some(client.into());
     }
 
     pub fn pending_creator(&self) -> PendingCreator {
@@ -204,9 +215,22 @@ impl CreatorRuntime {
             }),
         };
 
-        let response = bridge
-            .publisher_client_mut()
-            .issue_catalog(&request, now_ms)?;
+        let chain_id = default_chain_id(
+            "creator-refresh",
+            &self.config.creator_id,
+            &format!("{}-{now_ms}", bridge.config().bridge_id),
+        );
+        let response = if let Some(client) = self.publisher_client.as_mut() {
+            client.issue_catalog(&chain_id, &request, now_ms)?
+        } else if bridge.has_simulation_publisher_client() {
+            bridge
+                .authority_client_mut()
+                .issue_catalog(&chain_id, &request, now_ms)?
+        } else {
+            return Err(RuntimeError::MissingCreatorPublisherClient {
+                creator_id: self.config.creator_id.clone(),
+            });
+        };
         self.ingest_catalog(response.clone(), now_ms)?;
         Ok(response)
     }

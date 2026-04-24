@@ -237,6 +237,9 @@ fn verify_command_payload(
     now_ms: u64,
 ) -> Result<(), ProtocolError> {
     match &command.payload {
+        gbn_bridge_protocol::BridgeCommandPayload::SeedAssign(payload) => {
+            payload.verify_authority(publisher_pub, now_ms)
+        }
         gbn_bridge_protocol::BridgeCommandPayload::PunchStart(payload) => {
             payload.verify_authority(publisher_pub, now_ms)
         }

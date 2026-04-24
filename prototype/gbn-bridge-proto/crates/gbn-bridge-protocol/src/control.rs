@@ -1,6 +1,7 @@
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 
+use crate::bootstrap::BridgeSeedAssign;
 use crate::catalog::BridgeCatalogResponse;
 use crate::error::ProtocolError;
 use crate::lease::BridgeRevoke;
@@ -188,6 +189,7 @@ impl BridgeControlWelcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command_type", content = "body", rename_all = "snake_case")]
 pub enum BridgeCommandPayload {
+    SeedAssign(BridgeSeedAssign),
     PunchStart(BridgePunchStart),
     BatchAssign(BridgeBatchAssign),
     Revoke(BridgeRevoke),

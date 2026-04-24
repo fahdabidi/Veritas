@@ -166,10 +166,30 @@ fn seed_bridge_establishes_acks_and_returns_bootstrap_payload() {
         .authority_mut()
         .begin_bootstrap(join_request("join-002", "bridge-relay", 62), 2_000)
         .unwrap();
-    assert!(bridge.apply_seed_assignment(&plan, 2_000).unwrap());
+    bridge.remember_bootstrap_chain_id(
+        &plan.response.bootstrap_session_id,
+        "bridge-runtime-seed-test",
+    );
+    let ack = bridge
+        .receive_next_control_command(2_000)
+        .unwrap()
+        .expect("seed bridge should receive seed assignment");
+    assert_eq!(
+        ack.status,
+        gbn_bridge_protocol::BridgeCommandAckStatus::Applied
+    );
 
     let probe = bridge
-        .begin_publisher_directed_punch(plan.seed_punch.clone(), 2_001)
+        .active_punch_attempt(&plan.response.bootstrap_session_id)
+        .cloned()
+        .map(|attempt| gbn_bridge_protocol::BridgePunchProbe {
+            bootstrap_session_id: attempt.bootstrap_session_id.clone(),
+            source_node_id: bridge.config().bridge_id.clone(),
+            source_pub_key: bridge.config().identity_pub.clone(),
+            source_ip_addr: bridge.config().ingress_endpoint.host.clone(),
+            source_udp_punch_port: bridge.current_lease().unwrap().udp_punch_port,
+            probe_nonce: attempt.probe_nonce,
+        })
         .unwrap();
     let ack = bridge
         .acknowledge_tunnel(

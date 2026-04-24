@@ -1,6 +1,6 @@
 use gbn_bridge_protocol::{
     BridgeBatchAssign, BridgeCatalogResponse, BridgeCommandAckStatus, BridgeCommandPayload,
-    BridgeControlCommand, BridgePunchStart, BridgeRevoke,
+    BridgeControlCommand, BridgePunchStart, BridgeRevoke, BridgeSeedAssign,
 };
 
 use crate::storage::{BridgeCommandRecord, InMemoryAuthorityStorage};
@@ -18,6 +18,22 @@ pub fn queue_seed_punch_command(
         chain_id,
         issued_at_ms,
         BridgeCommandPayload::PunchStart(payload),
+    )
+}
+
+pub fn queue_seed_assignment_command(
+    storage: &mut InMemoryAuthorityStorage,
+    chain_id: &str,
+    issued_at_ms: u64,
+    payload: BridgeSeedAssign,
+) -> BridgeCommandRecord {
+    let bridge_id = payload.seed_bridge_id.clone();
+    queue_bridge_command(
+        storage,
+        &bridge_id,
+        chain_id,
+        issued_at_ms,
+        BridgeCommandPayload::SeedAssign(payload),
     )
 }
 

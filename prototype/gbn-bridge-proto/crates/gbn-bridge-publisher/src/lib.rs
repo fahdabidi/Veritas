@@ -140,6 +140,10 @@ pub struct AuthorityConfig {
     pub bootstrap_response_ttl_ms: u64,
     pub punch_instruction_ttl_ms: u64,
     pub bootstrap_bridge_count: usize,
+    pub bootstrap_seed_ack_timeout_ms: u64,
+    pub bootstrap_seed_tunnel_timeout_ms: u64,
+    pub bootstrap_bridge_set_timeout_ms: u64,
+    pub bootstrap_max_reassignments: u32,
     pub batch_window_ms: u64,
     pub batch_capacity: usize,
 }
@@ -155,6 +159,10 @@ impl Default for AuthorityConfig {
             bootstrap_response_ttl_ms: 20_000,
             punch_instruction_ttl_ms: 20_000,
             bootstrap_bridge_count: 9,
+            bootstrap_seed_ack_timeout_ms: 5_000,
+            bootstrap_seed_tunnel_timeout_ms: 10_000,
+            bootstrap_bridge_set_timeout_ms: 10_000,
+            bootstrap_max_reassignments: 2,
             batch_window_ms: 500,
             batch_capacity: 10,
         }

@@ -1,6 +1,6 @@
 # GBN-PROTO-006 - Execution Phase 10 Detailed Plan: Live AWS And Mobile Validation
 
-**Status:** Ready to start after Phase 9 distributed end-to-end harness and fault injection are implemented and validated  
+**Status:** Implemented locally; live AWS/mobile evidence pending an active AWS stack and mobile-network run
 **Primary Goal:** validate the full Conduit implementation on live AWS and mobile-network conditions, capture production-shaped bootstrap, fanout, forwarding, ACK, failover, and trace evidence, and produce a durable validation report suitable for the final decision gate  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
@@ -15,14 +15,14 @@ These findings should drive Phase 10 instead of being rediscovered during implem
 
 | Item | Current Value | Why It Matters |
 |---|---|---|
-| Current branch | `main` | Phase 10 should record the mainline commit used to begin live validation |
-| Current HEAD commit | `2b6d5c5d24e269e96e3fdc820f3f90669607414a` | current committed Conduit baseline still documents only prototype-era live evidence |
-| Current mobile validation script | [`mobile-validation.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/mobile-validation.sh) supports `local` and `aws` modes but is explicitly tied to the earlier prototype stack | a full implementation validation pass needs a new script surface and new assumptions |
-| Current metrics script | [`collect-bridge-metrics.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/collect-bridge-metrics.sh) collects Phase 11 prototype stack evidence only | it is not yet the full trace-aware validation collector for the full implementation |
-| Current mobile matrix | [`mobile-test-matrix.md`](../../../prototype/gbn-bridge-proto/docs/mobile-test-matrix.md) still says the deployed binaries are prototype entrypoints rather than full network listeners | the current evidence baseline is explicitly incomplete for the full implementation |
-| Current validation report file | `docs/prototyping/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md` does not exist | there is no final report surface for the full implementation validation phase |
-| Current trace artifact collection | there is no `collect-conduit-traces.sh` | live runs still do not have a dedicated end-to-end trace evidence collector |
-| Current full-stack scripts | full implementation deploy/smoke/teardown assets do not yet exist in the current repo state | Phase 10 depends on Phase 8 completing first |
+| Current branch | `main` | Phase 10 was implemented on the mainline branch |
+| Current HEAD commit | `5fc3c470b744ce7e06902be437f7672d7b7a8d56` | starting committed Phase 9 baseline |
+| Current mobile validation script | [`mobile-validation-full.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/mobile-validation-full.sh) now supports full implementation local and AWS/mobile validation | the full implementation has a distinct validation entrypoint |
+| Current metrics script | [`collect-conduit-traces.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/collect-conduit-traces.sh) now collects stack, ECS, and CloudWatch evidence for the full stack | live `chain_id` evidence has a dedicated collector |
+| Current mobile matrix | [`mobile-test-matrix.md`](../../../prototype/gbn-bridge-proto/docs/mobile-test-matrix.md) now documents the full implementation validation surface | prototype-era limitations are no longer the only recorded evidence model |
+| Current validation report file | [`GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md`](GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md) now exists | Phase 10 has a canonical report surface |
+| Current trace artifact collection | `collect-conduit-traces.sh` exists and supports `--chain-id` and `--require-chain-id` | live runs can preserve explicit end-to-end trace artifacts |
+| Current full-stack scripts | full implementation build/deploy/smoke/teardown assets exist from Phase 8 | Phase 10 can target the `gbn-conduit-full-*` stack |
 
 ---
 
@@ -78,7 +78,7 @@ If any gate fails, Phase 10 should stop.
 
 Current blocker:
 
-- Phases 1 through 9 are not yet implemented in this full-implementation track, so Phase 10 remains planning-ready only
+- live AWS/mobile evidence still requires an active AWS session, a deployed `gbn-conduit-full-*` stack, and a real mobile-network run
 
 ---
 
@@ -315,6 +315,14 @@ Phase 10 is not complete if:
 - there is no consolidated report
 - `chain_id` evidence is still incomplete in live runs
 
+Local implementation status:
+
+- report document exists
+- full validation script exists
+- trace collector exists
+- local distributed validation mode is available
+- live AWS/mobile evidence remains pending until the operator runs the scripts against a deployed stack
+
 ---
 
 ## 12. Risks And Blockers
@@ -341,4 +349,3 @@ The correct Phase 10 sign-off is not:
 - a local-only pass
 - a smoke-only note without measurements
 - a report that omits anomalies or missing trace evidence
-

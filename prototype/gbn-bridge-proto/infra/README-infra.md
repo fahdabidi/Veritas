@@ -39,7 +39,9 @@ There are now two V2 deployment surfaces in the repo:
 | `scripts/bootstrap-smoke.sh` | verifies stack wiring and ECS task-definition environment |
 | `scripts/smoke-conduit-full.sh` | prints stack outputs, ECS service counts, and trace-visible log groups for the full stack |
 | `scripts/mobile-validation.sh` | runs the Phase 11 local proxy or AWS/mobile validation workflow |
+| `scripts/mobile-validation-full.sh` | runs the GBN-PROTO-006 full implementation local or AWS/mobile validation workflow |
 | `scripts/collect-bridge-metrics.sh` | collects ECS and CloudWatch evidence for a deployed Phase 10/11 stack |
+| `scripts/collect-conduit-traces.sh` | collects full-stack CloudFormation, ECS, and CloudWatch `chain_id` evidence |
 | `scripts/relay-control-interactive-v2.sh` | small interactive wrapper around status, smoke, and teardown |
 | `scripts/teardown-bridge-test.sh` | deletes only `gbn-bridge-phase2-*` stacks |
 | `scripts/teardown-conduit-full.sh` | deletes only `gbn-conduit-full-*` stacks |
@@ -98,6 +100,17 @@ infra/scripts/deploy-conduit-full.sh \
 infra/scripts/smoke-conduit-full.sh \
   --region us-east-1 \
   --stack-name gbn-conduit-full-dev
+
+infra/scripts/mobile-validation-full.sh \
+  --mode local
+
+infra/scripts/mobile-validation-full.sh \
+  --mode aws \
+  --region us-east-1 \
+  --stack-name gbn-conduit-full-dev \
+  --chain-id REPLACE_WITH_LIVE_CHAIN_ID \
+  --mobile-context "carrier=REPLACE_ME;network=REPLACE_ME" \
+  --require-chain-id
 ```
 
 ## Current Full-Implementation Boundary
@@ -121,6 +134,12 @@ Current trace boundary:
 - bridge logs preserve `chain_id` on applied command ACKs and control/bootstrap progress
 
 The full stack is deployment-capable, but it is still pending live AWS/mobile evidence from later Proto006 phases.
+
+Phase 10 full-validation evidence should be collected with:
+
+- `scripts/mobile-validation-full.sh`
+- `scripts/collect-conduit-traces.sh`
+- `docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md`
 
 ## Current Prototype Boundary
 

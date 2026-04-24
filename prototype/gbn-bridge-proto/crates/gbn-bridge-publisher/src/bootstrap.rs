@@ -26,7 +26,11 @@ pub struct AuthorityBootstrapPlan {
 
 impl AuthorityBootstrapPlan {
     pub fn join_reply(&self) -> BootstrapJoinReply {
-        distribution::join_reply(self.creator_entry.clone(), self.response.clone())
+        distribution::join_reply(
+            &self.response.chain_id,
+            self.creator_entry.clone(),
+            self.response.clone(),
+        )
     }
 }
 
@@ -119,6 +123,7 @@ pub fn begin_bootstrap(
     let bootstrap_session_id = storage.next_bootstrap_id();
     let response = CreatorBootstrapResponse::sign(
         CreatorBootstrapResponseUnsigned {
+            chain_id: chain_id.to_string(),
             bootstrap_session_id: bootstrap_session_id.clone(),
             seed_bridge: bridge_bootstrap_entry(&seed_record, signing_key, config, now_ms)?,
             publisher_pub: publisher_pub.clone(),
@@ -130,6 +135,7 @@ pub fn begin_bootstrap(
 
     let bridge_set = BridgeSetResponse::sign(
         BridgeSetResponseUnsigned {
+            chain_id: chain_id.to_string(),
             bootstrap_session_id: bootstrap_session_id.clone(),
             bridge_entries: bridge_entries.clone(),
             response_expiry_ms: now_ms + config.bootstrap_response_ttl_ms,
@@ -139,6 +145,7 @@ pub fn begin_bootstrap(
 
     let seed_punch = punch::issue_seed_punch_instruction(
         signing_key,
+        chain_id,
         &bootstrap_session_id,
         &seed_record.bridge_id,
         creator_entry.clone(),

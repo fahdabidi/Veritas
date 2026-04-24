@@ -81,6 +81,7 @@ pub fn establish_seed_tunnel(
         .map(|lease| lease.udp_punch_port)
         .unwrap_or(seed_bridge.config().requested_udp_punch_port);
     let probe = BridgePunchProbe {
+        chain_id: plan.chain_id.clone(),
         bootstrap_session_id: active_attempt.bootstrap_session_id.clone(),
         source_node_id: seed_bridge.config().bridge_id.clone(),
         source_pub_key: seed_bridge.config().identity_pub.clone(),
@@ -115,6 +116,7 @@ pub fn fetch_bridge_set(
 
     let response = seed_bridge.serve_bridge_set(
         &BridgeSetRequest {
+            chain_id: plan.chain_id.clone(),
             bootstrap_session_id: plan.reply.response.bootstrap_session_id.clone(),
             creator_id: creator.config().creator_id.clone(),
             requested_bridge_count: plan.reply.response.assigned_bridge_count,

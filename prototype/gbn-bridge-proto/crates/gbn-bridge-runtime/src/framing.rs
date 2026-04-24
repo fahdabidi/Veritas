@@ -16,6 +16,7 @@ impl Default for FramePayloadConfig {
 }
 
 pub fn frame_payload(
+    chain_id: &str,
     session_id: &str,
     payload: &[u8],
     sent_at_ms: u64,
@@ -38,6 +39,7 @@ pub fn frame_payload(
         .into_iter()
         .enumerate()
         .map(|(index, ciphertext)| BridgeData {
+            chain_id: chain_id.to_string(),
             session_id: session_id.to_string(),
             frame_id: format!("{session_id}-frame-{index:06}"),
             sequence: index as u32,

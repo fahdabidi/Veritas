@@ -7,10 +7,12 @@ use gbn_bridge_protocol::{
 use crate::AuthorityResult;
 
 pub fn join_reply(
+    chain_id: &str,
     creator_entry: gbn_bridge_protocol::BootstrapDhtEntry,
     response: CreatorBootstrapResponse,
 ) -> BootstrapJoinReply {
     BootstrapJoinReply {
+        chain_id: chain_id.to_string(),
         creator_entry,
         response,
     }
@@ -26,6 +28,7 @@ pub fn issue_seed_assignment(
 ) -> AuthorityResult<BridgeSeedAssign> {
     BridgeSeedAssign::sign(
         BridgeSeedAssignUnsigned {
+            chain_id: bridge_set.chain_id.clone(),
             bootstrap_session_id: bridge_set.bootstrap_session_id.clone(),
             seed_bridge_id: seed_bridge_id.to_string(),
             creator_entry,

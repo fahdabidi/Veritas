@@ -25,6 +25,7 @@ pub mod server;
 pub mod service;
 pub mod signing;
 pub mod storage;
+pub mod trace;
 
 use gbn_bridge_protocol::{ProtocolError, DEFAULT_UDP_PUNCH_PORT};
 use thiserror::Error;

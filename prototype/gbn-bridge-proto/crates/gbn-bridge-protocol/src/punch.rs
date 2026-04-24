@@ -6,9 +6,11 @@ use crate::error::ProtocolError;
 use crate::signing::{
     ensure_not_expired, sign_payload, verify_payload, PublicKeyBytes, SignatureBytes,
 };
+use crate::trace::validate_chain_id;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgePunchStartUnsigned {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub initiator_id: String,
     pub target: BootstrapDhtEntry,
@@ -17,6 +19,7 @@ pub struct BridgePunchStartUnsigned {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgePunchStart {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub initiator_id: String,
     pub target: BootstrapDhtEntry,
@@ -29,9 +32,11 @@ impl BridgePunchStart {
         unsigned: BridgePunchStartUnsigned,
         signing_key: &SigningKey,
     ) -> Result<Self, ProtocolError> {
+        validate_chain_id(&unsigned.chain_id)?;
         let publisher_sig = sign_payload(&unsigned, signing_key)?;
 
         Ok(Self {
+            chain_id: unsigned.chain_id,
             bootstrap_session_id: unsigned.bootstrap_session_id,
             initiator_id: unsigned.initiator_id,
             target: unsigned.target,
@@ -42,6 +47,7 @@ impl BridgePunchStart {
 
     pub fn unsigned_payload(&self) -> BridgePunchStartUnsigned {
         BridgePunchStartUnsigned {
+            chain_id: self.chain_id.clone(),
             bootstrap_session_id: self.bootstrap_session_id.clone(),
             initiator_id: self.initiator_id.clone(),
             target: self.target.clone(),
@@ -54,6 +60,7 @@ impl BridgePunchStart {
         publisher_key: &PublicKeyBytes,
         now_ms: u64,
     ) -> Result<(), ProtocolError> {
+        validate_chain_id(&self.chain_id)?;
         self.target.verify_authority(publisher_key, now_ms)?;
         verify_payload(&self.unsigned_payload(), publisher_key, &self.publisher_sig)?;
         ensure_not_expired("bridge punch start", self.attempt_expiry_ms, now_ms)
@@ -62,6 +69,7 @@ impl BridgePunchStart {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgePunchProbe {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub source_node_id: String,
     pub source_pub_key: PublicKeyBytes,
@@ -72,6 +80,7 @@ pub struct BridgePunchProbe {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgePunchAck {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub source_node_id: String,
     pub responder_node_id: String,
@@ -94,6 +103,7 @@ pub enum BootstrapProgressStage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapProgress {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub reporter_id: String,
     pub stage: BootstrapProgressStage,
@@ -103,6 +113,7 @@ pub struct BootstrapProgress {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchAssignment {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub creator: BootstrapDhtEntry,
     pub requested_bridge_count: u16,
@@ -110,6 +121,7 @@ pub struct BatchAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeBatchAssignUnsigned {
+    pub chain_id: String,
     pub batch_id: String,
     pub bridge_id: String,
     pub window_started_at_ms: u64,
@@ -119,8 +131,12 @@ pub struct BridgeBatchAssignUnsigned {
 
 impl BridgeBatchAssignUnsigned {
     pub fn validate_shape(&self) -> Result<(), ProtocolError> {
+        validate_chain_id(&self.chain_id)?;
         if self.assignments.is_empty() {
             return Err(ProtocolError::EmptyBatchAssignments);
+        }
+        for assignment in &self.assignments {
+            validate_chain_id(&assignment.chain_id)?;
         }
 
         Ok(())
@@ -129,6 +145,7 @@ impl BridgeBatchAssignUnsigned {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeBatchAssign {
+    pub chain_id: String,
     pub batch_id: String,
     pub bridge_id: String,
     pub window_started_at_ms: u64,
@@ -146,6 +163,7 @@ impl BridgeBatchAssign {
         let publisher_sig = sign_payload(&unsigned, signing_key)?;
 
         Ok(Self {
+            chain_id: unsigned.chain_id,
             batch_id: unsigned.batch_id,
             bridge_id: unsigned.bridge_id,
             window_started_at_ms: unsigned.window_started_at_ms,
@@ -157,6 +175,7 @@ impl BridgeBatchAssign {
 
     pub fn unsigned_payload(&self) -> BridgeBatchAssignUnsigned {
         BridgeBatchAssignUnsigned {
+            chain_id: self.chain_id.clone(),
             batch_id: self.batch_id.clone(),
             bridge_id: self.bridge_id.clone(),
             window_started_at_ms: self.window_started_at_ms,

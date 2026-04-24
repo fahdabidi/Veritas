@@ -106,6 +106,7 @@ fn sample_creator_entry() -> BootstrapDhtEntry {
 
 fn sample_creator_join_request() -> CreatorJoinRequest {
     CreatorJoinRequest {
+        chain_id: "chain-bootstrap-001".into(),
         request_id: "join-001".into(),
         host_creator_id: "host-creator-01".into(),
         relay_bridge_id: "bridge-a".into(),
@@ -121,6 +122,7 @@ fn sample_creator_join_request() -> CreatorJoinRequest {
 fn sample_creator_bootstrap_response() -> CreatorBootstrapResponse {
     CreatorBootstrapResponse::sign(
         CreatorBootstrapResponseUnsigned {
+            chain_id: "chain-bootstrap-001".into(),
             bootstrap_session_id: "bootstrap-001".into(),
             seed_bridge: sample_seed_bridge_entry(),
             publisher_pub: publisher_pub(),
@@ -135,6 +137,7 @@ fn sample_creator_bootstrap_response() -> CreatorBootstrapResponse {
 fn sample_bridge_set_response() -> BridgeSetResponse {
     BridgeSetResponse::sign(
         BridgeSetResponseUnsigned {
+            chain_id: "chain-bootstrap-001".into(),
             bootstrap_session_id: "bootstrap-001".into(),
             bridge_entries: vec![sample_seed_bridge_entry(), sample_creator_entry()],
             response_expiry_ms: 45_000,
@@ -190,6 +193,7 @@ fn sample_bridge_revoke() -> BridgeRevoke {
 fn sample_bridge_punch_start() -> BridgePunchStart {
     BridgePunchStart::sign(
         BridgePunchStartUnsigned {
+            chain_id: "chain-bootstrap-001".into(),
             bootstrap_session_id: "bootstrap-001".into(),
             initiator_id: "bridge-01".into(),
             target: sample_creator_entry(),
@@ -203,11 +207,13 @@ fn sample_bridge_punch_start() -> BridgePunchStart {
 fn sample_bridge_batch_assign() -> BridgeBatchAssign {
     BridgeBatchAssign::sign(
         BridgeBatchAssignUnsigned {
+            chain_id: "chain-bootstrap-001".into(),
             batch_id: "batch-001".into(),
             bridge_id: "bridge-01".into(),
             window_started_at_ms: 20_000,
             window_length_ms: 500,
             assignments: vec![BatchAssignment {
+                chain_id: "chain-bootstrap-001".into(),
                 bootstrap_session_id: "bootstrap-001".into(),
                 creator: sample_creator_entry(),
                 requested_bridge_count: 9,
@@ -239,6 +245,7 @@ fn serde_round_trip_covers_phase_two_types() {
     assert_round_trip(&sample_creator_join_request());
     assert_round_trip(&sample_creator_bootstrap_response());
     assert_round_trip(&BridgeSetRequest {
+        chain_id: "chain-bootstrap-001".into(),
         bootstrap_session_id: "bootstrap-001".into(),
         creator_id: "creator-01".into(),
         requested_bridge_count: 9,
@@ -274,6 +281,7 @@ fn serde_round_trip_covers_phase_two_types() {
     assert_round_trip(&sample_bridge_revoke());
     assert_round_trip(&sample_bridge_punch_start());
     assert_round_trip(&BridgePunchProbe {
+        chain_id: "chain-bootstrap-001".into(),
         bootstrap_session_id: "bootstrap-001".into(),
         source_node_id: "bridge-01".into(),
         source_pub_key: bridge_identity_pub(),
@@ -282,6 +290,7 @@ fn serde_round_trip_covers_phase_two_types() {
         probe_nonce: 44,
     });
     assert_round_trip(&BridgePunchAck {
+        chain_id: "chain-bootstrap-001".into(),
         bootstrap_session_id: "bootstrap-001".into(),
         source_node_id: "bridge-01".into(),
         responder_node_id: "creator-01".into(),
@@ -290,6 +299,7 @@ fn serde_round_trip_covers_phase_two_types() {
         established_at_ms: 21_000,
     });
     assert_round_trip(&BootstrapProgress {
+        chain_id: "chain-bootstrap-001".into(),
         bootstrap_session_id: "bootstrap-001".into(),
         reporter_id: "bridge-01".into(),
         stage: BootstrapProgressStage::BridgeTunnelEstablished,
@@ -298,6 +308,7 @@ fn serde_round_trip_covers_phase_two_types() {
     });
     assert_round_trip(&sample_bridge_batch_assign());
     assert_round_trip(&BridgeOpen {
+        chain_id: "chain-upload-001".into(),
         session_id: "session-001".into(),
         creator_id: "creator-01".into(),
         bridge_id: "bridge-01".into(),
@@ -306,6 +317,7 @@ fn serde_round_trip_covers_phase_two_types() {
         expected_chunks: Some(10),
     });
     assert_round_trip(&BridgeData {
+        chain_id: "chain-upload-001".into(),
         session_id: "session-001".into(),
         frame_id: "frame-001".into(),
         sequence: 1,
@@ -314,12 +326,14 @@ fn serde_round_trip_covers_phase_two_types() {
         final_frame: false,
     });
     assert_round_trip(&BridgeAck {
+        chain_id: "chain-upload-001".into(),
         session_id: "session-001".into(),
         acked_sequence: 1,
         status: BridgeAckStatus::Accepted,
         acked_at_ms: 30_200,
     });
     assert_round_trip(&BridgeClose {
+        chain_id: "chain-upload-001".into(),
         session_id: "session-001".into(),
         closed_at_ms: 31_000,
         reason: BridgeCloseReason::Completed,
@@ -389,6 +403,7 @@ fn bootstrap_entry_expiry_and_signature_validation_are_enforced() {
 fn udp_punch_messages_round_trip_cleanly() {
     assert_round_trip(&sample_bridge_punch_start());
     assert_round_trip(&BridgePunchProbe {
+        chain_id: "chain-bootstrap-001".into(),
         bootstrap_session_id: "bootstrap-001".into(),
         source_node_id: "creator-01".into(),
         source_pub_key: creator_identity_pub(),
@@ -397,6 +412,7 @@ fn udp_punch_messages_round_trip_cleanly() {
         probe_nonce: 99,
     });
     assert_round_trip(&BridgePunchAck {
+        chain_id: "chain-bootstrap-001".into(),
         bootstrap_session_id: "bootstrap-001".into(),
         source_node_id: "creator-01".into(),
         responder_node_id: "bridge-01".into(),

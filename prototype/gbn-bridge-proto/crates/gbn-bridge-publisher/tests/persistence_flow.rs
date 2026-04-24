@@ -126,6 +126,7 @@ fn postgres_backed_authority_recovers_bridges_bootstrap_catalog_and_upload_sessi
         .begin_bootstrap_with_chain_id(
             "bootstrap-chain-01",
             gbn_bridge_protocol::CreatorJoinRequest {
+                chain_id: "bootstrap-chain-01".into(),
                 request_id: "join-01".into(),
                 host_creator_id: "host-a".into(),
                 relay_bridge_id: "bridge-a".into(),
@@ -144,6 +145,7 @@ fn postgres_backed_authority_recovers_bridges_bootstrap_catalog_and_upload_sessi
         .report_bootstrap_progress_with_chain_id(
             "bootstrap-chain-01",
             BootstrapProgress {
+                chain_id: "bootstrap-chain-01".into(),
                 bootstrap_session_id: bootstrap_plan.response.bootstrap_session_id.clone(),
                 reporter_id: "bridge-b".into(),
                 stage: BootstrapProgressStage::SeedTunnelEstablished,
@@ -165,6 +167,7 @@ fn postgres_backed_authority_recovers_bridges_bootstrap_catalog_and_upload_sessi
 
     authority
         .open_bridge_session(BridgeOpen {
+            chain_id: "upload-chain-01".into(),
             session_id: "session-01".into(),
             creator_id: "creator-a".into(),
             bridge_id: "bridge-a".into(),
@@ -177,6 +180,7 @@ fn postgres_backed_authority_recovers_bridges_bootstrap_catalog_and_upload_sessi
         .ingest_bridge_frame(
             "bridge-a",
             BridgeData {
+                chain_id: "upload-chain-01".into(),
                 session_id: "session-01".into(),
                 frame_id: "frame-01".into(),
                 sequence: 0,
@@ -189,6 +193,7 @@ fn postgres_backed_authority_recovers_bridges_bootstrap_catalog_and_upload_sessi
         .unwrap();
     authority
         .close_bridge_session(BridgeClose {
+            chain_id: "upload-chain-01".into(),
             session_id: "session-01".into(),
             closed_at_ms: base_now_ms + 2_003,
             reason: BridgeCloseReason::Completed,

@@ -10,6 +10,7 @@ pub mod messages;
 pub mod punch;
 pub mod session;
 pub mod signing;
+pub mod trace;
 
 pub use bootstrap::{
     BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BootstrapJoinReply, BridgeSeedAssign,
@@ -50,6 +51,7 @@ pub use signing::{
     canonical_json_bytes, ensure_not_expired, publisher_identity, sign_payload, verify_payload,
     PublicKeyBytes, SignatureBytes,
 };
+pub use trace::{validate_chain_id, ChainId, CHAIN_ID_FIELD_NAME};
 
 /// Default UDP punch port reserved for early Conduit bridge sessions.
 pub const DEFAULT_UDP_PUNCH_PORT: u16 = 443;

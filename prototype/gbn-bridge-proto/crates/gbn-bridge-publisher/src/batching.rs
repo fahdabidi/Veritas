@@ -118,6 +118,10 @@ fn finalize_current_batch(
         .assignments
         .into_iter()
         .map(|pending| BatchAssignment {
+            chain_id: pending
+                .chain_id
+                .clone()
+                .unwrap_or_else(|| pending.join_request.chain_id.clone()),
             bootstrap_session_id: pending.bootstrap_session_id,
             creator: pending.creator_entry,
             requested_bridge_count: config.bootstrap_bridge_count as u16,
@@ -126,6 +130,7 @@ fn finalize_current_batch(
 
     let bridge_assignments = punch::sign_batch_assignments(
         signing_key,
+        &format!("batch-{}", batch.batch_id),
         &batch.batch_id,
         &bridge_ids,
         &assignments,

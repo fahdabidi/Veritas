@@ -38,8 +38,14 @@ impl UploadSession {
         opened_at_ms: u64,
         config: UploadSessionConfig,
     ) -> RuntimeResult<Self> {
-        let frames = frame_payload(&session_id, payload, opened_at_ms, config.frame_payload)?;
         let chain_id = default_chain_id("upload", &creator.config().creator_id, &session_id);
+        let frames = frame_payload(
+            &chain_id,
+            &session_id,
+            payload,
+            opened_at_ms,
+            config.frame_payload,
+        )?;
 
         Ok(Self {
             session_id,
@@ -79,6 +85,7 @@ impl UploadSession {
 
     pub fn open_for_bridge(&self, bridge_id: &str) -> BridgeOpen {
         BridgeOpen {
+            chain_id: self.chain_id.clone(),
             session_id: self.session_id.clone(),
             creator_id: self.creator_id.clone(),
             bridge_id: bridge_id.to_string(),
@@ -90,6 +97,7 @@ impl UploadSession {
 
     pub fn close(&self, reason: BridgeCloseReason, closed_at_ms: u64) -> BridgeClose {
         BridgeClose {
+            chain_id: self.chain_id.clone(),
             session_id: self.session_id.clone(),
             closed_at_ms,
             reason,

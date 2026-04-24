@@ -20,6 +20,7 @@ impl ProgressReporter {
         reported_at_ms: u64,
     ) -> RuntimeResult<()> {
         let progress = BootstrapProgress {
+            chain_id: chain_id.to_string(),
             bootstrap_session_id: bootstrap_session_id.to_string(),
             reporter_id: reporter_id.to_string(),
             stage,

@@ -43,6 +43,7 @@ impl HostCreatorClient {
         self.publisher_client.begin_bootstrap(
             chain_id,
             gbn_bridge_protocol::CreatorJoinRequest {
+                chain_id: chain_id.to_string(),
                 request_id: request_id.to_string(),
                 host_creator_id: self.host_creator_id.clone(),
                 relay_bridge_id: relay_bridge_id.to_string(),

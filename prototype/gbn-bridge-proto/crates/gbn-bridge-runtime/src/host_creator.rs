@@ -46,6 +46,7 @@ impl HostCreator {
             relay_bridge.authority_client_mut().begin_bootstrap(
                 &chain_id,
                 gbn_bridge_protocol::CreatorJoinRequest {
+                    chain_id: chain_id.clone(),
                     request_id: request_id.to_string(),
                     host_creator_id: self.host_creator_id.clone(),
                     relay_bridge_id,

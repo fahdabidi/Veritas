@@ -104,6 +104,7 @@ fn creator_join_request(
     key_seed: u8,
 ) -> CreatorJoinRequest {
     CreatorJoinRequest {
+        chain_id: format!("chain-{request_id}"),
         request_id: request_id.into(),
         host_creator_id: "host-creator-01".into(),
         relay_bridge_id: relay_bridge_id.into(),

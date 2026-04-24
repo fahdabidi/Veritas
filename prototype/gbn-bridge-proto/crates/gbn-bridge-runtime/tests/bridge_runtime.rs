@@ -41,6 +41,7 @@ fn direct_bridge_config(bridge_id: &str, key_seed: u8, host: &str) -> ExitBridge
 
 fn join_request(request_id: &str, relay_bridge_id: &str, key_seed: u8) -> CreatorJoinRequest {
     CreatorJoinRequest {
+        chain_id: format!("chain-{request_id}"),
         request_id: request_id.into(),
         host_creator_id: "host-creator-01".into(),
         relay_bridge_id: relay_bridge_id.into(),
@@ -183,6 +184,7 @@ fn seed_bridge_establishes_acks_and_returns_bootstrap_payload() {
         .active_punch_attempt(&plan.response.bootstrap_session_id)
         .cloned()
         .map(|attempt| gbn_bridge_protocol::BridgePunchProbe {
+            chain_id: attempt.chain_id.clone(),
             bootstrap_session_id: attempt.bootstrap_session_id.clone(),
             source_node_id: bridge.config().bridge_id.clone(),
             source_pub_key: bridge.config().identity_pub.clone(),
@@ -205,6 +207,7 @@ fn seed_bridge_establishes_acks_and_returns_bootstrap_payload() {
     let bridge_set = bridge
         .serve_bridge_set(
             &BridgeSetRequest {
+                chain_id: "bridge-runtime-seed-test".into(),
                 bootstrap_session_id: plan.response.bootstrap_session_id.clone(),
                 creator_id: plan.creator_entry.node_id.clone(),
                 requested_bridge_count: 9,
@@ -287,6 +290,7 @@ fn brokered_bridge_never_exposes_ingress() {
     assert!(matches!(
         bridge.forward_creator_frame(
             BridgeData {
+                chain_id: "upload-chain-brokered".into(),
                 session_id: "session-001".into(),
                 frame_id: "frame-001".into(),
                 sequence: 1,

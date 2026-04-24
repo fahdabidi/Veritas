@@ -6,6 +6,7 @@ use crate::punch::BridgePunchStart;
 use crate::signing::{
     ensure_not_expired, sign_payload, verify_payload, PublicKeyBytes, SignatureBytes,
 };
+use crate::trace::validate_chain_id;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCreator {
@@ -86,6 +87,7 @@ impl BootstrapDhtEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatorJoinRequest {
+    pub chain_id: String,
     pub request_id: String,
     pub host_creator_id: String,
     pub relay_bridge_id: String,
@@ -94,6 +96,7 @@ pub struct CreatorJoinRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatorBootstrapResponseUnsigned {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub seed_bridge: BootstrapDhtEntry,
     pub publisher_pub: PublicKeyBytes,
@@ -103,6 +106,7 @@ pub struct CreatorBootstrapResponseUnsigned {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatorBootstrapResponse {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub seed_bridge: BootstrapDhtEntry,
     pub publisher_pub: PublicKeyBytes,
@@ -116,9 +120,11 @@ impl CreatorBootstrapResponse {
         unsigned: CreatorBootstrapResponseUnsigned,
         signing_key: &SigningKey,
     ) -> Result<Self, ProtocolError> {
+        validate_chain_id(&unsigned.chain_id)?;
         let publisher_sig = sign_payload(&unsigned, signing_key)?;
 
         Ok(Self {
+            chain_id: unsigned.chain_id,
             bootstrap_session_id: unsigned.bootstrap_session_id,
             seed_bridge: unsigned.seed_bridge,
             publisher_pub: unsigned.publisher_pub,
@@ -130,6 +136,7 @@ impl CreatorBootstrapResponse {
 
     pub fn unsigned_payload(&self) -> CreatorBootstrapResponseUnsigned {
         CreatorBootstrapResponseUnsigned {
+            chain_id: self.chain_id.clone(),
             bootstrap_session_id: self.bootstrap_session_id.clone(),
             seed_bridge: self.seed_bridge.clone(),
             publisher_pub: self.publisher_pub.clone(),
@@ -143,6 +150,7 @@ impl CreatorBootstrapResponse {
         publisher_key: &PublicKeyBytes,
         now_ms: u64,
     ) -> Result<(), ProtocolError> {
+        validate_chain_id(&self.chain_id)?;
         verify_payload(&self.unsigned_payload(), publisher_key, &self.publisher_sig)?;
         self.seed_bridge.verify_authority(publisher_key, now_ms)?;
         ensure_not_expired(
@@ -155,6 +163,7 @@ impl CreatorBootstrapResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapJoinReply {
+    pub chain_id: String,
     pub creator_entry: BootstrapDhtEntry,
     pub response: CreatorBootstrapResponse,
 }
@@ -165,6 +174,12 @@ impl BootstrapJoinReply {
         publisher_key: &PublicKeyBytes,
         now_ms: u64,
     ) -> Result<(), ProtocolError> {
+        validate_chain_id(&self.chain_id)?;
+        if self.response.chain_id != self.chain_id {
+            return Err(ProtocolError::Serialization(
+                "bootstrap join reply chain_id mismatch".into(),
+            ));
+        }
         self.creator_entry.verify_authority(publisher_key, now_ms)?;
         self.response.verify_authority(publisher_key, now_ms)
     }
@@ -172,6 +187,7 @@ impl BootstrapJoinReply {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeSetRequest {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub creator_id: String,
     pub requested_bridge_count: u16,
@@ -179,6 +195,7 @@ pub struct BridgeSetRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeSetResponseUnsigned {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub bridge_entries: Vec<BootstrapDhtEntry>,
     pub response_expiry_ms: u64,
@@ -186,6 +203,7 @@ pub struct BridgeSetResponseUnsigned {
 
 impl BridgeSetResponseUnsigned {
     pub fn validate_shape(&self) -> Result<(), ProtocolError> {
+        validate_chain_id(&self.chain_id)?;
         if self.bridge_entries.is_empty() {
             return Err(ProtocolError::EmptyBridgeSet);
         }
@@ -196,6 +214,7 @@ impl BridgeSetResponseUnsigned {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeSetResponse {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub bridge_entries: Vec<BootstrapDhtEntry>,
     pub response_expiry_ms: u64,
@@ -211,6 +230,7 @@ impl BridgeSetResponse {
         let publisher_sig = sign_payload(&unsigned, signing_key)?;
 
         Ok(Self {
+            chain_id: unsigned.chain_id,
             bootstrap_session_id: unsigned.bootstrap_session_id,
             bridge_entries: unsigned.bridge_entries,
             response_expiry_ms: unsigned.response_expiry_ms,
@@ -220,6 +240,7 @@ impl BridgeSetResponse {
 
     pub fn unsigned_payload(&self) -> BridgeSetResponseUnsigned {
         BridgeSetResponseUnsigned {
+            chain_id: self.chain_id.clone(),
             bootstrap_session_id: self.bootstrap_session_id.clone(),
             bridge_entries: self.bridge_entries.clone(),
             response_expiry_ms: self.response_expiry_ms,
@@ -243,6 +264,7 @@ impl BridgeSetResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeSeedAssignUnsigned {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub seed_bridge_id: String,
     pub creator_entry: BootstrapDhtEntry,
@@ -253,14 +275,25 @@ pub struct BridgeSeedAssignUnsigned {
 
 impl BridgeSeedAssignUnsigned {
     pub fn validate_shape(&self) -> Result<(), ProtocolError> {
+        validate_chain_id(&self.chain_id)?;
         if self.bootstrap_session_id.trim().is_empty() || self.seed_bridge_id.trim().is_empty() {
             return Err(ProtocolError::Serialization(
                 "bridge seed assignment requires non-empty identifiers".into(),
             ));
         }
+        if self.bridge_set.chain_id != self.chain_id {
+            return Err(ProtocolError::Serialization(
+                "bridge seed assignment bridge set chain mismatch".into(),
+            ));
+        }
         if self.bridge_set.bootstrap_session_id != self.bootstrap_session_id {
             return Err(ProtocolError::Serialization(
                 "bridge seed assignment bridge set session mismatch".into(),
+            ));
+        }
+        if self.seed_punch.chain_id != self.chain_id {
+            return Err(ProtocolError::Serialization(
+                "bridge seed assignment punch chain mismatch".into(),
             ));
         }
         if self.seed_punch.bootstrap_session_id != self.bootstrap_session_id {
@@ -279,6 +312,7 @@ impl BridgeSeedAssignUnsigned {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeSeedAssign {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub seed_bridge_id: String,
     pub creator_entry: BootstrapDhtEntry,
@@ -296,6 +330,7 @@ impl BridgeSeedAssign {
         unsigned.validate_shape()?;
         let publisher_sig = sign_payload(&unsigned, signing_key)?;
         Ok(Self {
+            chain_id: unsigned.chain_id,
             bootstrap_session_id: unsigned.bootstrap_session_id,
             seed_bridge_id: unsigned.seed_bridge_id,
             creator_entry: unsigned.creator_entry,
@@ -308,6 +343,7 @@ impl BridgeSeedAssign {
 
     pub fn unsigned_payload(&self) -> BridgeSeedAssignUnsigned {
         BridgeSeedAssignUnsigned {
+            chain_id: self.chain_id.clone(),
             bootstrap_session_id: self.bootstrap_session_id.clone(),
             seed_bridge_id: self.seed_bridge_id.clone(),
             creator_entry: self.creator_entry.clone(),

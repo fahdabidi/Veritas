@@ -263,6 +263,7 @@ fn catalog_and_join_routes_accept_signed_requests() {
             actor_id: "host-creator-01".into(),
             body: BootstrapJoinBody {
                 request: gbn_bridge_protocol::CreatorJoinRequest {
+                    chain_id: "chain-bootstrap-01".into(),
                     request_id: "join-01".into(),
                     host_creator_id: "host-creator-01".into(),
                     relay_bridge_id: "bridge-relay".into(),
@@ -332,6 +333,7 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
             actor_id: "host-creator-01".into(),
             body: BootstrapJoinBody {
                 request: gbn_bridge_protocol::CreatorJoinRequest {
+                    chain_id: "chain-progress".into(),
                     request_id: "join-progress".into(),
                     host_creator_id: "host-creator-01".into(),
                     relay_bridge_id: "bridge-progress".into(),
@@ -361,6 +363,7 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
             actor_id: "bridge-progress".into(),
             body: BootstrapProgressBody {
                 progress: BootstrapProgress {
+                    chain_id: "chain-progress".into(),
                     bootstrap_session_id: bootstrap_session_id.clone(),
                     reporter_id: "bridge-progress".into(),
                     stage: BootstrapProgressStage::SeedTunnelEstablished,

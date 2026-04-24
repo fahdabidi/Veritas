@@ -8,6 +8,8 @@ mod test_bridge_registration;
 mod test_bridge_reuse_timeout;
 #[path = "integration/test_catalog_refresh.rs"]
 mod test_catalog_refresh;
+#[path = "integration/test_chain_id.rs"]
+mod test_chain_id;
 #[path = "integration/test_creator_failover.rs"]
 mod test_creator_failover;
 #[path = "integration/test_first_creator_bootstrap.rs"]

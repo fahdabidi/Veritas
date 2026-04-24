@@ -22,9 +22,11 @@ pub fn build_remaining_bridge_assignments(
 
     punch::sign_batch_assignments(
         signing_key,
+        &session.chain_id,
         &format!("bootstrap-fanout-{}", session.bootstrap_session_id),
         &bridge_ids,
         &[BatchAssignment {
+            chain_id: session.chain_id.clone(),
             bootstrap_session_id: session.bootstrap_session_id.clone(),
             creator: session.creator_entry.clone(),
             requested_bridge_count: session.creator_response.assigned_bridge_count,

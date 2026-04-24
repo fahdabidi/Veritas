@@ -16,6 +16,9 @@ pub fn open_session_with_chain_id(
     chain_id: Option<&str>,
     open: BridgeOpen,
 ) -> AuthorityResult<()> {
+    let resolved_chain_id = chain_id
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| open.chain_id.clone());
     match storage.upload_sessions.get_mut(&open.session_id) {
         Some(existing) => {
             if existing.creator_id != open.creator_id {
@@ -32,7 +35,7 @@ pub fn open_session_with_chain_id(
                 });
             }
 
-            match (&existing.chain_id, chain_id) {
+            match (&existing.chain_id, Some(resolved_chain_id.as_str())) {
                 (Some(expected), Some(actual)) if expected != actual => {
                     return Err(AuthorityError::ChainIdMismatch {
                         context: "upload session open",
@@ -56,7 +59,7 @@ pub fn open_session_with_chain_id(
         None => {
             storage.upload_sessions.insert(
                 open.session_id.clone(),
-                UploadSessionRecord::new(&open, chain_id.map(ToOwned::to_owned)),
+                UploadSessionRecord::new(&open, Some(resolved_chain_id)),
             );
             Ok(())
         }
@@ -105,6 +108,10 @@ pub fn ingest_frame_with_chain_id(
         }
         _ => {}
     }
+    let resolved_chain_id = chain_id
+        .map(ToOwned::to_owned)
+        .or_else(|| session.chain_id.clone())
+        .unwrap_or_else(|| frame.chain_id.clone());
 
     if let Some(existing_sequence) = session.frame_id_to_sequence.get(&frame.frame_id) {
         let status = if session.completed_at_ms.is_some() {
@@ -113,6 +120,7 @@ pub fn ingest_frame_with_chain_id(
             BridgeAckStatus::Duplicate
         };
         return Ok(build_ack(
+            &resolved_chain_id,
             &session.session_id,
             *existing_sequence,
             status,
@@ -122,6 +130,7 @@ pub fn ingest_frame_with_chain_id(
 
     if session.frames_by_sequence.contains_key(&frame.sequence) {
         return Ok(build_ack(
+            &resolved_chain_id,
             &session.session_id,
             frame.sequence,
             BridgeAckStatus::Duplicate,
@@ -136,9 +145,7 @@ pub fn ingest_frame_with_chain_id(
         frame.sequence,
         IngestedFrameRecord {
             via_bridge_id: via_bridge_id.to_string(),
-            chain_id: chain_id
-                .map(ToOwned::to_owned)
-                .or_else(|| session.chain_id.clone()),
+            chain_id: Some(resolved_chain_id.clone()),
             frame: frame.clone(),
             received_at_ms,
         },
@@ -152,6 +159,7 @@ pub fn ingest_frame_with_chain_id(
     };
 
     Ok(build_ack(
+        &resolved_chain_id,
         &session.session_id,
         frame.sequence,
         status,
@@ -171,6 +179,9 @@ pub fn close_session_with_chain_id(
     chain_id: Option<&str>,
     close: BridgeClose,
 ) -> AuthorityResult<()> {
+    let resolved_chain_id = chain_id
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| close.chain_id.clone());
     let session = storage
         .upload_sessions
         .get_mut(&close.session_id)
@@ -178,7 +189,7 @@ pub fn close_session_with_chain_id(
             session_id: close.session_id.clone(),
         })?;
 
-    match (&session.chain_id, chain_id) {
+    match (&session.chain_id, Some(resolved_chain_id.as_str())) {
         (Some(expected), Some(actual)) if expected != actual => {
             return Err(AuthorityError::ChainIdMismatch {
                 context: "upload session close",

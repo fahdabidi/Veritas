@@ -142,7 +142,7 @@ impl HttpJsonTransport {
 }
 
 pub fn default_chain_id(prefix: &str, actor_id: &str, request_id: &str) -> String {
-    format!("{prefix}-{actor_id}-{request_id}")
+    crate::trace::default_chain_id(prefix, actor_id, request_id)
 }
 
 pub fn default_request_id(prefix: &str, actor_id: &str, sent_at_ms: u64) -> String {

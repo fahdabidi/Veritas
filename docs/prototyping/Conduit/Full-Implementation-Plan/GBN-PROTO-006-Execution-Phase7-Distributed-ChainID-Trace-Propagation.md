@@ -1,11 +1,12 @@
 # GBN-PROTO-006 - Execution Phase 7 Detailed Plan: Distributed ChainID Trace Propagation
 
-**Status:** Ready to start after Phase 6 real publisher receiver and ACK path is implemented and validated  
+**Status:** Completed - implemented and validated locally on 2026-04-24
 **Primary Goal:** complete and enforce one canonical `chain_id` propagation model across Conduit protocol messages, runtime clients, publisher services, persistence records, logs, metrics, validation scripts, and distributed tests, while preserving the V1 field name `chain_id` and the service boundaries introduced in Phases 1 through 6  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
 **Phase 6 Detailed Plan:** [GBN-PROTO-006-Execution-Phase6-Real-Publisher-Receiver-And-ACK-Path](GBN-PROTO-006-Execution-Phase6-Real-Publisher-Receiver-And-ACK-Path.md)  
-**Starting Conduit Baseline:** `2b6d5c5d24e269e96e3fdc820f3f90669607414a`
+**Starting Conduit Baseline:** `b44a1713a022ed9e5213831798cc3ee98738b245`
+**Validation Outcome:** V2 `cargo fmt --all --check` and `cargo test --workspace` passed, WSL local `mobile-validation.sh --mode local` passed with explicit chain-id evidence, protected V1 path diff stayed clean, and V1 `cargo check --workspace` plus `cargo test -p mcn-router-sim` passed
 
 ---
 
@@ -16,17 +17,17 @@ These findings should drive Phase 7 instead of being rediscovered during impleme
 | Item | Current Value | Why It Matters |
 |---|---|---|
 | Current branch | `main` | Phase 7 should record the mainline commit used to begin trace propagation hardening |
-| Current HEAD commit | `2b6d5c5d24e269e96e3fdc820f3f90669607414a` | current committed Conduit baseline still lacks a canonical distributed `chain_id` implementation |
-| Current protocol trace module | no `trace.rs` exists under [`gbn-bridge-protocol/src`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-protocol/src) | proves the protocol crate still has no centralized trace type or helpers |
-| Current runtime trace module | no `trace.rs` exists under [`gbn-bridge-runtime/src`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src) | runtime trace generation / forwarding rules are still unfactored |
-| Current publisher trace module | no `trace.rs` exists under [`gbn-bridge-publisher/src`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src) | publisher trace persistence and emission rules are still unfactored |
-| Current code search result | `rg -n "chain_id|trace" prototype/gbn-bridge-proto/crates/gbn-bridge-protocol prototype/gbn-bridge-proto/crates/gbn-bridge-runtime prototype/gbn-bridge-proto/crates/gbn-bridge-publisher` returns no V2 `chain_id` hits | confirms the field and its helpers are still effectively absent from the V2 code path |
-| Current bootstrap protocol types | [`bootstrap.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-protocol/src/bootstrap.rs) defines `CreatorJoinRequest`, `CreatorBootstrapResponse`, `BridgeSetRequest`, and `BridgeSetResponse` without `chain_id` | first-contact and refresh bootstrap messages still cannot carry a root distributed trace |
-| Current punch and progress protocol types | [`punch.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-protocol/src/punch.rs) defines `BridgePunchStart`, `BridgePunchProbe`, `BridgePunchAck`, `BootstrapProgress`, and `BridgeBatchAssign` without `chain_id` | bridge command delivery, bootstrap progress, and fanout still cannot be correlated end-to-end |
-| Current data-path protocol types | [`session.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-protocol/src/session.rs) defines `BridgeOpen`, `BridgeData`, `BridgeAck`, and `BridgeClose` without `chain_id` | receiver and ACK paths still cannot carry one root trace through payload ingress |
-| Current validation artifacts | no `test_chain_id.rs` exists under `prototype/gbn-bridge-proto/tests/integration/` | there is no integration test that proves end-to-end trace continuity |
-| Current trace design doc | no `docs/chain-id-design.md` exists under `prototype/gbn-bridge-proto/docs/` | there is no V2-local reference that defines canonical trace behavior |
-| Current AWS/mobile validation output | [`mobile-validation.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/mobile-validation.sh) runs tests and smoke checks but emits no `chain_id` correlation output | live or local validation artifacts still cannot be stitched together by one distributed trace id |
+| Current HEAD commit | `b44a1713a022ed9e5213831798cc3ee98738b245` | current committed Conduit baseline was the starting point for the completed Phase 7 trace-hardening pass |
+| Current protocol trace module | [`trace.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-protocol/src/trace.rs) exists and exports `ChainId`, `CHAIN_ID_FIELD_NAME`, and `validate_chain_id` | the protocol crate now has one centralized trace helper surface |
+| Current runtime trace module | [`trace.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-runtime/src/trace.rs) exists and defines canonical generation/import helpers | runtime trace generation and forwarding are now centralized |
+| Current publisher trace module | [`trace.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/trace.rs) exists and validates inherited/persisted `chain_id` values | publisher-side trace persistence and matching rules are now centralized |
+| Current code search result | `rg -n "chain_id" prototype/gbn-bridge-proto/crates prototype/gbn-bridge-proto/tests prototype/gbn-bridge-proto/infra/scripts prototype/gbn-bridge-proto/docs` returns coverage across protocol, runtime, publisher, tests, scripts, and docs | confirms `chain_id` is now a first-class V2 field instead of an architectural placeholder |
+| Current bootstrap protocol types | [`bootstrap.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-protocol/src/bootstrap.rs) now carries `chain_id` on `CreatorJoinRequest`, `CreatorBootstrapResponse`, `BootstrapJoinReply`, `BridgeSetRequest`, `BridgeSetResponse`, and `BridgeSeedAssign` | first-contact and refresh bootstrap messages now preserve one root distributed trace |
+| Current punch and progress protocol types | [`punch.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-protocol/src/punch.rs) now carries `chain_id` on `BridgePunchStart`, `BridgePunchProbe`, `BridgePunchAck`, `BootstrapProgress`, `BatchAssignment`, and `BridgeBatchAssign` | bridge command delivery, bootstrap progress, and batched fanout now preserve trace continuity |
+| Current data-path protocol types | [`session.rs`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-protocol/src/session.rs) now carries `chain_id` on `BridgeOpen`, `BridgeData`, `BridgeAck`, and `BridgeClose` | receiver and ACK paths now preserve one root trace through payload ingress |
+| Current validation artifacts | [`test_chain_id.rs`](../../../prototype/gbn-bridge-proto/tests/integration/test_chain_id.rs) exists under the root integration harness | there is now a dedicated integration test that proves end-to-end chain-id continuity |
+| Current trace design doc | [`docs/chain-id-design.md`](../../../prototype/gbn-bridge-proto/docs/chain-id-design.md) exists | the V2 workspace now has one local reference for canonical trace behavior |
+| Current AWS/mobile validation output | [`mobile-validation.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/mobile-validation.sh) prints deterministic local chain-id evidence and [`collect-bridge-metrics.sh`](../../../prototype/gbn-bridge-proto/infra/scripts/collect-bridge-metrics.sh) accepts `--chain-id` log filtering | local and AWS/mobile validation artifacts can now preserve or filter by one distributed trace id |
 
 ---
 
@@ -90,7 +91,7 @@ If any gate fails, Phase 7 should stop.
 
 Current blocker:
 
-- Phases 1 through 6 are not yet implemented in this full-implementation track, so Phase 7 remains planning-ready only
+- none after local Phase 7 validation; Phases 1 through 6 are implemented and the Phase 7 trace surface is now live across protocol, persistence, services, tests, and scripts
 
 ---
 

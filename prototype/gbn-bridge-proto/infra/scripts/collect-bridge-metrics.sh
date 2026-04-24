@@ -4,10 +4,11 @@ set -euo pipefail
 STACK_NAME="${GBN_BRIDGE_STACK_NAME:-gbn-bridge-phase2-dev}"
 REGION="${GBN_BRIDGE_AWS_REGION:-${AWS_REGION:-us-east-1}}"
 WINDOW_MINUTES="${GBN_BRIDGE_METRICS_WINDOW_MINUTES:-15}"
+CHAIN_ID="${GBN_BRIDGE_CHAIN_ID:-}"
 
 usage() {
   cat <<USAGE
-Usage: $0 [--stack-name NAME] [--region REGION] [--window-minutes MINUTES]
+Usage: $0 [--stack-name NAME] [--region REGION] [--window-minutes MINUTES] [--chain-id ID]
 
 Collect a compact Phase 11 metrics snapshot for the V2 Conduit prototype stack.
 This is a read-only helper for AWS/mobile validation runs.
@@ -19,6 +20,7 @@ while [[ $# -gt 0 ]]; do
     --stack-name) STACK_NAME="$2"; shift 2 ;;
     --region) REGION="$2"; shift 2 ;;
     --window-minutes) WINDOW_MINUTES="$2"; shift 2 ;;
+    --chain-id) CHAIN_ID="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -54,6 +56,9 @@ echo "Phase 11 metrics snapshot"
 echo "Stack: $STACK_NAME"
 echo "Region: $REGION"
 echo "WindowMinutes: $WINDOW_MINUTES"
+if [[ -n "$CHAIN_ID" ]]; then
+  echo "ChainIdFilter: $CHAIN_ID"
+fi
 echo "UdpPunchPort: $UDP_PORT"
 echo "BatchWindowMs: $BATCH_WINDOW"
 
@@ -69,6 +74,10 @@ aws ecs describe-services \
 print_log_summary() {
   local log_group="$1"
   local label="$2"
+  local -a filter_args=()
+  if [[ -n "$CHAIN_ID" ]]; then
+    filter_args+=(--filter-pattern "\"$CHAIN_ID\"")
+  fi
 
   echo
   echo "$label recent log stream summary"
@@ -87,6 +96,7 @@ print_log_summary() {
     --log-group-name "$log_group" \
     --start-time "$start_ms" \
     --limit 20 \
+    "${filter_args[@]}" \
     --query "events[].{Timestamp:timestamp,Message:message}" \
     --output table || true
 }

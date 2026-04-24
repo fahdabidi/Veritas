@@ -14,6 +14,7 @@ pub enum PunchAuthorization {
 
 #[derive(Debug, Clone)]
 pub struct ActivePunchAttempt {
+    pub chain_id: String,
     pub bootstrap_session_id: String,
     pub authorization: PunchAuthorization,
     pub target: BootstrapDhtEntry,
@@ -60,6 +61,7 @@ impl PunchManager {
         }
 
         self.insert_attempt(
+            instruction.chain_id,
             instruction.bootstrap_session_id,
             PunchAuthorization::PublisherInstruction,
             instruction.target,
@@ -80,6 +82,7 @@ impl PunchManager {
         let bootstrap_session_id = format!("refresh-{:06}", self.next_refresh_session_seq);
 
         self.insert_attempt(
+            bootstrap_session_id.clone(),
             bootstrap_session_id,
             PunchAuthorization::CreatorRefresh,
             target.clone(),
@@ -120,6 +123,7 @@ impl PunchManager {
         }
 
         Ok(BridgePunchAck {
+            chain_id: attempt.chain_id.clone(),
             bootstrap_session_id: bootstrap_session_id.to_string(),
             source_node_id: source_node_id.to_string(),
             responder_node_id: responder_node_id.to_string(),
@@ -131,6 +135,7 @@ impl PunchManager {
 
     fn insert_attempt(
         &mut self,
+        chain_id: String,
         bootstrap_session_id: String,
         authorization: PunchAuthorization,
         target: BootstrapDhtEntry,
@@ -142,6 +147,7 @@ impl PunchManager {
         self.attempts.insert(
             bootstrap_session_id.clone(),
             ActivePunchAttempt {
+                chain_id: chain_id.clone(),
                 bootstrap_session_id: bootstrap_session_id.clone(),
                 authorization,
                 target: target.clone(),
@@ -151,6 +157,7 @@ impl PunchManager {
         );
 
         Ok(BridgePunchProbe {
+            chain_id,
             bootstrap_session_id,
             source_node_id: source.bridge_id.clone(),
             source_pub_key: source.bridge_identity_pub.clone(),

@@ -119,6 +119,7 @@ fn bootstrap_response(
 ) -> CreatorBootstrapResponse {
     CreatorBootstrapResponse::sign(
         CreatorBootstrapResponseUnsigned {
+            chain_id: "bootstrap-chain-001".into(),
             bootstrap_session_id: "bootstrap-001".into(),
             seed_bridge,
             publisher_pub: publisher_public_key(signing_key),

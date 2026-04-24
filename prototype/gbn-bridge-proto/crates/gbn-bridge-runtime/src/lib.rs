@@ -31,6 +31,7 @@ pub mod reachability;
 pub mod seed_catalog;
 pub mod selector;
 pub mod session;
+pub mod trace;
 
 use gbn_bridge_protocol::{ProtocolError, ReachabilityClass};
 use gbn_bridge_publisher::AuthorityError;
@@ -72,6 +73,7 @@ pub use punch::{ActivePunchAttempt, PunchAuthorization, PunchManager};
 pub use punch_fanout::{CreatorPunchAck, CreatorPunchAttempt, FanoutSource, PunchFanout};
 pub use seed_catalog::SeedCatalog;
 pub use session::{UploadSession, UploadSessionConfig};
+pub use trace::import_chain_id;
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 

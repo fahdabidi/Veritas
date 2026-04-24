@@ -647,6 +647,7 @@ impl ExitBridgeRuntime {
         control_client.send_progress(
             &chain_id,
             gbn_bridge_protocol::BootstrapProgress {
+                chain_id: chain_id.clone(),
                 bootstrap_session_id: bootstrap_session_id.to_string(),
                 reporter_id: self.config.bridge_id.clone(),
                 stage,

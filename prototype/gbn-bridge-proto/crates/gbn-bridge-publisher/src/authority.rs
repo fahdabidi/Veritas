@@ -293,7 +293,7 @@ impl PublisherAuthority {
         request: CreatorJoinRequest,
         now_ms: u64,
     ) -> AuthorityResult<AuthorityBootstrapPlan> {
-        let chain_id = request.request_id.clone();
+        let chain_id = request.chain_id.clone();
         self.begin_bootstrap_with_chain_id(&chain_id, request, now_ms)
     }
 
@@ -330,7 +330,7 @@ impl PublisherAuthority {
         request: CreatorJoinRequest,
         now_ms: u64,
     ) -> AuthorityResult<BootstrapJoinReply> {
-        let chain_id = request.request_id.clone();
+        let chain_id = request.chain_id.clone();
         self.begin_bootstrap_reply_with_chain_id(&chain_id, request, now_ms)
     }
 
@@ -789,6 +789,7 @@ impl PublisherAuthority {
             )?;
             let creator_response = gbn_bridge_protocol::CreatorBootstrapResponse::sign(
                 gbn_bridge_protocol::CreatorBootstrapResponseUnsigned {
+                    chain_id: current.chain_id.clone(),
                     bootstrap_session_id: bootstrap_session_id.clone(),
                     seed_bridge: new_seed_entry,
                     publisher_pub: self.publisher_pub.clone(),
@@ -799,6 +800,7 @@ impl PublisherAuthority {
             )?;
             let seed_punch = crate::punch::issue_seed_punch_instruction(
                 &self.signing_key,
+                &current.chain_id,
                 &bootstrap_session_id,
                 &new_seed_record.bridge_id,
                 creator_entry.clone(),

@@ -19,4 +19,6 @@ data:
   GBN_BRIDGE_POLL_INTERVAL_MS: "250"
   GBN_BRIDGE_STACK_ENV: "dev-local"
   GBN_BRIDGE_CLOUDWATCH_ENABLED: "false"
+  GBN_BRIDGE_METRICS_BIND_ADDR: "0.0.0.0:9100"
+  GBN_BRIDGE_OTLP_ENDPOINT: "http://tempo.observability.svc.cluster.local:4317"
   RUST_LOG: "info"

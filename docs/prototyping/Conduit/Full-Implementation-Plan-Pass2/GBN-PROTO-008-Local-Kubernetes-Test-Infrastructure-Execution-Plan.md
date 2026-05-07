@@ -1,7 +1,7 @@
 # GBN-PROTO-008 - Local Kubernetes Test Infrastructure - Execution Plan
 
 **Document ID:** GBN-PROTO-008
-**Status:** Active - Phases 1 and 2 implemented locally; Phases 3 and 4 pending
+**Status:** Implemented locally - Phases 1, 2, 3, and 4 complete
 **Last Updated:** 2026-05-07
 **Related Docs:**
 [GBN-PROTO-007 V2-V1 Parity Execution Plan](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md),
@@ -29,8 +29,8 @@ CloudWatch + `aws ecs`.
 |---|---|---|
 | 1 | Local Kubernetes Cluster + Conduit Manifests | `[x]` |
 | 2 | Observability Stack (Prometheus + Grafana + Loki + Tempo) | `[x]` |
-| 3 | Prometheus Metrics Emission (variant of GBN-PROTO-007 Phase 3) | `[ ]` |
-| 4 | Local Kubernetes Operator Script (variant of GBN-PROTO-007 Phase 5) | `[ ]` |
+| 3 | Prometheus Metrics Emission (variant of GBN-PROTO-007 Phase 3) | `[x]` |
+| 4 | Local Kubernetes Operator Script (variant of GBN-PROTO-007 Phase 5) | `[x]` |
 
 ---
 
@@ -243,7 +243,8 @@ Variant of GBN-PROTO-007 Phase 5. New script
 operator panel but using `kubectl exec` instead of `aws ecs execute-command`. Same menu
 items (Status / DumpBridges / DumpFrames / SendDummy / TriggerCommand / etc.). LiveMetrics
 opens Grafana via `kubectl port-forward` and prints the URL. Trace collection after
-SendDummy queries Tempo via its HTTP API for a `chain_id` filter and prints the result.
+SendDummy prints Grafana Tempo and Loki deep links for the returned `chain_id` and can
+grep recent pod logs for the same chain.
 
 ---
 

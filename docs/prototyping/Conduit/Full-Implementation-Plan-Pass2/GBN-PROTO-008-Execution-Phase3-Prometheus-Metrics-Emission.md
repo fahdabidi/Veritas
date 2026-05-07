@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 3 Detailed Plan: Prometheus Metrics Emission + OTLP Tracing
 
-**Status:** Pending — variant of GBN-PROTO-007 Phase 3
+**Status:** Implemented - variant of GBN-PROTO-007 Phase 3
 **Primary Goal:** add a `/metrics` HTTP endpoint to each Conduit V2 service binary using
 the `prometheus` Rust crate, exposing the same counter set as the AWS variant
 (`AuthorityMetricsSnapshot`, new `ReceiverMetricsSnapshot`, `BridgeMetricsSnapshot`).
@@ -19,15 +19,13 @@ push design from [GBN-PROTO-007 Phase 3](GBN-PROTO-007-Execution-Phase3-CloudWat
 |---|---|---|
 | Existing authority counters | [`AuthorityMetricsSnapshot`](../../../prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/src/metrics.rs) | reused; new export mechanism wraps them |
 | Existing trace propagation | GBN-PROTO-006 Phase 7 — `chain_id` flows through protocol, runtime, publisher, persistence | Phase 3 attaches `chain_id` to OTLP spans |
-| Existing logger / tracing layer | likely `tracing` + `tracing-subscriber` (confirm at implementation) | Phase 3 swaps the subscriber for one that also emits OTLP |
+| Existing logger / tracing layer | `tracing` + `tracing-subscriber` added in this phase | Phase 3 initializes an OTLP subscriber when the local k8s OTLP endpoint env var is present |
 | Tempo OTLP endpoints | `tempo.observability.svc.cluster.local:4317` (gRPC) and `:4318` (HTTP) per Phase 2 values | service environment must point at one of these |
 | Prometheus scrape annotations | already on Phase 1 manifests | `/metrics` endpoint must respond at the annotated path/port |
 
-**Note:** GBN-PROTO-007 Phase 3 (CloudWatch) is a parallel track. It is not landed yet,
-so there is no existing `aws-sdk-cloudwatch` dep to coordinate with. If GBN-PROTO-007
-Phase 3 lands first, the AWS code path is gated behind a Cargo feature `aws-cloudwatch`,
-and this k8s phase is gated behind a default-on feature `prometheus-metrics`. The same
-`MetricsSnapshot` types are exported either way.
+**Note:** GBN-PROTO-007 Phase 3 (CloudWatch) landed before this local-k8s variant.
+This phase reuses the shared snapshot structs and keeps CloudWatch disabled in local
+manifests via `GBN_BRIDGE_CLOUDWATCH_ENABLED=false`.
 
 ---
 
@@ -36,9 +34,9 @@ and this k8s phase is gated behind a default-on feature `prometheus-metrics`. Th
 | Gap | Why It Matters | Resolution For Phase 3 |
 |---|---|---|
 | No metrics export from V2 binaries | Phase 2 observability stack has nothing to scrape | add `/metrics` HTTP handler driven by `prometheus` crate |
-| Receiver and bridge have no metric structs | only authority does | add `ReceiverMetricsSnapshot` and `BridgeMetricsSnapshot` (same as the AWS variant) |
+| Receiver and bridge have no metric structs | already resolved by GBN-PROTO-007 Phase 3 | reuse `ReceiverMetricsSnapshot` and `BridgeMetricsSnapshot` |
 | chain_id not visible as a span attribute | Tempo cannot index by chain_id without it | add OTLP exporter + `tracing-opentelemetry` layer; attach `chain_id` to relevant spans |
-| Pulling AWS SDK for local-only dev is heavy | `aws-sdk-cloudwatch` adds ~20 deps | gate AWS metrics code behind a Cargo feature `aws-cloudwatch`; default features include only `prometheus-metrics` |
+| Pulling AWS SDK for local-only dev is heavy | AWS deps are already present for the parity track | keep runtime AWS calls disabled in local k8s with `GBN_BRIDGE_CLOUDWATCH_ENABLED=false` |
 
 ---
 
@@ -309,10 +307,10 @@ async fn main() -> anyhow::Result<()> {
 `publisher-receiver.rs` and `exit-bridge.rs`: same pattern with their respective Prom
 metric structs (`ReceiverPromMetrics`, `BridgePromMetrics`) and service names.
 
-For the bridge binary, expose `/metrics` on the admin port (9090) since the bridge has no
-public HTTP server — the UDP punch port doesn't carry HTTP. The bridge's k8s manifest
-already annotates `prometheus.io/port: "9090"` for this reason (see GBN-PROTO-008 Phase 1
-§5.4).
+For the bridge binary, keep the admin listener on localhost-only `9090` and expose a
+separate metrics-only listener on `0.0.0.0:9100`. The bridge k8s manifest annotates
+`prometheus.io/port: "9100"` so Prometheus can scrape metrics without exposing admin
+commands over the pod network.
 
 ### 5.7 Modify: `gbn-bridge-publisher/src/metrics.rs`
 
@@ -395,11 +393,43 @@ Use `prometheus::TextEncoder` plus a regex on the response body to assert the
 
 ---
 
-## 6. Validation
+## 6. Implementation Notes
+
+- Added `metrics_prometheus.rs` to render Prometheus text exposition from the existing
+  monotonic snapshot counters for authority, receiver, and bridge.
+- Added `metrics_http.rs` for the bridge's metrics-only listener on
+  `GBN_BRIDGE_METRICS_BIND_ADDR` (default `0.0.0.0:9100`).
+- Added `metrics_otlp.rs` and initialized OTLP tracing in all three binaries when
+  `GBN_BRIDGE_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`, or `OTLP_ENDPOINT` is set.
+- Wired `chain_id` span attributes/events through authority request handling, receiver
+  proxy forwarding, bridge control commands, and bridge creator upload paths.
+- Updated local k8s config with `GBN_BRIDGE_OTLP_ENDPOINT` and bridge scrape annotations
+  for port `9100`.
+- Added focused Prometheus endpoint tests for authority, receiver, and bridge.
+
+## 7. Validation
+
+Completed static/local validation in the current Windows-hosted shell:
+
+1. `cargo fmt --all` and `cargo fmt --all --check` passed.
+2. `cargo check -p gbn-bridge-publisher -p gbn-bridge-cli` passed.
+3. `cargo check --workspace` passed.
+4. `cargo test -p gbn-bridge-publisher metrics_prometheus` passed.
+5. `cargo test -p gbn-bridge-publisher --test metrics_prometheus_endpoint` passed.
+6. `cargo test -p gbn-bridge-cli` passed.
+7. PyYAML parsed every YAML file under `prototype/gbn-bridge-proto/infra/k8s/conduit/base`.
+8. `git diff --check` passed with only Windows LF/CRLF warnings.
+9. V1 protected-path diff was clean.
+
+Deferred live k8s validation because this PowerShell environment does not have `docker`,
+`k3d`, `kubectl`, or `helm` on PATH. Run the live checks below from the WSL2 shell after
+Phase 3 images are rebuilt and loaded into k3d.
 
 After Phase 3 lands:
 
-1. `cargo fmt --all --check`, `cargo test --workspace --features prometheus-metrics` pass.
+1. `cargo fmt --all --check`, `cargo check --workspace`, and the focused Phase 3
+   Prometheus endpoint tests pass. Run full `cargo test --workspace` after the local
+   k8s Postgres service is available for persistence/failover tests.
 2. Build images with default features:
    `docker build -f Dockerfile.publisher-authority -t veritas/publisher-authority:dev .` etc.
 3. Bring up cluster + observability stack via Phase 1 + Phase 2 scripts.
@@ -419,7 +449,7 @@ After Phase 3 lands:
 
 ---
 
-## 7. Open Questions Carried Into Implementation
+## 8. Open Questions Carried Into Implementation
 
 1. **`prometheus` crate vs `metrics-rs` ecosystem** — `metrics` + `metrics-exporter-prometheus`
    gives a more idiomatic Rust experience and a vendor-neutral seam (could swap to OTLP

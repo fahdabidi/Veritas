@@ -600,11 +600,12 @@ http://localhost:30030
 Default local credentials are `admin/admin`. Do not reuse those credentials outside this
 local-only k3d stack.
 
-The `Conduit V2 Overview` dashboard is pre-provisioned under the `Conduit` folder. Before
-GBN-PROTO-008 Phase 3 lands, Prometheus panels can be empty because `/metrics` is not
-implemented yet; Loki log queries should still show pod logs from the `veritas` namespace.
-Use the dashboard `chain_id` textbox to filter Loki and Tempo panels once `SendDummy`
-produces a chain ID.
+The `Conduit V2 Overview` dashboard is pre-provisioned under the `Conduit` folder.
+GBN-PROTO-008 Phase 3 exposes `/metrics` on authority port `8080`, receiver port `8081`,
+and bridge metrics port `9100`. Conduit pods also read `GBN_BRIDGE_OTLP_ENDPOINT` from
+the local config map and emit chain-aware spans to Tempo when the observability stack is
+installed. Use the dashboard `chain_id` textbox to filter Loki and Tempo panels once
+`SendDummy` produces a chain ID.
 
 Useful observability commands:
 
@@ -620,6 +621,31 @@ Remove observability without deleting the Conduit cluster:
 cd prototype/gbn-bridge-proto
 infra/scripts/k8s-observability-down.sh
 ```
+
+### Local Kubernetes Operator Panel
+
+After `k8s-up.sh` and `k8s-observability-up.sh` have completed, drive the running
+local cluster from one menu-driven script:
+
+```bash
+bash prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh
+```
+
+Override defaults with `VERITAS_K8S_NAMESPACE`, `VERITAS_OBS_NAMESPACE`,
+`VERITAS_GRAFANA_URL`, and `VERITAS_K8S_ADMIN_PORT`. The script discovers all running
+Conduit pods with a `veritas-role` label and presents Authority, Receiver, and Bridge
+pods in one numbered list. Every admin call goes through `kubectl exec -- curl
+http://127.0.0.1:9090/...`; no public admin ingress is required.
+
+Menu items:
+
+- `Status`, `DescribePod`, `TailLogs`, `ExecShell`, and `ShowCatalog` are diagnostics.
+- `DumpBridges`, `DumpFrames`, and `AdminMetrics` call the Phase 1 admin endpoints.
+- `LiveMetrics` prints Grafana and Prometheus access URLs for the Phase 2 stack.
+- `SendDummy` calls the Phase 4 creator endpoint, prints the returned `chain_id`, and
+  builds Grafana Tempo and Loki deep links for trace inspection.
+- `TriggerCommand` queues a bridge control command through the authority admin API.
+- `CheckImages`, `SmokeValidation`, `Refresh`, and `Teardown` support local iteration.
 
 ### Tear Down Local Conduit
 
@@ -660,6 +686,7 @@ Set `VERITAS_K8S_ASSUME_YES=1` for non-interactive cleanup.
 | `scripts/k8s-test-publisher-postgres.sh` | port-forwards local k8s Postgres and runs publisher persistence tests |
 | `scripts/k8s-observability-up.sh` | installs Prometheus, Grafana, Loki, Promtail, and Tempo locally |
 | `scripts/k8s-observability-down.sh` | removes the local observability namespace and Helm releases |
+| `scripts/k8s-control-interactive.sh` | interactive kubectl-only local operator control panel |
 | `scripts/k8s-down.sh` | deletes the local k3d Conduit cluster |
 | `scripts/teardown-conduit-full.sh` | deletes only `gbn-conduit-full-*` stacks |
 | `scripts/run-conduit-e2e.sh` | runs the distributed local e2e harness |

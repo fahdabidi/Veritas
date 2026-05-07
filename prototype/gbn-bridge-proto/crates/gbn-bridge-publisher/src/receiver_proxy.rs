@@ -8,6 +8,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::metrics::ReceiverMetrics;
+use crate::metrics_otlp;
+use crate::metrics_prometheus::{receiver_metrics_text, stack_from_env, PROMETHEUS_CONTENT_TYPE};
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8081";
 const DEFAULT_AUTHORITY_URL: &str = "http://127.0.0.1:8080";
@@ -180,12 +182,27 @@ fn handle_connection(
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
     let request = read_http_request(&mut stream, config.request_max_bytes)?;
+    if request.method == "GET" && request.path == "/metrics" {
+        let snapshot = metrics
+            .lock()
+            .expect("receiver metrics mutex poisoned while rendering prometheus metrics")
+            .snapshot();
+        let body = receiver_metrics_text(&snapshot, "receiver", &stack_from_env());
+        stream.write_all(&text_response(200, "OK", PROMETHEUS_CONTENT_TYPE, body))?;
+        return Ok(());
+    }
+
     if !allowed_path(&request.path) {
         stream.write_all(&json_response(404, "not_found", "receiver route not found"))?;
         return Ok(());
     }
 
-    if let Some(chain_id) = extract_chain_id(&request.body) {
+    let chain_id = extract_chain_id(&request.body);
+    let _chain_span = chain_id
+        .as_deref()
+        .map(|chain_id| metrics_otlp::chain_span("publisher_receiver_proxy", chain_id).entered());
+    if let Some(chain_id) = &chain_id {
+        metrics_otlp::record_chain_id(chain_id);
         eprintln!(
             "publisher-receiver proxy method={} path={} chain_id={}",
             request.method, request.path, chain_id
@@ -447,5 +464,21 @@ fn json_response(status_code: u16, code: &str, message: &str) -> Vec<u8> {
     );
     let mut response = headers.into_bytes();
     response.extend_from_slice(&body);
+    response
+}
+
+fn text_response(
+    status_code: u16,
+    status_text: &str,
+    content_type: &str,
+    body: impl AsRef<str>,
+) -> Vec<u8> {
+    let body = body.as_ref().as_bytes();
+    let headers = format!(
+        "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut response = headers.into_bytes();
+    response.extend_from_slice(body);
     response
 }

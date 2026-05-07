@@ -402,8 +402,9 @@ scripts:
    [GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md](GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md)
    has been updated to mark Phase 2 complete.
 
-Empty Prometheus panels are expected until Phase 3 adds `/metrics` endpoints to the
-Conduit binaries. Loki should still show pod logs after the live install.
+Empty Prometheus panels were expected until Phase 3 added `/metrics` endpoints to the
+Conduit binaries. After Phase 3 images are rebuilt/redeployed, Prometheus should scrape
+authority `8080`, receiver `8081`, and bridge metrics `9100`.
 
 ---
 
@@ -431,15 +432,16 @@ Deferred live WSL2 validation because this PowerShell environment does not have 
    visible under the default folder.
 4. Datasource health check (Grafana → Connections → Data sources) shows Prometheus, Loki,
    Tempo all green.
-5. **Empty data is expected** until Phase 3 of this plan emits metrics. Confirm Prometheus
-   has discovered the Conduit pod targets:
+5. If Phase 3 images have not been rebuilt/redeployed yet, empty data is expected.
+   Confirm Prometheus has discovered the Conduit pod targets:
    `Status -> Targets` shows Conduit pod targets for the `conduit-pods` job. They may be
-   DOWN with HTTP 404 scrape errors until `/metrics` is implemented in Phase 3.
+   DOWN with HTTP 404 scrape errors before Phase 3 deployment; after deployment they should
+   be UP and return `conduit_*` series.
 6. Promtail is shipping logs. Grafana → Explore → Loki, query
    `{namespace="veritas"}` — recent log lines from Conduit pods appear.
 7. Tempo accepts OTLP (verify with the Tempo Service `kubectl -n observability port-forward
-   svc/tempo 3200:3200` and `curl localhost:3200/ready` returns "ready"). Trace data is
-   absent until Phase 3 wires OTLP export.
+   svc/tempo 3200:3200` and `curl localhost:3200/ready` returns "ready"). Conduit trace
+   data appears after Phase 3 images are rebuilt/redeployed with `GBN_BRIDGE_OTLP_ENDPOINT`.
 8. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-observability-down.sh`,
    confirm with `y`, namespace and Helm releases are removed.
 9. Update this document with live Helm output once the WSL2 run completes.

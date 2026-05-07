@@ -8,7 +8,7 @@ use gbn_bridge_protocol::{publisher_identity, PublicKeyBytes, DEFAULT_UDP_PUNCH_
 use gbn_bridge_publisher::{
     admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
     metrics_emitter::{cloudwatch_metrics_enabled, spawn_cloudwatch_emitter, MetricsEmitterConfig},
-    ReceiverMetrics, ReceiverProxyConfig, ReceiverProxyServer,
+    metrics_otlp, ReceiverMetrics, ReceiverProxyConfig, ReceiverProxyServer,
 };
 use sha2::{Digest, Sha256};
 
@@ -53,6 +53,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    let _otlp_guard = metrics_otlp::init_otlp_tracing_from_env("publisher-receiver")?;
     let config = ReceiverProxyConfig::from_env()?;
     let request_max_bytes = config.request_max_bytes;
     let metrics = Arc::new(Mutex::new(ReceiverMetrics::default()));

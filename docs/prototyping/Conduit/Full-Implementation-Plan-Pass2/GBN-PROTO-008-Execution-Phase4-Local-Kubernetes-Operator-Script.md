@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 4 Detailed Plan: Local Kubernetes Operator Script
 
-**Status:** Pending — variant of GBN-PROTO-007 Phase 5
+**Status:** Implemented - variant of GBN-PROTO-007 Phase 5
 **Primary Goal:** ship a sibling operator script
 `prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh` that mirrors the V1
 operator panel using `kubectl exec` instead of `aws ecs execute-command`. Same menu items
@@ -476,11 +476,36 @@ EKS / ECS deployments.
 
 ---
 
-## 7. Validation
+## 7. Implementation Notes
+
+- Added `prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh`.
+- The script discovers running Conduit pods by `veritas-role`, keeps the admin listener
+  private by using `kubectl exec -- curl http://127.0.0.1:9090/...`, and preserves TTY
+  state around interactive shells.
+- Menu actions include status, pod description, log tailing, shell exec, catalog/bridge
+  dumps, frame dumps, admin metrics, Grafana/Prometheus links, SendDummy, bridge command
+  injection, image inspection, smoke validation, refresh, teardown, and exit.
+- SendDummy prints the returned `chain_id`, assigned bridge id, Grafana Tempo and Loki
+  Explore deep links, and can grep recent pod logs for the same chain id.
+- Updated `infra/README-infra.md` and the GBN-PROTO-008 tracker to mark Phase 4 complete.
+
+## 8. Validation
+
+Completed static/local validation in the current Windows-hosted shell:
+
+1. `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh` passed.
+2. `git diff --check` passed with only Windows LF/CRLF warnings.
+3. V1 protected-path diff was clean.
+4. `shellcheck` was not available in this shell, so shellcheck validation remains deferred.
+
+Deferred live k8s validation because this PowerShell environment does not have `kubectl`
+on PATH. Run the live checks below from the WSL2 shell after `k8s-up.sh`,
+`k8s-observability-up.sh`, and Phase 3 image redeployment complete.
 
 1. Cluster + observability + Phase 3 metrics emission are live (run `k8s-up.sh` then
    `k8s-observability-up.sh`).
-2. `shellcheck infra/scripts/k8s-control-interactive.sh` passes with no errors.
+2. `shellcheck infra/scripts/k8s-control-interactive.sh` passes with no errors when
+   `shellcheck` is available on the WSL2 host.
 3. Run the script. Walk every menu item:
    - **Status** prints 5 Conduit pods + observability pods.
    - **TailLogs** streams logs from chosen pod.
@@ -497,13 +522,13 @@ EKS / ECS deployments.
    - **CheckImages** lists `:dev` for all pods.
    - **Refresh** re-runs discovery cleanly.
    - **Teardown** prompts for namespace name and tears down the cluster.
-4. Shellcheck: zero errors.
+4. Shellcheck: zero errors when run on the WSL2 host.
 5. After teardown, re-running the script prints "no Conduit pods discovered" and exits
    non-zero without panicking.
 
 ---
 
-## 8. Open Questions Carried Into Implementation
+## 9. Open Questions Carried Into Implementation
 
 1. **Browser opener on WSL2** — `wslview` (from `wslu`) is the WSL-native opener; check
    if installed and document the apt install in README if not.

@@ -12,12 +12,19 @@ ed25519-dalek = { workspace = true }
 gbn-bridge-creator = { path = "../gbn-bridge-creator" }
 gbn-bridge-protocol = { path = "../gbn-bridge-protocol" }
 native-tls = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 postgres = { workspace = true }
 postgres-native-tls = { workspace = true }
+prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
 tungstenite = { workspace = true }
 
 [dev-dependencies]

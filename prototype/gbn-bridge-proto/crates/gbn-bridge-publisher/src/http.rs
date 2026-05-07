@@ -13,6 +13,8 @@ use crate::api::{
     ReceiverFrameBody, ReceiverOpenBody,
 };
 use crate::control::{handle_control_connection, looks_like_control_upgrade};
+use crate::metrics_otlp;
+use crate::metrics_prometheus::{authority_metrics_text, stack_from_env, PROMETHEUS_CONTENT_TYPE};
 use crate::service::{AuthorityService, ServiceError};
 
 pub struct AuthorityHttpServer {
@@ -140,6 +142,11 @@ fn route_request(service: &Arc<Mutex<AuthorityService>>, request: HttpRequest) -
     let mut service = service.lock().expect("authority service mutex poisoned");
 
     let route_result = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/metrics") => {
+            let snapshot = service.publisher_authority().metrics_snapshot();
+            let body = authority_metrics_text(&snapshot, "authority", &stack_from_env());
+            raw_http_response_with_content_type(200, PROMETHEUS_CONTENT_TYPE, body.into_bytes())
+        }
         ("GET", "/healthz") => match service.healthz() {
             Ok(response) => ok_json_response(&response),
             Err(error) => error_json_response(&service, "system-healthz", "healthz", error),
@@ -261,6 +268,9 @@ where
         Ok(request) => {
             let chain_id = request.chain_id.clone();
             let request_id = request.request_id.clone();
+            let _chain_span =
+                metrics_otlp::chain_span("authority_http_request", &chain_id).entered();
+            metrics_otlp::record_chain_id(&chain_id);
             handler(request).map_err(|error| (chain_id, request_id, error))
         }
         Err(error) => Err((
@@ -315,6 +325,14 @@ where
 }
 
 fn raw_http_response(status_code: u16, body: Vec<u8>) -> Vec<u8> {
+    raw_http_response_with_content_type(status_code, "application/json", body)
+}
+
+fn raw_http_response_with_content_type(
+    status_code: u16,
+    content_type: &str,
+    body: Vec<u8>,
+) -> Vec<u8> {
     let status_text = match status_code {
         200 => "OK",
         400 => "Bad Request",
@@ -328,7 +346,7 @@ fn raw_http_response(status_code: u16, body: Vec<u8>) -> Vec<u8> {
     };
 
     let headers = format!(
-        "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let mut response = headers.into_bytes();

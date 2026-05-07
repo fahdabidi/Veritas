@@ -15,6 +15,9 @@ use gbn_bridge_protocol::{
 use gbn_bridge_publisher::{
     admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
     metrics_emitter::{cloudwatch_metrics_enabled, spawn_cloudwatch_emitter, MetricsEmitterConfig},
+    metrics_http::MetricsHttpServer,
+    metrics_otlp,
+    metrics_prometheus::{bridge_metrics_text, stack_from_env},
     BridgeMetrics,
 };
 use gbn_bridge_runtime::{
@@ -102,6 +105,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    let _otlp_guard = metrics_otlp::init_otlp_tracing_from_env("exit-bridge")?;
     let config = BridgeServiceConfig::from_env()?;
     let signing_key = config.load_signing_key()?;
     let publisher_public_key = config.load_publisher_public_key()?;
@@ -126,6 +130,26 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     let _admin_handle = admin_server.spawn().map_err(|error| error.to_string())?;
+    let prometheus_stack = stack_from_env();
+    let metrics_for_prometheus = metrics.clone();
+    let prometheus_addr: SocketAddr = env::var("GBN_BRIDGE_METRICS_BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:9100".to_string())
+        .parse()
+        .map_err(|_| "GBN_BRIDGE_METRICS_BIND_ADDR must be a valid socket address".to_string())?;
+    let prometheus_server = MetricsHttpServer::bind(prometheus_addr, move || {
+        let snapshot = metrics_for_prometheus
+            .lock()
+            .expect("bridge metrics mutex poisoned while rendering prometheus metrics")
+            .snapshot();
+        bridge_metrics_text(&snapshot, "bridge", &prometheus_stack)
+    })
+    .map_err(|error| error.to_string())?;
+    let prometheus_local_addr = prometheus_server
+        .local_addr()
+        .map_err(|error| error.to_string())?;
+    let _prometheus_handle = prometheus_server
+        .spawn()
+        .map_err(|error| error.to_string())?;
     let _metrics_handle = if cloudwatch_metrics_enabled() {
         let metrics_for_emitter = metrics.clone();
         Some(spawn_cloudwatch_emitter(
@@ -193,10 +217,13 @@ fn run() -> Result<(), String> {
         config.authority_url,
         config.receiver_url
     );
-    eprintln!("exit-bridge admin listening on {DEFAULT_ADMIN_BIND_ADDR}");
+    eprintln!(
+        "exit-bridge admin listening on {DEFAULT_ADMIN_BIND_ADDR}; prometheus metrics listening on {prometheus_local_addr}"
+    );
 
     let control_chain_id =
         default_chain_id("bridge-control-connect", &config.node_id, &lease.lease_id);
+    metrics_otlp::record_chain_id(&control_chain_id);
     let control_request_id = default_request_id("control-hello", &config.node_id, now_ms());
     let control_client = BridgeControlClient::connect(
         &config.control_url,
@@ -231,6 +258,9 @@ fn run() -> Result<(), String> {
             .receive_next_control_command(current_ms)
             .map_err(|error| error.to_string())?
         {
+            let _chain_span =
+                metrics_otlp::chain_span("bridge_control_command", &ack.chain_id).entered();
+            metrics_otlp::record_chain_id(&ack.chain_id);
             metrics
                 .lock()
                 .expect("bridge metrics mutex poisoned")
@@ -356,6 +386,8 @@ fn handle_creator_upload_request(
     match request {
         CreatorBridgeRequest::Open(open) => {
             let chain_id = open.chain_id.clone();
+            let _chain_span = metrics_otlp::chain_span("bridge_creator_open", &chain_id).entered();
+            metrics_otlp::record_chain_id(&chain_id);
             let session_id = open.session_id.clone();
             let now = now_ms();
             match runtime.open_data_session_with_chain_id(&chain_id, open, now) {
@@ -376,6 +408,8 @@ fn handle_creator_upload_request(
         }
         CreatorBridgeRequest::Frame(frame) => {
             let chain_id = frame.chain_id.clone();
+            let _chain_span = metrics_otlp::chain_span("bridge_creator_frame", &chain_id).entered();
+            metrics_otlp::record_chain_id(&chain_id);
             let bytes = frame.ciphertext.len();
             let now = now_ms();
             match runtime.forward_session_frame_with_chain_id(&chain_id, frame, now) {
@@ -397,6 +431,8 @@ fn handle_creator_upload_request(
         }
         CreatorBridgeRequest::Close(close) => {
             let chain_id = close.chain_id.clone();
+            let _chain_span = metrics_otlp::chain_span("bridge_creator_close", &chain_id).entered();
+            metrics_otlp::record_chain_id(&chain_id);
             let session_id = close.session_id.clone();
             let now = now_ms();
             match runtime.close_data_session_with_chain_id(&chain_id, close, now) {

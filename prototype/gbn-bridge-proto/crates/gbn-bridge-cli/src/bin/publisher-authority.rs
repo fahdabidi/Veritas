@@ -6,8 +6,8 @@ use gbn_bridge_protocol::{publisher_identity, DEFAULT_UDP_PUNCH_PORT};
 use gbn_bridge_publisher::{
     admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
     metrics_emitter::{cloudwatch_metrics_enabled, spawn_cloudwatch_emitter, MetricsEmitterConfig},
-    AuthorityConfig, AuthorityPolicy, AuthorityServer, PostgresStorageConfig, PublisherAuthority,
-    PublisherServiceConfig, PublisherSigningSource,
+    metrics_otlp, AuthorityConfig, AuthorityPolicy, AuthorityServer, PostgresStorageConfig,
+    PublisherAuthority, PublisherServiceConfig, PublisherSigningSource,
 };
 
 fn main() {
@@ -18,6 +18,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    let _otlp_guard = metrics_otlp::init_otlp_tracing_from_env("publisher-authority")?;
     let config = PublisherServiceConfig::from_env()?;
     let request_max_bytes = config.request_max_bytes;
     let authority_url = local_http_url_from_bind_addr(&config.bind_addr, 8080);

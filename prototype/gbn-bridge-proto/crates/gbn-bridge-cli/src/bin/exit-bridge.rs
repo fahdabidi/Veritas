@@ -14,7 +14,7 @@ use gbn_bridge_protocol::{
 };
 use gbn_bridge_publisher::{
     admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
-    metrics_emitter::{spawn_cloudwatch_emitter, MetricsEmitterConfig},
+    metrics_emitter::{cloudwatch_metrics_enabled, spawn_cloudwatch_emitter, MetricsEmitterConfig},
     BridgeMetrics,
 };
 use gbn_bridge_runtime::{
@@ -126,17 +126,21 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     let _admin_handle = admin_server.spawn().map_err(|error| error.to_string())?;
-    let metrics_for_emitter = metrics.clone();
-    let _metrics_handle = spawn_cloudwatch_emitter(
-        MetricsEmitterConfig::from_env("bridge"),
-        move |service, stack| {
-            metrics_for_emitter
-                .lock()
-                .expect("bridge metrics mutex poisoned while emitting metrics")
-                .snapshot()
-                .cloudwatch_data(service, stack)
-        },
-    );
+    let _metrics_handle = if cloudwatch_metrics_enabled() {
+        let metrics_for_emitter = metrics.clone();
+        Some(spawn_cloudwatch_emitter(
+            MetricsEmitterConfig::from_env("bridge"),
+            move |service, stack| {
+                metrics_for_emitter
+                    .lock()
+                    .expect("bridge metrics mutex poisoned while emitting metrics")
+                    .snapshot()
+                    .cloudwatch_data(service, stack)
+            },
+        ))
+    } else {
+        None
+    };
 
     let authority_transport =
         HttpJsonTransport::new(HttpTransportConfig::new(config.authority_url.clone()))

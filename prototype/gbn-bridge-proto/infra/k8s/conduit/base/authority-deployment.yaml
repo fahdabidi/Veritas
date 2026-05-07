@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: publisher-authority
+  labels:
+    app.kubernetes.io/name: publisher-authority
+    app.kubernetes.io/part-of: veritas-conduit
+    veritas-role: authority
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: publisher-authority
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: publisher-authority
+        app.kubernetes.io/part-of: veritas-conduit
+        veritas-role: authority
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8080"
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+          command:
+            - sh
+            - -ec
+            - |
+              until pg_isready -h postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do
+                sleep 2
+              done
+      containers:
+        - name: publisher-authority
+          image: veritas/publisher-authority:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: conduit-config
+            - secretRef:
+                name: postgres-credentials
+            - secretRef:
+                name: conduit-signing
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

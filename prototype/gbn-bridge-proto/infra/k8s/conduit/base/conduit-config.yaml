@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conduit-config
+data:
+  GBN_BRIDGE_AUTHORITY_URL: "http://publisher-authority:8080"
+  GBN_BRIDGE_RECEIVER_URL: "http://publisher-receiver:8081"
+  GBN_BRIDGE_CONTROL_URL: "ws://publisher-authority:8080/v1/bridge/control"
+  GBN_BRIDGE_PUBLISHER_BIND_ADDR: "0.0.0.0:8080"
+  GBN_BRIDGE_RECEIVER_BIND_ADDR: "0.0.0.0:8081"
+  GBN_BRIDGE_POSTGRES_HOST: "postgres"
+  GBN_BRIDGE_POSTGRES_PORT: "5432"
+  GBN_BRIDGE_POSTGRES_SCHEMA: "conduit_publisher"
+  GBN_BRIDGE_POSTGRES_SSLMODE: "disable"
+  GBN_BRIDGE_PUBLISHER_SIGNING_MODE: "hex"
+  GBN_BRIDGE_REACHABILITY_CLASS: "direct"
+  GBN_BRIDGE_PUNCH_PORT: "4443"
+  GBN_BRIDGE_CONTROL_KEEPALIVE_INTERVAL_MS: "5000"
+  GBN_BRIDGE_POLL_INTERVAL_MS: "250"
+  GBN_BRIDGE_STACK_ENV: "dev-local"
+  GBN_BRIDGE_CLOUDWATCH_ENABLED: "false"
+  RUST_LOG: "info"

@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: veritas
+resources:
+  - ../../base
+generatorOptions:
+  disableNameSuffixHash: true
+secretGenerator:
+  - name: postgres-credentials
+    behavior: replace
+    literals:
+      - POSTGRES_DB=veritas_conduit
+      - POSTGRES_USER=veritas
+      - GBN_BRIDGE_POSTGRES_DATABASE=veritas_conduit
+      - GBN_BRIDGE_POSTGRES_USER=veritas
+    files:
+      - POSTGRES_PASSWORD=password.txt
+      - GBN_BRIDGE_POSTGRES_PASSWORD=password.txt

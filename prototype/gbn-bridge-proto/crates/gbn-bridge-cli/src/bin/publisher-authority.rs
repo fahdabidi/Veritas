@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gbn_bridge_protocol::{publisher_identity, DEFAULT_UDP_PUNCH_PORT};
 use gbn_bridge_publisher::{
     admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
-    metrics_emitter::{spawn_cloudwatch_emitter, MetricsEmitterConfig},
+    metrics_emitter::{cloudwatch_metrics_enabled, spawn_cloudwatch_emitter, MetricsEmitterConfig},
     AuthorityConfig, AuthorityPolicy, AuthorityServer, PostgresStorageConfig, PublisherAuthority,
     PublisherServiceConfig, PublisherSigningSource,
 };
@@ -58,18 +58,22 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     let _admin_handle = admin_server.spawn().map_err(|error| error.to_string())?;
-    let metrics_service = service_handle.clone();
-    let _metrics_handle = spawn_cloudwatch_emitter(
-        MetricsEmitterConfig::from_env("authority"),
-        move |service, stack| {
-            metrics_service
-                .lock()
-                .expect("authority service mutex poisoned while emitting metrics")
-                .publisher_authority()
-                .metrics_snapshot()
-                .cloudwatch_data(service, stack)
-        },
-    );
+    let _metrics_handle = if cloudwatch_metrics_enabled() {
+        let metrics_service = service_handle.clone();
+        Some(spawn_cloudwatch_emitter(
+            MetricsEmitterConfig::from_env("authority"),
+            move |service, stack| {
+                metrics_service
+                    .lock()
+                    .expect("authority service mutex poisoned while emitting metrics")
+                    .publisher_authority()
+                    .metrics_snapshot()
+                    .cloudwatch_data(service, stack)
+            },
+        ))
+    } else {
+        None
+    };
     println!(
         "publisher-authority service listening on {}; admin listening on {}",
         bound.local_addr(),

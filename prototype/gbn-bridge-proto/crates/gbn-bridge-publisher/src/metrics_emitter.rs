@@ -34,6 +34,20 @@ impl MetricsEmitterConfig {
     }
 }
 
+pub fn cloudwatch_metrics_enabled() -> bool {
+    match std::env::var("GBN_BRIDGE_CLOUDWATCH_ENABLED") {
+        Ok(value) => parse_enabled_flag(&value),
+        Err(_) => true,
+    }
+}
+
+fn parse_enabled_flag(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
 pub fn spawn_cloudwatch_emitter<F>(config: MetricsEmitterConfig, snapshot_fn: F) -> JoinHandle<()>
 where
     F: Fn(&str, &str) -> Vec<MetricDatum> + Send + 'static,
@@ -99,7 +113,7 @@ pub fn metric_data(name: &str, value: f64, service: &str, stack: &str) -> Metric
 
 #[cfg(test)]
 mod tests {
-    use super::metric_data;
+    use super::{metric_data, parse_enabled_flag};
 
     #[test]
     fn metric_data_sets_name_value_unit_and_dimensions() {
@@ -120,5 +134,15 @@ mod tests {
                 .any(|dimension| dimension.name() == Some("Stack")
                     && dimension.value() == Some("dev"))
         );
+    }
+
+    #[test]
+    fn parse_enabled_flag_accepts_common_false_values() {
+        for value in ["0", "false", "FALSE", " off ", "no"] {
+            assert!(!parse_enabled_flag(value));
+        }
+        for value in ["1", "true", "yes", ""] {
+            assert!(parse_enabled_flag(value));
+        }
     }
 }

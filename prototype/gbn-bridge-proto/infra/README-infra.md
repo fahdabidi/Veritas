@@ -501,6 +501,95 @@ python ../../../tools/scan_secrets.py ../../../ --fail-on-findings
 
 ---
 
+## Local Kubernetes Test Environment
+
+The local Kubernetes track mirrors the AWS full stack without creating any AWS resources.
+It runs in k3d with five Conduit pods in the `veritas` namespace:
+
+- `postgres` StatefulSet with a 1 Gi `local-path` PVC
+- `publisher-authority` Deployment
+- `publisher-receiver` Deployment
+- `exit-bridge` Deployment with three replicas
+
+The local manifests live under [`infra/k8s/conduit`](k8s/conduit). They keep the admin
+listener bound to `127.0.0.1:9090` inside each pod, matching the AWS isolation rule.
+Validation and operator tools reach admin routes with `kubectl exec`.
+
+### Local Prerequisites
+
+Run these from WSL2 Ubuntu with Docker Desktop WSL integration enabled:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/bootstrap-k8s.sh
+```
+
+The bootstrap script installs `k3d`, `kubectl`, and `helm` if missing. It is intentionally
+Linux/WSL-only.
+
+### Bring Up Local Conduit
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-up.sh
+```
+
+The script creates or reuses the `veritas` k3d cluster, builds the three local images,
+imports them into k3d, applies the dev Kustomize overlay, waits for all workloads, and
+runs `k8s-smoke.sh --send-dummy` plus the Postgres-backed publisher persistence test.
+
+Useful overrides:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VERITAS_K3D_CLUSTER` | `veritas` | k3d cluster name |
+| `VERITAS_K8S_NAMESPACE` | `veritas` | Conduit namespace |
+| `VERITAS_K3D_AGENTS` | `2` | number of k3d agent nodes |
+| `VERITAS_K8S_RUN_SMOKE` | `1` | run local smoke validation after deploy |
+| `VERITAS_K8S_RUN_CARGO_PERSISTENCE` | `1` | run Postgres-backed publisher persistence tests through a port-forward |
+| `VERITAS_K8S_POSTGRES_LOCAL_PORT` | `15432` | localhost port used for Postgres test port-forward |
+
+The dev overlay generates a local-only Postgres password at
+`infra/k8s/conduit/overlays/dev/password.txt`; the file is gitignored.
+
+### Validate Local Conduit
+
+To rerun the GBN-PROTO-007 parity smoke checks against the local topology:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-smoke.sh --send-dummy
+```
+
+This checks namespace and rollout status, Postgres readiness, public health endpoints,
+localhost admin metrics on every Conduit pod, bridge registration, `SendDummy` from the
+authority, receiver, and all bridge pods, frame persistence by `chain_id`, and recent pod
+logs containing each generated `chain_id`.
+
+To run the host-side publisher persistence test that previously failed with local
+Postgres `ConnectionRefused`, use the Kubernetes Postgres port-forward runner:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-test-publisher-postgres.sh
+```
+
+The script opens `kubectl port-forward svc/postgres 15432:5432`, exports the
+`GBN_BRIDGE_POSTGRES_*` and `GBN_BRIDGE_TEST_POSTGRES_URL` variables from the Kubernetes Secret, and runs
+`cargo test -p gbn-bridge-publisher --test persistence_flow`. Pass cargo arguments after
+the script name to run a broader suite against the same database.
+
+### Tear Down Local Conduit
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-down.sh
+```
+
+Set `VERITAS_K8S_ASSUME_YES=1` for non-interactive cleanup.
+
+---
+
 ## AWS Test Setup And Scripts
 
 ### Naming Rules
@@ -523,6 +612,11 @@ python ../../../tools/scan_secrets.py ../../../ --fail-on-findings
 | `scripts/mobile-validation-full.sh` | runs local or AWS Phase 10 validation workflow |
 | `scripts/collect-conduit-traces.sh` | collects CloudFormation, ECS, and CloudWatch `chain_id` evidence |
 | `scripts/relay-control-interactive-v2.sh` | interactive ECS-only operator control panel |
+| `scripts/bootstrap-k8s.sh` | installs local k3d, kubectl, and helm tooling |
+| `scripts/k8s-up.sh` | creates local k3d Conduit topology and runs local smoke validation |
+| `scripts/k8s-smoke.sh` | validates local Postgres, admin endpoints, bridge registration, and SendDummy |
+| `scripts/k8s-test-publisher-postgres.sh` | port-forwards local k8s Postgres and runs publisher persistence tests |
+| `scripts/k8s-down.sh` | deletes the local k3d Conduit cluster |
 | `scripts/teardown-conduit-full.sh` | deletes only `gbn-conduit-full-*` stacks |
 | `scripts/run-conduit-e2e.sh` | runs the distributed local e2e harness |
 | `scripts/status-snapshot.sh` | legacy prototype stack status helper |

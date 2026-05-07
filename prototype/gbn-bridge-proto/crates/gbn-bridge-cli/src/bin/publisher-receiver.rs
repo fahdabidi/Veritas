@@ -7,7 +7,7 @@ use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{publisher_identity, PublicKeyBytes, DEFAULT_UDP_PUNCH_PORT};
 use gbn_bridge_publisher::{
     admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
-    metrics_emitter::{spawn_cloudwatch_emitter, MetricsEmitterConfig},
+    metrics_emitter::{cloudwatch_metrics_enabled, spawn_cloudwatch_emitter, MetricsEmitterConfig},
     ReceiverMetrics, ReceiverProxyConfig, ReceiverProxyServer,
 };
 use sha2::{Digest, Sha256};
@@ -78,17 +78,21 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     let _admin_handle = admin_server.spawn().map_err(|error| error.to_string())?;
-    let metrics_for_emitter = metrics.clone();
-    let _metrics_handle = spawn_cloudwatch_emitter(
-        MetricsEmitterConfig::from_env("receiver"),
-        move |service, stack| {
-            metrics_for_emitter
-                .lock()
-                .expect("receiver metrics mutex poisoned while emitting metrics")
-                .snapshot()
-                .cloudwatch_data(service, stack)
-        },
-    );
+    let _metrics_handle = if cloudwatch_metrics_enabled() {
+        let metrics_for_emitter = metrics.clone();
+        Some(spawn_cloudwatch_emitter(
+            MetricsEmitterConfig::from_env("receiver"),
+            move |service, stack| {
+                metrics_for_emitter
+                    .lock()
+                    .expect("receiver metrics mutex poisoned while emitting metrics")
+                    .snapshot()
+                    .cloudwatch_data(service, stack)
+            },
+        ))
+    } else {
+        None
+    };
     println!(
         "publisher-receiver proxy listening on {} and forwarding to {}; admin listening on {}",
         server.local_addr().map_err(|error| error.to_string())?,

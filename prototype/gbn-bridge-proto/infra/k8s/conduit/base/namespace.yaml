@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: veritas
+  labels:
+    app.kubernetes.io/name: veritas
+    app.kubernetes.io/part-of: veritas-conduit

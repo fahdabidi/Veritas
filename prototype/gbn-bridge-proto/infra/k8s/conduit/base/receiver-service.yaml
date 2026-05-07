@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: publisher-receiver
+  labels:
+    app.kubernetes.io/name: publisher-receiver
+    app.kubernetes.io/part-of: veritas-conduit
+    veritas-role: receiver
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: publisher-receiver
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http

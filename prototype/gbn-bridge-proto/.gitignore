@@ -8,3 +8,4 @@ artifacts/
 *.pem
 *.p12
 Cargo.lock
+infra/k8s/conduit/overlays/dev/password.txt

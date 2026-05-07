@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: exit-bridge
+  labels:
+    app.kubernetes.io/name: exit-bridge
+    app.kubernetes.io/part-of: veritas-conduit
+    veritas-role: bridge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: exit-bridge
+  ports:
+    - name: udp-punch
+      port: 4443
+      targetPort: udp-punch
+      protocol: UDP

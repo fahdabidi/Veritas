@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 1 Detailed Plan: Local Kubernetes Cluster + Conduit Manifests
 
-**Status:** Pending
+**Status:** Implemented locally — live k3d bring-up and smoke run pending a WSL2 Docker/k3d session
 **Primary Goal:** install `k3d` on the developer's WSL2 Ubuntu workstation, create a
 3-node local Kubernetes cluster, build and import the three Conduit V2 container images
 locally, and write Kubernetes manifests for the full Conduit topology so a single command
@@ -21,6 +21,26 @@ brings up the equivalent of the AWS `gbn-conduit-full-dev` stack on `localhost`.
 | AWS stack outputs and inputs | the CFN template parameters at [conduit-full-stack.yaml:12-90](../../../prototype/gbn-bridge-proto/infra/cloudformation/conduit-full-stack.yaml#L12-L90) | template for what env vars the manifests must supply |
 | Existing scripts | `deploy-conduit-full.sh`, `smoke-conduit-full.sh`, `teardown-conduit-full.sh` | Phase 1 adds k8s-shaped siblings |
 | WSL Docker integration | assumed enabled | required for k3d |
+
+---
+
+## 1.1 GBN-PROTO-007 Validation Gaps Covered By This Phase
+
+Phase 1 creates the local infrastructure needed to finish the GBN-PROTO-007 parity checks
+without deploying ECS/Fargate:
+
+| Deferred GBN-PROTO-007 Check | Local-Kubernetes Coverage |
+|---|---|
+| Deploy a full five-node topology | `k8s-up.sh` creates one authority pod, one receiver pod, three bridge pods, and one Postgres pod |
+| Local Postgres availability for persistence/failover tests | `postgres` StatefulSet + PVC + generated dev credentials |
+| Host-side Cargo tests that need Postgres | `k8s-test-publisher-postgres.sh` port-forwards the Kubernetes Postgres service and exports `GBN_BRIDGE_POSTGRES_*` plus `GBN_BRIDGE_TEST_POSTGRES_URL` |
+| Admin endpoint validation on every node | `k8s-smoke.sh` curls `127.0.0.1:9090/v1/admin/metrics` inside every Conduit pod |
+| Bridge registration before end-to-end tests | `k8s-smoke.sh` waits for the authority admin bridge registry to reach the expected bridge count |
+| `SendDummy` from authority, receiver, and all bridges | `k8s-smoke.sh --send-dummy` posts to `/v1/admin/send-dummy` from every Conduit pod |
+| `chain_id` persistence and trace evidence | `k8s-smoke.sh --send-dummy` verifies the generated `chain_id` appears in authority frames and recent pod logs |
+
+Phase 2 through Phase 4 add the local Prometheus/Loki/Tempo and kubectl operator surfaces
+that replace the AWS CloudWatch/ECS operator checks.
 
 ---
 
@@ -53,6 +73,8 @@ brings up the equivalent of the AWS `gbn-conduit-full-dev` stack on `localhost`.
 - new scripts:
   - `infra/scripts/bootstrap-k8s.sh` — installs k3d + kubectl if missing
   - `infra/scripts/k8s-up.sh` — `k3d cluster create` + `docker build` + `k3d image import` + `kubectl apply -k infra/k8s/conduit`
+  - `infra/scripts/k8s-smoke.sh` — validates Postgres, admin endpoints, bridge registration, and SendDummy against the local topology
+  - `infra/scripts/k8s-test-publisher-postgres.sh` — port-forwards Kubernetes Postgres and runs the Postgres-backed publisher persistence test
   - `infra/scripts/k8s-down.sh` — `k3d cluster delete`
 - Kustomize overlay structure (`base/` + `dev/` overlay) so future overlays are easy
 - README section in [infra/README-infra.md](../../../prototype/gbn-bridge-proto/infra/README-infra.md)
@@ -359,9 +381,9 @@ spec:
             - configMapRef: { name: conduit-config }
             - secretRef:    { name: postgres-credentials }
           env:
-            - name: GBN_BRIDGE_PG_HOST
+            - name: GBN_BRIDGE_POSTGRES_HOST
               value: postgres.veritas.svc.cluster.local
-            - name: GBN_BRIDGE_PG_PORT
+            - name: GBN_BRIDGE_POSTGRES_PORT
               value: "5432"
           readinessProbe:
             httpGet: { path: /readyz, port: 8080 }
@@ -422,15 +444,17 @@ spec:
           image: veritas/exit-bridge:dev
           imagePullPolicy: IfNotPresent
           ports:
-            - { name: udp-punch, containerPort: 443, protocol: UDP }
+            - { name: udp-punch, containerPort: 4443, protocol: UDP }
             - { name: admin,     containerPort: 9090 }
           envFrom:
             - configMapRef: { name: conduit-config }
           env:
-            - name: GBN_BRIDGE_ROLE
-              value: exit-bridge
-            - name: GBN_BRIDGE_RUN_MODE
-              value: serve
+            - name: GBN_BRIDGE_NODE_ID
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: GBN_BRIDGE_INGRESS_HOST
+              valueFrom:
+                fieldRef: { fieldPath: status.podIP }
 ```
 
 #### `base/bridge-service.yaml`
@@ -443,7 +467,7 @@ metadata:
 spec:
   selector: { app: exit-bridge }
   ports:
-    - { name: udp-punch, port: 443, targetPort: udp-punch, protocol: UDP }
+    - { name: udp-punch, port: 4443, targetPort: udp-punch, protocol: UDP }
   type: ClusterIP
 ```
 
@@ -487,33 +511,85 @@ Add a new section "Local Kubernetes Test Environment" with:
 | `infra/k8s/conduit/overlays/dev/` | dev-specific overrides: random password, possibly resource caps |
 | `infra/scripts/bootstrap-k8s.sh` | install missing toolchain (k3d / kubectl / helm) |
 | `infra/scripts/k8s-up.sh` | end-to-end bring-up |
+| `infra/scripts/k8s-smoke.sh` | local validation for Postgres, admin endpoints, bridge registration, SendDummy, and `chain_id` evidence |
+| `infra/scripts/k8s-test-publisher-postgres.sh` | host-side Cargo persistence validation against Kubernetes Postgres |
 | `infra/scripts/k8s-down.sh` | tear-down |
 | `infra/k8s/observability/` | (created in Phase 2 of this plan) — observability stack manifests / values |
 
 ---
 
-## 7. Validation
+## 7. Implementation Notes
+
+Implementation adjustments made while landing Phase 1:
+
+1. Bridge pods use Kubernetes Downward API values:
+   - `GBN_BRIDGE_NODE_ID` from `metadata.name`
+   - `GBN_BRIDGE_INGRESS_HOST` from `status.podIP`
+
+   This replaces the draft's ECS `auto` metadata path, which is not available in k3d.
+2. Bridge UDP uses container port `4443` instead of privileged port `443` so the
+   non-root `exit-bridge` image can bind reliably in Kubernetes.
+3. The local ConfigMap sets `GBN_BRIDGE_CLOUDWATCH_ENABLED=false`. The binaries now honor
+   that flag, so local k3d execution does not touch the AWS credential chain while the
+   Prometheus path is still pending Phase 3.
+4. `k8s-up.sh` generates `overlays/dev/password.txt` if it is missing, applies the dev
+   Kustomize overlay, waits for rollouts, and then runs `k8s-smoke.sh --send-dummy`.
+5. `k8s-smoke.sh` exists specifically to close the GBN-PROTO-007 validation gap locally:
+   it verifies the full topology, local Postgres, localhost admin endpoints, bridge
+   registration, `SendDummy` from all Conduit pods, authority frame persistence, and recent
+   pod-log `chain_id` evidence.
+6. `k8s-test-publisher-postgres.sh` addresses the existing host-side
+   `persistence_flow` `ConnectionRefused` blocker by port-forwarding the Kubernetes
+   Postgres service, exporting the matching `GBN_BRIDGE_POSTGRES_*` variables plus
+   `GBN_BRIDGE_TEST_POSTGRES_URL`, and running
+   `cargo test -p gbn-bridge-publisher --test persistence_flow`.
+
+---
+
+## 8. Validation
+
+Completed static/local validation in the current Windows-hosted shell:
+
+1. `bash -n prototype/gbn-bridge-proto/infra/scripts/bootstrap-k8s.sh prototype/gbn-bridge-proto/infra/scripts/k8s-up.sh prototype/gbn-bridge-proto/infra/scripts/k8s-down.sh prototype/gbn-bridge-proto/infra/scripts/k8s-smoke.sh prototype/gbn-bridge-proto/infra/scripts/k8s-test-publisher-postgres.sh`
+   passed.
+2. PyYAML parsed every manifest under `prototype/gbn-bridge-proto/infra/k8s/conduit`.
+3. `cargo fmt --all --check` passed in `prototype/gbn-bridge-proto`.
+4. `cargo check --workspace` passed in `prototype/gbn-bridge-proto`.
+5. `cargo test -p gbn-bridge-publisher metrics_emitter` passed.
+6. `git diff --check` passed with only Windows LF/CRLF warnings.
+7. V1 protected-path diff was clean.
+
+Deferred live WSL2 validation because this PowerShell environment does not have `docker`,
+`k3d`, or `kubectl` on PATH:
+
+`cargo test -p gbn-bridge-publisher` was also attempted in this shell and still reaches
+the known `persistence_flow` `ConnectionRefused` failure because no local Postgres is
+listening on the host. The Kubernetes-backed replacement for that check is
+`k8s-test-publisher-postgres.sh`, which requires the live k3d cluster and port-forward.
 
 1. Fresh WSL2 shell. Run `bash prototype/gbn-bridge-proto/infra/scripts/bootstrap-k8s.sh`.
    `k3d`, `kubectl`, and `helm` are installed if missing; idempotent on rerun.
 2. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-up.sh`. Within ~5 minutes:
-   - `kubectl -n veritas get pods` shows 5 pods Running (1 postgres, 1 authority, 1 receiver, 3 bridges).
+   - `kubectl -n veritas get pods` shows 6 pods Running (1 postgres, 1 authority, 1 receiver, 3 bridges).
    - `kubectl -n veritas logs deployment/publisher-authority --tail=50` shows the service started cleanly.
 3. `kubectl -n veritas exec deploy/publisher-authority -- curl -sS http://127.0.0.1:9090/v1/admin/metrics`
    returns JSON (Phase 1 of GBN-PROTO-007's admin endpoint, which must already be in place
    for this test to pass — note dependency).
-4. `kubectl -n veritas exec deploy/publisher-authority -- pg_isready -h postgres -U conduit`
-   succeeds (DB connectivity from authority pod).
-5. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-down.sh`, confirm with `y`,
+4. `bash prototype/gbn-bridge-proto/infra/scripts/k8s-smoke.sh --send-dummy`
+   validates Postgres, admin endpoints, bridge registration, SendDummy from all Conduit
+   pods, persisted frames, and recent `chain_id` logs.
+5. `bash prototype/gbn-bridge-proto/infra/scripts/k8s-test-publisher-postgres.sh`
+   validates the host-side publisher persistence test against Kubernetes Postgres.
+6. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-down.sh`, confirm with `y`,
    cluster is gone, `docker ps` shows no `k3d-veritas-*` containers.
-6. V1 protected-path diff is clean.
+7. Update this document with the live k3d output once the WSL2 run completes.
 
 ---
 
-## 8. Open Questions Carried Into Implementation
+## 9. Open Questions Carried Into Implementation
 
-1. **Receiver Postgres dependency** — confirm whether the receiver binary needs direct
-   Postgres connectivity. If not, drop the `secretRef` from its deployment.
+1. **Receiver Postgres dependency** — receiver does not need direct Postgres connectivity;
+   its deployment does not include the Postgres secret.
 2. **Bridge UDP exposure** — `Service` type `ClusterIP` is used here. If the operator
    wants to send UDP packets from outside the cluster (e.g., from the WSL host) into a
    bridge, type `NodePort` plus a k3d port mapping is needed. Defer until Phase 4
@@ -522,5 +598,5 @@ Add a new section "Local Kubernetes Test Environment" with:
    survive a `k3d cluster stop`/`k3d cluster start` cycle. If not, document the limit.
 4. **Image versioning beyond `:dev`** — for reproducibility across team workstations,
    adopt `:dev-<git-short-sha>` tags. Defer if the team is one developer for now.
-5. **Kustomize secretGenerator vs raw Secret** — current spec uses both for ease.
-   Consolidate during implementation.
+5. **Kustomize secretGenerator vs raw Secret** — the base keeps a placeholder Secret so
+   the base is readable, and the dev overlay replaces it with a generated local password.

@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 3 Detailed Plan: Prometheus Metrics Emission + OTLP Tracing
 
-**Status:** Implemented - variant of GBN-PROTO-007 Phase 3
+**Status:** Implemented - local k8s smoke and workspace validation passed; direct observability query validation blocked by WSL Docker restarts
 **Primary Goal:** add a `/metrics` HTTP endpoint to each Conduit V2 service binary using
 the `prometheus` Rust crate, exposing the same counter set as the AWS variant
 (`AuthorityMetricsSnapshot`, new `ReceiverMetricsSnapshot`, `BridgeMetricsSnapshot`).
@@ -421,15 +421,25 @@ Completed static/local validation in the current Windows-hosted shell:
 8. `git diff --check` passed with only Windows LF/CRLF warnings.
 9. V1 protected-path diff was clean.
 
-Deferred live k8s validation because this PowerShell environment does not have `docker`,
-`k3d`, `kubectl`, or `helm` on PATH. Run the live checks below from the WSL2 shell after
-Phase 3 images are rebuilt and loaded into k3d.
+Live WSL2 update (2026-05-07):
 
-After Phase 3 lands:
+1. Rebuilt and loaded Phase 3 images into the local k3d cluster.
+2. Authority, receiver, and bridge pods reached Ready after fixing OTLP tracer startup to
+   keep the tonic batch exporter inside a live Tokio runtime.
+3. `k8s-smoke.sh --send-dummy` passed from authority, receiver, and each bridge pod.
+4. The full V2 workspace suite passed through
+   `infra/scripts/k8s-test-publisher-postgres.sh --workspace` against the Kubernetes
+   Postgres StatefulSet.
+5. The observability stack rolled out and Prometheus reported Available. Direct
+   Prometheus/Tempo/Loki query checks were attempted but blocked by WSL Docker daemon
+   restarts that stopped the k3d node containers.
 
-1. `cargo fmt --all --check`, `cargo check --workspace`, and the focused Phase 3
-   Prometheus endpoint tests pass. Run full `cargo test --workspace` after the local
-   k8s Postgres service is available for persistence/failover tests.
+Retained live validation checklist for the next stable WSL2 Docker session:
+
+For future direct-observability reruns:
+
+1. `cargo fmt --all --check`, `cargo check --workspace`, the focused Phase 3 Prometheus
+   endpoint tests, and the full workspace suite pass.
 2. Build images with default features:
    `docker build -f Dockerfile.publisher-authority -t veritas/publisher-authority:dev .` etc.
 3. Bring up cluster + observability stack via Phase 1 + Phase 2 scripts.

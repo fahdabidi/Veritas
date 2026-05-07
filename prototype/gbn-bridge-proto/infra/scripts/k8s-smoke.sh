@@ -147,7 +147,21 @@ if [[ "$SEND_DUMMY" == "1" ]]; then
       echo "ERROR: chain_id $chain_id from $pod was not persisted in authority frames." >&2
       exit 1
     fi
-    if ! kubectl -n "$NAMESPACE" logs --tail=1000 -l app.kubernetes.io/part-of=veritas-conduit --all-containers=true | grep -q "$chain_id"; then
+    log_found=0
+    for _ in {1..10}; do
+      recent_logs="$(
+        kubectl -n "$NAMESPACE" logs --tail=2000 \
+        --insecure-skip-tls-verify-backend=true \
+        -l app.kubernetes.io/part-of=veritas-conduit \
+        --all-containers=true
+      )"
+      if [[ "$recent_logs" == *"$chain_id"* ]]; then
+        log_found=1
+        break
+      fi
+      sleep 2
+    done
+    if [[ "$log_found" != "1" ]]; then
       echo "ERROR: chain_id $chain_id from $pod did not appear in recent pod logs." >&2
       exit 1
     fi

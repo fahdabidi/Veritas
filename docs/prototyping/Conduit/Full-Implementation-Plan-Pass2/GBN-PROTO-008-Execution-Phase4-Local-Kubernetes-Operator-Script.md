@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 4 Detailed Plan: Local Kubernetes Operator Script
 
-**Status:** Implemented - variant of GBN-PROTO-007 Phase 5
+**Status:** Implemented - smoke path validated; full interactive menu walkthrough pending stable WSL Docker
 **Primary Goal:** ship a sibling operator script
 `prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh` that mirrors the V1
 operator panel using `kubectl exec` instead of `aws ecs execute-command`. Same menu items
@@ -498,9 +498,18 @@ Completed static/local validation in the current Windows-hosted shell:
 3. V1 protected-path diff was clean.
 4. `shellcheck` was not available in this shell, so shellcheck validation remains deferred.
 
-Deferred live k8s validation because this PowerShell environment does not have `kubectl`
-on PATH. Run the live checks below from the WSL2 shell after `k8s-up.sh`,
-`k8s-observability-up.sh`, and Phase 3 image redeployment complete.
+Live WSL2 update (2026-05-07):
+
+1. The local cluster and Conduit pods came up successfully after image rebuild/import.
+2. The non-interactive smoke path validated the same critical operator flow as the script's
+   `SendDummy` action: authority, receiver, and each bridge pod could trigger
+   `/v1/admin/send-dummy` and receive a `chain_id`, assigned bridge, and `frames=1`.
+3. The local control script remains implemented and syntax-checked. A full manual
+   interactive walkthrough of every menu action is still retained below for the next
+   stable WSL Docker session because Docker daemon restarts stopped the k3d node
+   containers during direct observability validation.
+
+Retained live validation checklist for the next stable WSL2 Docker session:
 
 1. Cluster + observability + Phase 3 metrics emission are live (run `k8s-up.sh` then
    `k8s-observability-up.sh`).

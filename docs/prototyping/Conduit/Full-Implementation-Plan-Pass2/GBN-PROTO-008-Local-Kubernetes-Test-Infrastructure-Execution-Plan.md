@@ -287,7 +287,49 @@ After all four GBN-PROTO-008 phases land:
 
 ---
 
-## 8. Migration Path Back To AWS
+## 8. Local Validation Results (2026-05-07)
+
+GBN-PROTO-008 was validated from WSL Ubuntu using the local k3d cluster and Kubernetes
+Postgres StatefulSet.
+
+Passed:
+
+- Fresh cluster rebuild through `infra/scripts/k8s-down.sh` followed by
+  `infra/scripts/k8s-up.sh`.
+- Postgres `StatefulSet` became Ready; authority, receiver, and 3 bridge deployments
+  became Ready.
+- `k8s-smoke.sh --send-dummy` passed from authority, receiver, and each bridge pod.
+- The targeted Postgres persistence recovery test passed against the cluster Postgres
+  service.
+- The full V2 workspace suite passed through
+  `infra/scripts/k8s-test-publisher-postgres.sh --workspace`.
+- The V1 regression suite passed with `cargo test --workspace` in `prototype/gbn-proto`.
+- Loki, Tempo, Grafana, Promtail, and kube-prometheus-stack installed into the
+  `observability` namespace. After disabling local operator TLS in the
+  kube-prometheus-stack values, Prometheus reported Available and the observability pods
+  reached Running.
+
+Implementation fixes made during validation:
+
+- Same-tag local image redeploys now trigger deployment restarts after `k3d image import`.
+- OTLP tracing now keeps the Tokio runtime alive for the tonic batch exporter, preventing
+  local service pod crashes.
+- Smoke log checks now tolerate local k3d kubelet TLS drift and retry chain-id log matching
+  without `pipefail` false negatives.
+- The kube-prometheus-stack local values disable operator TLS to avoid a missing local
+  admission TLS secret when admission webhook patching is disabled.
+
+Remaining validation gap:
+
+- Direct Prometheus, Tempo, and Loki backend query checks were blocked by WSL Docker daemon
+  restarts that stopped the k3d server and agent containers after the stack rolled out.
+  This is tracked as an environment stability issue. The cluster, Conduit pods, Postgres,
+  smoke flow, persistence suite, and full V2 cargo suite all passed before that failure
+  mode appeared.
+
+---
+
+## 9. Migration Path Back To AWS
 
 When the operator wants to deploy the same Conduit code to EKS or back to ECS Fargate:
 

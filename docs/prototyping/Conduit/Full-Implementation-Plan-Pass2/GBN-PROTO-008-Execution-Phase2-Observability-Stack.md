@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 2 Detailed Plan: Observability Stack (Prometheus + Grafana + Loki + Promtail + Tempo)
 
-**Status:** Implemented locally — live Helm install pending a WSL2 Docker/k3d session
+**Status:** Implemented locally - Helm rollout validated; backend query validation blocked by WSL Docker restarts
 **Primary Goal:** install a self-contained observability stack into the local k3d cluster
 that provides metrics (Prometheus), dashboards + UI (Grafana), log aggregation (Loki +
 Promtail), and distributed tracing (Tempo). Pre-provision Grafana datasources and a
@@ -420,8 +420,20 @@ Completed static/local validation in the current Windows-hosted shell:
 5. `git diff --check` passed with only Windows LF/CRLF warnings.
 6. V1 protected-path diff was clean.
 
-Deferred live WSL2 validation because this PowerShell environment does not have `docker`,
-`k3d`, `kubectl`, or `helm` on PATH:
+Live WSL2 update (2026-05-07):
+
+1. `k8s-observability-up.sh` installed Loki and Tempo successfully.
+2. `kube-prometheus-stack` initially timed out because the operator pod attempted to mount
+   a missing local admission TLS secret.
+3. The local values now set `prometheusOperator.tls.enabled=false`; after that change,
+   the Helm upgrade completed and Prometheus reported Available.
+4. `kubectl -n observability get pods,svc,statefulset,deploy -o wide` showed Grafana,
+   kube-state-metrics, the Prometheus operator, Prometheus, Loki, Tempo, and Promtail
+   running.
+5. Direct Prometheus/Tempo/Loki backend query validation was attempted but blocked by WSL
+   Docker daemon restarts that stopped the k3d node containers after rollout.
+
+Retained live validation checklist for the next stable WSL2 Docker session:
 
 1. Phase 1's cluster is up.
 2. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-observability-up.sh`. Within
@@ -444,7 +456,7 @@ Deferred live WSL2 validation because this PowerShell environment does not have 
    data appears after Phase 3 images are rebuilt/redeployed with `GBN_BRIDGE_OTLP_ENDPOINT`.
 8. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-observability-down.sh`,
    confirm with `y`, namespace and Helm releases are removed.
-9. Update this document with live Helm output once the WSL2 run completes.
+9. Record any new failures or environment-specific deviations in this document.
 
 ---
 

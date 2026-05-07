@@ -1,6 +1,8 @@
 # GBN-PROTO-007 - Execution Phase 5 Detailed Plan: Interactive Control Script Port
 
-**Status:** Completed — implementation landed; live AWS/Kubernetes walk-through deferred until local infrastructure is available
+**Status:** Completed - implementation landed; live AWS script walkthrough deferred
+**Status Detail:** Local Kubernetes sibling smoke validation passed in GBN-PROTO-008;
+live AWS script walkthrough remains deferred.
 **Primary Goal:** replace the 47-line
 [relay-control-interactive-v2.sh](../../../prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh)
 with a structurally adapted port of V1's 1,415-line
@@ -513,7 +515,14 @@ Completed local validation:
    remains a follow-up when that tool is available.
 3. V1 protected-path diff remains clean; this phase only edits V2 paths and docs.
 
-Deferred live validation once the local Kubernetes or deployed AWS stack is available:
+Local Kubernetes validation update (2026-05-07):
+
+The Kubernetes sibling operator path is covered by
+[GBN-PROTO-008 Phase 4](GBN-PROTO-008-Execution-Phase4-Local-Kubernetes-Operator-Script.md).
+The non-interactive smoke flow validated the critical `SendDummy` action from authority,
+receiver, and each bridge pod, returning `chain_id`, assigned bridge, and `frames=1`.
+
+Deferred live AWS validation once a deployed AWS stack is available:
 
 1. Deploy `gbn-conduit-full-dev` stack.
 2. Run the script. Walk every menu item. Each must succeed or print a meaningful error.
@@ -529,7 +538,7 @@ Deferred live validation once the local Kubernetes or deployed AWS stack is avai
 7. Teardown removes the stack and exits cleanly.
 8. Re-run script after teardown - the discovery step prints "no nodes discovered" and
     exits with non-zero, not a panic.
-9. Update this phase document with live-validation results once that pass completes.
+9. Record AWS live-validation results in this phase document once that pass completes.
 
 ---
 

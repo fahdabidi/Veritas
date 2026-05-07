@@ -59,8 +59,22 @@ k3d image import \
   veritas/exit-bridge:dev \
   -c "$CLUSTER_NAME"
 
+restart_deployments=0
+if kubectl -n "$NAMESPACE" get deployment/publisher-authority >/dev/null 2>&1 ||
+  kubectl -n "$NAMESPACE" get deployment/publisher-receiver >/dev/null 2>&1 ||
+  kubectl -n "$NAMESPACE" get deployment/exit-bridge >/dev/null 2>&1; then
+  restart_deployments=1
+fi
+
 echo "Applying Conduit manifests..."
 kubectl apply -k "$OVERLAY_DIR"
+
+if [[ "$restart_deployments" == "1" ]]; then
+  echo "Restarting local-image deployments..."
+  kubectl -n "$NAMESPACE" rollout restart deployment/publisher-authority
+  kubectl -n "$NAMESPACE" rollout restart deployment/publisher-receiver
+  kubectl -n "$NAMESPACE" rollout restart deployment/exit-bridge
+fi
 
 echo "Waiting for Conduit pods..."
 kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=180s

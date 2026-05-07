@@ -3,12 +3,15 @@
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
+use tokio::runtime::{Builder, Runtime};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 const DEFAULT_OTLP_ENDPOINT: &str = "http://tempo.observability.svc.cluster.local:4317";
 
-pub struct OtlpTracingGuard;
+pub struct OtlpTracingGuard {
+    _runtime: Runtime,
+}
 
 impl Drop for OtlpTracingGuard {
     fn drop(&mut self) {
@@ -37,17 +40,23 @@ pub fn init_otlp_tracing_from_env(service_name: &str) -> Result<Option<OtlpTraci
     let exporter = opentelemetry_otlp::new_exporter()
         .tonic()
         .with_endpoint(endpoint);
-    let tracer = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(exporter)
-        .with_trace_config(
-            trace::config().with_resource(Resource::new(vec![KeyValue::new(
-                "service.name",
-                service_name.to_string(),
-            )])),
-        )
-        .install_simple()
-        .map_err(|error| format!("failed to install OTLP tracer: {error}"))?;
+    let runtime = Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_time()
+        .build()
+        .map_err(|error| format!("failed to create OTLP runtime: {error}"))?;
+    let tracer =
+        {
+            let _enter = runtime.enter();
+            opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_exporter(exporter)
+                .with_trace_config(trace::config().with_resource(Resource::new(vec![
+                    KeyValue::new("service.name", service_name.to_string()),
+                ])))
+                .install_batch(opentelemetry_sdk::runtime::Tokio)
+                .map_err(|error| format!("failed to install OTLP tracer: {error}"))?
+        };
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
@@ -56,7 +65,7 @@ pub fn init_otlp_tracing_from_env(service_name: &str) -> Result<Option<OtlpTraci
         .try_init()
         .map_err(|error| format!("failed to initialize tracing subscriber: {error}"))?;
 
-    Ok(Some(OtlpTracingGuard))
+    Ok(Some(OtlpTracingGuard { _runtime: runtime }))
 }
 
 pub fn chain_span(operation: &'static str, chain_id: &str) -> tracing::Span {

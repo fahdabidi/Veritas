@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 1 Detailed Plan: Local Kubernetes Cluster + Conduit Manifests
 
-**Status:** Implemented locally — live k3d bring-up and smoke run pending a WSL2 Docker/k3d session
+**Status:** Implemented locally - live k3d bring-up, smoke run, and Kubernetes Postgres validation passed
 **Primary Goal:** install `k3d` on the developer's WSL2 Ubuntu workstation, create a
 3-node local Kubernetes cluster, build and import the three Conduit V2 container images
 locally, and write Kubernetes manifests for the full Conduit topology so a single command
@@ -559,13 +559,20 @@ Completed static/local validation in the current Windows-hosted shell:
 6. `git diff --check` passed with only Windows LF/CRLF warnings.
 7. V1 protected-path diff was clean.
 
-Deferred live WSL2 validation because this PowerShell environment does not have `docker`,
-`k3d`, or `kubectl` on PATH:
+Live WSL2 update (2026-05-07):
 
-`cargo test -p gbn-bridge-publisher` was also attempted in this shell and still reaches
-the known `persistence_flow` `ConnectionRefused` failure because no local Postgres is
-listening on the host. The Kubernetes-backed replacement for that check is
-`k8s-test-publisher-postgres.sh`, which requires the live k3d cluster and port-forward.
+1. Fresh k3d cluster recreation passed through `k8s-down.sh` followed by `k8s-up.sh`.
+2. Postgres, publisher-authority, publisher-receiver, and all 3 exit-bridge pods reached
+   Ready.
+3. `k8s-smoke.sh --send-dummy` passed. It validated Postgres, admin endpoints, bridge
+   registration, `SendDummy` from all Conduit pods, persisted frames, and recent
+   `chain_id` log evidence.
+4. `k8s-test-publisher-postgres.sh --workspace` passed, closing the earlier host-side
+   local Postgres `ConnectionRefused` blocker by running the workspace suite through a
+   Kubernetes Postgres port-forward.
+5. The V1 regression suite passed with `cargo test --workspace` in `prototype/gbn-proto`.
+
+Retained live validation checklist for future fresh-cluster reruns:
 
 1. Fresh WSL2 shell. Run `bash prototype/gbn-bridge-proto/infra/scripts/bootstrap-k8s.sh`.
    `k3d`, `kubectl`, and `helm` are installed if missing; idempotent on rerun.
@@ -582,7 +589,7 @@ listening on the host. The Kubernetes-backed replacement for that check is
    validates the host-side publisher persistence test against Kubernetes Postgres.
 6. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-down.sh`, confirm with `y`,
    cluster is gone, `docker ps` shows no `k3d-veritas-*` containers.
-7. Update this document with the live k3d output once the WSL2 run completes.
+7. Record any new failures or environment-specific deviations in this document.
 
 ---
 

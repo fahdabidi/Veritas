@@ -1,7 +1,7 @@
 # GBN-PROTO-007 - Conduit V2-to-V1 Parity Execution Plan (Pass 2)
 
 **Document ID:** GBN-PROTO-007
-**Status:** Draft - Phases 1 through 5 pending review
+**Status:** Implemented locally - Phases 1 through 5 complete; AWS live acceptance deferred
 **Last Updated:** 2026-05-07
 **Related Docs:**
 [GBN-PROTO-006 Execution Plan](../Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md),
@@ -291,3 +291,46 @@ criteria, after Phase 5 lands, are:
 7. GBN-PROTO-006 cargo test suite passes.
 8. Per-stack steady-state cost (one stack running 24/7 with template defaults) stays at or
    below $5/day.
+
+### 7.1 Local Kubernetes Validation Results (2026-05-07)
+
+The deferred local validation items from this plan were rerun against the GBN-PROTO-008
+k3d stack in WSL Ubuntu.
+
+Passed:
+
+- `cargo fmt --all`
+- `cargo check -p gbn-bridge-publisher -p gbn-bridge-cli`
+- Fresh local cluster recreation with:
+  `VERITAS_K8S_ASSUME_YES=1 VERITAS_K8S_RUN_SMOKE=1 VERITAS_K8S_RUN_CARGO_PERSISTENCE=1 bash infra/scripts/k8s-down.sh && bash infra/scripts/k8s-up.sh`
+- The local smoke run registered 3 bridge pods and successfully ran `SendDummy` from the
+  authority pod, receiver pod, and each bridge pod. Each response returned a `chain_id`,
+  an assigned bridge, and `frames=1`.
+- The targeted Postgres persistence recovery test passed against the Kubernetes Postgres
+  StatefulSet:
+  `postgres_backed_authority_recovers_bridges_bootstrap_catalog_and_upload_sessions`.
+- The full V2 workspace test suite passed through a Kubernetes Postgres port-forward via
+  `bash infra/scripts/k8s-test-publisher-postgres.sh --workspace`.
+- The V1 regression suite passed with `cargo test --workspace` in `prototype/gbn-proto`.
+
+Fixes made during validation:
+
+- The OTLP tracer now installs the tonic batch exporter inside a kept-alive Tokio runtime,
+  fixing the prior local pod panic: `there is no reactor running`.
+- `k8s-up.sh` now restarts existing same-tag deployments after image import, while avoiding
+  duplicate fresh-cluster rollouts.
+- `k8s-smoke.sh` now handles local k3d kubelet certificate drift and avoids false negatives
+  from `grep -q` under `pipefail`.
+- The local kube-prometheus-stack values disable operator TLS for this single-node dev
+  shape, preventing the missing `kube-prom-admission` secret mount failure.
+
+Still deferred:
+
+- AWS ECS/CloudWatch acceptance items above remain AWS-only and were not exercised by the
+  local k8s validation run.
+- Live backend queries against Prometheus, Tempo, and Loki were attempted after the
+  observability stack rolled out, but the WSL Docker daemon repeatedly restarted and
+  stopped the k3d node containers. This left backend port-forwards returning connection
+  refused. The observability pods reached Running and Prometheus reported Available before
+  the Docker restarts, so the remaining gap is environment stability for direct backend
+  query validation, not a Conduit compile, unit, persistence, or smoke failure.

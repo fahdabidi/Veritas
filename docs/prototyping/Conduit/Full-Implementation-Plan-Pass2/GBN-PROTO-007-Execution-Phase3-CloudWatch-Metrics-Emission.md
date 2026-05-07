@@ -1,6 +1,6 @@
 # GBN-PROTO-007 - Execution Phase 3 Detailed Plan: CloudWatch Metrics Emission
 
-**Status:** Pending — depends on Phase 1 landing first
+**Status:** Completed
 **Primary Goal:** make all three Conduit V2 service binaries (publisher-authority,
 publisher-receiver, exit-bridge) emit per-service metrics to the CloudWatch namespace
 `Veritas/Conduit` on a 60-second cadence so V1's `LiveMetrics` dashboard pattern can be
@@ -368,6 +368,9 @@ abstraction over the client) to verify call shape without hitting AWS.
 9. Cost note: confirm the additional metric line items in Cost Explorer next billing day
    stay under $0.20/day for one stack.
 10. V1 protected-path diff is clean.
+11. Update the Status Trackers table in
+    [GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
+    before starting the next phase.
 
 ---
 

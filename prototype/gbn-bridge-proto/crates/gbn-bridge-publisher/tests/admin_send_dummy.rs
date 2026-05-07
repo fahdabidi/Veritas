@@ -1,0 +1,409 @@
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use ed25519_dalek::SigningKey;
+use gbn_bridge_creator::{CreatorBridgeRequest, CreatorBridgeResponse, SendDummyResult};
+use gbn_bridge_protocol::{
+    publisher_identity, BridgeCapability, BridgeIngressEndpoint, BridgeRegister, PublicKeyBytes,
+    ReachabilityClass, DEFAULT_UDP_PUNCH_PORT,
+};
+use gbn_bridge_publisher::{
+    admin::{AdminCreatorConfig, AdminHttpServer, AdminState, FramesResponse, MetricsResponse},
+    api::AuthorityRoute,
+    AuthorityServer, PublisherAuthority, PublisherServiceConfig,
+};
+
+fn publisher_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[93_u8; 32])
+}
+
+fn actor_signing_key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
+}
+
+fn node_public_key(seed: u8) -> PublicKeyBytes {
+    publisher_identity(&actor_signing_key(seed))
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn bridge_register(bridge_id: &str, key_seed: u8, ingress: SocketAddr) -> BridgeRegister {
+    BridgeRegister {
+        bridge_id: bridge_id.into(),
+        identity_pub: node_public_key(key_seed),
+        ingress_endpoints: vec![BridgeIngressEndpoint {
+            host: ingress.ip().to_string(),
+            port: ingress.port(),
+        }],
+        requested_udp_punch_port: ingress.port(),
+        capabilities: vec![
+            BridgeCapability::BootstrapSeed,
+            BridgeCapability::CatalogRefresh,
+            BridgeCapability::SessionRelay,
+            BridgeCapability::BatchAssignment,
+            BridgeCapability::ProgressReporting,
+        ],
+    }
+}
+
+struct TestTopology {
+    authority: gbn_bridge_publisher::AuthorityServerHandle,
+    admin: gbn_bridge_publisher::admin::AdminHttpServerHandle,
+    fake_bridge: FakeBridgeHandle,
+}
+
+impl TestTopology {
+    fn shutdown(self) {
+        self.admin.join().unwrap();
+        self.authority.join().unwrap();
+        self.fake_bridge.join();
+    }
+}
+
+struct FakeBridgeHandle {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    join: thread::JoinHandle<()>,
+}
+
+impl FakeBridgeHandle {
+    fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    fn join(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .send_to(&[], self.addr);
+        self.join.join().unwrap();
+    }
+}
+
+fn start_fake_bridge(
+    bridge_id: impl Into<String>,
+    service: Arc<Mutex<gbn_bridge_publisher::AuthorityService>>,
+) -> FakeBridgeHandle {
+    let bridge_id = bridge_id.into();
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let addr = socket.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = stop.clone();
+    let join = thread::spawn(move || {
+        let mut buffer = vec![0_u8; 60 * 1024];
+        while !stop_for_thread.load(Ordering::Relaxed) {
+            let (read, peer) = match socket.recv_from(&mut buffer) {
+                Ok(received) => received,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            if read == 0 {
+                continue;
+            }
+            let response = fake_bridge_response(&bridge_id, &service, &buffer[..read]);
+            let payload = serde_json::to_vec(&response).unwrap();
+            let _ = socket.send_to(&payload, peer);
+        }
+    });
+    FakeBridgeHandle { addr, stop, join }
+}
+
+fn fake_bridge_response(
+    bridge_id: &str,
+    service: &Arc<Mutex<gbn_bridge_publisher::AuthorityService>>,
+    payload: &[u8],
+) -> CreatorBridgeResponse {
+    let request = match serde_json::from_slice::<CreatorBridgeRequest>(payload) {
+        Ok(request) => request,
+        Err(error) => {
+            return CreatorBridgeResponse::Error {
+                message: error.to_string(),
+            }
+        }
+    };
+    let mut service = service.lock().unwrap();
+    match request {
+        CreatorBridgeRequest::Open(open) => {
+            let chain_id = open.chain_id.clone();
+            let session_id = open.session_id.clone();
+            match service
+                .publisher_authority_mut()
+                .open_bridge_session_with_chain_id(Some(&chain_id), open)
+            {
+                Ok(()) => CreatorBridgeResponse::Opened {
+                    chain_id,
+                    session_id,
+                },
+                Err(error) => CreatorBridgeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
+        CreatorBridgeRequest::Frame(frame) => {
+            let chain_id = frame.chain_id.clone();
+            match service
+                .publisher_authority_mut()
+                .ingest_bridge_frame_with_chain_id(Some(&chain_id), bridge_id, frame, now_ms())
+            {
+                Ok(ack) => CreatorBridgeResponse::Ack(ack),
+                Err(error) => CreatorBridgeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
+        CreatorBridgeRequest::Close(close) => {
+            let chain_id = close.chain_id.clone();
+            let session_id = close.session_id.clone();
+            match service
+                .publisher_authority_mut()
+                .close_bridge_session_with_chain_id(Some(&chain_id), close)
+            {
+                Ok(()) => CreatorBridgeResponse::Closed {
+                    chain_id,
+                    session_id,
+                },
+                Err(error) => CreatorBridgeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
+    }
+}
+
+fn start_topology(state_kind: AdminStateKind) -> TestTopology {
+    let publisher_key = publisher_signing_key();
+    let publisher_pub = publisher_identity(&publisher_key);
+    let authority = PublisherAuthority::new(publisher_key);
+    let mut config = PublisherServiceConfig::default();
+    config.bind_addr = "127.0.0.1:0".into();
+    let server = AuthorityServer::new(authority, config);
+    let service = server.service_handle();
+    let fake_bridge = start_fake_bridge("bridge-dummy", service.clone());
+    service
+        .lock()
+        .unwrap()
+        .publisher_authority_mut()
+        .register_bridge(
+            bridge_register("bridge-dummy", 54, fake_bridge.addr()),
+            ReachabilityClass::Direct,
+            now_ms(),
+        )
+        .unwrap();
+    let bound = server.bind().unwrap();
+    let authority_url = format!("http://{}", bound.local_addr());
+    let authority_handle = bound.spawn().unwrap();
+    let creator = AdminCreatorConfig {
+        actor_id: state_kind.actor_id().into(),
+        signing_key: actor_signing_key(state_kind.creator_key_seed()),
+        publisher_pub,
+        authority_url,
+        creator_ip_addr: "127.0.0.1".into(),
+        udp_punch_port: DEFAULT_UDP_PUNCH_PORT,
+        timeout: Duration::from_secs(5),
+    };
+    let admin_state = match state_kind {
+        AdminStateKind::Authority => AdminState::authority_with_creator(service, creator),
+        AdminStateKind::Receiver => AdminState::receiver_with_creator(
+            Arc::new(Mutex::new(gbn_bridge_publisher::ReceiverMetrics::default())),
+            creator,
+        ),
+        AdminStateKind::Bridge => AdminState::bridge_with_creator(
+            Arc::new(Mutex::new(gbn_bridge_publisher::BridgeMetrics::default())),
+            creator,
+        ),
+    };
+    let admin = AdminHttpServer::bind("127.0.0.1:0".parse().unwrap(), admin_state, 1_048_576)
+        .unwrap()
+        .spawn()
+        .unwrap();
+
+    TestTopology {
+        authority: authority_handle,
+        admin,
+        fake_bridge,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AdminStateKind {
+    Authority,
+    Receiver,
+    Bridge,
+}
+
+impl AdminStateKind {
+    fn actor_id(self) -> &'static str {
+        match self {
+            Self::Authority => "publisher-authority",
+            Self::Receiver => "publisher-receiver",
+            Self::Bridge => "bridge-dummy",
+        }
+    }
+
+    fn creator_key_seed(self) -> u8 {
+        match self {
+            Self::Authority => 93,
+            Self::Receiver => 72,
+            Self::Bridge => 54,
+        }
+    }
+}
+
+fn post_json<R>(addr: SocketAddr, path: &str, body: &str) -> (u16, R)
+where
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    parse_http_response(&response)
+}
+
+fn get_json<R>(addr: SocketAddr, path: &str) -> (u16, R)
+where
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    parse_http_response(&response)
+}
+
+fn parse_http_response<R>(response: &[u8]) -> (u16, R)
+where
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let header = std::str::from_utf8(&response[..header_end]).unwrap();
+    let status = header
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    let body = &response[header_end + 4..];
+    (status, serde_json::from_slice(body).unwrap())
+}
+
+#[test]
+fn send_dummy_from_authority_returns_chain_id_and_admin_frames_row() {
+    let topology = start_topology(AdminStateKind::Authority);
+
+    let (status, result): (u16, SendDummyResult) = post_json(
+        topology.admin.local_addr(),
+        "/v1/admin/send-dummy",
+        r#"{"size":32}"#,
+    );
+
+    assert_eq!(status, 200);
+    assert!(!result.chain_id.is_empty());
+    assert_eq!(result.assigned_bridge_id, "bridge-dummy");
+    let path = format!("/v1/admin/frames?chain_id={}&limit=10", result.chain_id);
+    let (status, frames): (u16, FramesResponse) = get_json(topology.admin.local_addr(), &path);
+    assert_eq!(status, 200);
+    assert_eq!(frames.frames.len(), 1);
+    assert_eq!(
+        frames.frames[0].chain_id.as_deref(),
+        Some(result.chain_id.as_str())
+    );
+
+    topology.shutdown();
+}
+
+#[test]
+fn send_dummy_from_receiver_returns_chain_id() {
+    let topology = start_topology(AdminStateKind::Receiver);
+
+    let (status, result): (u16, SendDummyResult) =
+        post_json(topology.admin.local_addr(), "/v1/admin/send-dummy", r#"{}"#);
+
+    assert_eq!(status, 200);
+    assert!(!result.chain_id.is_empty());
+    assert_eq!(result.assigned_bridge_id, "bridge-dummy");
+    let (status, metrics): (u16, MetricsResponse) = get_json(
+        topology.admin.local_addr(),
+        AuthorityRoute::AdminMetrics.path(),
+    );
+    assert_eq!(status, 200);
+    assert!(matches!(metrics, MetricsResponse::Receiver(_)));
+
+    topology.shutdown();
+}
+
+#[test]
+fn send_dummy_from_bridge_returns_chain_id_even_when_assigned_to_self() {
+    let topology = start_topology(AdminStateKind::Bridge);
+
+    let (status, result): (u16, SendDummyResult) = post_json(
+        topology.admin.local_addr(),
+        "/v1/admin/send-dummy",
+        r#"{"size":1}"#,
+    );
+
+    assert_eq!(status, 200);
+    assert!(!result.chain_id.is_empty());
+    assert_eq!(result.assigned_bridge_id, "bridge-dummy");
+    let (status, metrics): (u16, MetricsResponse) = get_json(
+        topology.admin.local_addr(),
+        AuthorityRoute::AdminMetrics.path(),
+    );
+    assert_eq!(status, 200);
+    assert!(matches!(metrics, MetricsResponse::Bridge(_)));
+
+    topology.shutdown();
+}
+
+#[test]
+fn send_dummy_without_creator_config_returns_501() {
+    let admin = AdminHttpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        AdminState::stub(),
+        1_048_576,
+    )
+    .unwrap()
+    .spawn()
+    .unwrap();
+
+    let (status, error): (u16, gbn_bridge_publisher::admin::AdminErrorResponse) =
+        post_json(admin.local_addr(), "/v1/admin/send-dummy", r#"{}"#);
+
+    assert_eq!(status, 501);
+    assert_eq!(error.error.code, "not_supported");
+    admin.join().unwrap();
+}

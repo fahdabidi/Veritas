@@ -2,9 +2,9 @@ use std::sync::mpsc::Sender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gbn_bridge_protocol::{
-    BootstrapJoinReply, BootstrapProgressStage, BridgeCommandAck, BridgeControlCommand,
-    BridgeControlFrame, BridgeControlHello, BridgeControlKeepalive, BridgeControlProgress,
-    BridgeControlWelcome, BridgeControlWelcomeUnsigned, ProtocolError,
+    BootstrapJoinReply, BootstrapProgressStage, BridgeCommandAck, BridgeCommandPayload,
+    BridgeControlCommand, BridgeControlFrame, BridgeControlHello, BridgeControlKeepalive,
+    BridgeControlProgress, BridgeControlWelcome, BridgeControlWelcomeUnsigned, ProtocolError,
 };
 use serde::Serialize;
 
@@ -15,7 +15,7 @@ use crate::api::{
     ReceiverCloseBody, ReceiverFrameBody, ReceiverOpenBody,
 };
 use crate::auth::{AuthError, RequestAuthenticator};
-use crate::control::ControlSessionRegistry;
+use crate::control::{BridgeAdminCommandReceipt, ControlSessionRegistry};
 use crate::dispatcher;
 use crate::{ack_service, receiver};
 use crate::{AuthorityError, PublisherAuthority, PublisherServiceConfig};
@@ -313,6 +313,51 @@ impl AuthorityService {
 
     pub fn remove_control_session(&mut self, session_id: &str) {
         self.control_sessions.remove_session(session_id);
+    }
+
+    pub fn push_admin_command(
+        &mut self,
+        bridge_id: &str,
+        payload: BridgeCommandPayload,
+    ) -> Result<BridgeAdminCommandReceipt, ServiceError> {
+        if self.authority.bridge_record(bridge_id).is_none() {
+            return Err(ServiceError::NotFound(format!(
+                "bridge `{bridge_id}` not found"
+            )));
+        }
+        let session = self
+            .control_sessions
+            .bridge_session(bridge_id)
+            .cloned()
+            .ok_or_else(|| {
+                ServiceError::Conflict(format!("bridge `{bridge_id}` is not currently connected"))
+            })?;
+
+        let dispatched_at_ms = now_ms();
+        let chain_id = format!("admin-command-{bridge_id}-{dispatched_at_ms}");
+        let record = self
+            .authority
+            .queue_admin_command(bridge_id, &chain_id, dispatched_at_ms, payload)
+            .map_err(map_authority_error)?;
+        let receipt = BridgeAdminCommandReceipt {
+            command_id: record.command_id.clone(),
+            seq_no: record.seq_no,
+            dispatched_at_ms,
+        };
+        let commands =
+            dispatcher::dispatch_pending_commands(&mut self.authority, &session, dispatched_at_ms)
+                .map_err(map_authority_error)?;
+        for command in commands {
+            session
+                .sender
+                .send(BridgeControlFrame::Command(command))
+                .map_err(|_| {
+                    ServiceError::Conflict(format!(
+                        "bridge `{bridge_id}` disconnected before admin command dispatch"
+                    ))
+                })?;
+        }
+        Ok(receipt)
     }
 
     pub fn error_response(

@@ -641,6 +641,29 @@ impl PublisherAuthority {
         Ok(response)
     }
 
+    pub fn queue_admin_command(
+        &mut self,
+        bridge_id: &str,
+        chain_id: &str,
+        issued_at_ms: u64,
+        payload: BridgeCommandPayload,
+    ) -> AuthorityResult<BridgeCommandRecord> {
+        if !self.storage.bridges.contains_key(bridge_id) {
+            return Err(AuthorityError::BridgeNotFound {
+                bridge_id: bridge_id.to_string(),
+            });
+        }
+        let record = assignment::queue_admin_command(
+            &mut self.storage,
+            bridge_id,
+            chain_id,
+            issued_at_ms,
+            payload,
+        );
+        self.persist_state()?;
+        Ok(record)
+    }
+
     pub fn reconcile_bridge_command_resume(
         &mut self,
         bridge_id: &str,

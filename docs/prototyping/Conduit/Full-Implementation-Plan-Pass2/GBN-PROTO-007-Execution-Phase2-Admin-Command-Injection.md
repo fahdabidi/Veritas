@@ -1,11 +1,15 @@
 # GBN-PROTO-007 - Execution Phase 2 Detailed Plan: Admin Command Injection Endpoint
 
-**Status:** Pending — depends on Phase 1 landing first
+**Status:** Completed
 **Primary Goal:** add `POST /v1/admin/bridges/{bridge_id}/command` to the
 publisher-authority admin listener so an operator can manually inject any
 `BridgeCommandPayload` variant (`SeedAssign`, `PunchStart`, `BatchAssign`, `Revoke`,
 `CatalogRefresh`) into the bridge's existing WebSocket control stream, matching V1's
 `BroadcastSeed` and remediation-equivalent capabilities.
+**Implementation Note:** the current V2 codebase owns live control sessions on
+`AuthorityService`, not a separate `BridgeControlManager`; Phase 2 therefore landed
+`AuthorityService::push_admin_command`. The receipt uses the existing string command-id
+format (`cmd-<bridge_id>-NNNNNN`) instead of adding a UUID dependency.
 **Source Plan:** [GBN-PROTO-007 Execution Plan](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
 **Phase 1 Plan:** [GBN-PROTO-007-Execution-Phase1-Read-Only-Admin-Endpoints](GBN-PROTO-007-Execution-Phase1-Read-Only-Admin-Endpoints.md)
 

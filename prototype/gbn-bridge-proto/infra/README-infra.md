@@ -510,7 +510,7 @@ python ../../../tools/scan_secrets.py ../../../ --fail-on-findings
 | Environment variables | `GBN_BRIDGE_` | `GBN_BRIDGE_PUBLISHER_URL` |
 | Container images | `gbn-conduit-full-` | `gbn-conduit-full-authority` |
 | CloudFormation stacks | `gbn-conduit-full-` | `gbn-conduit-full-dev` |
-| Metrics namespace | `GBN/BridgeProto` | `GBN/BridgeProto` |
+| Metrics namespace | `Veritas/Conduit` | `Veritas/Conduit` |
 | Artifact directories | explicit `/tmp/veritas-*` path | `/tmp/veritas-proto006-phase10-aws-artifacts` |
 
 ### Important Scripts
@@ -522,12 +522,42 @@ python ../../../tools/scan_secrets.py ../../../ --fail-on-findings
 | `scripts/smoke-conduit-full.sh` | verifies stack outputs and ECS running counts |
 | `scripts/mobile-validation-full.sh` | runs local or AWS Phase 10 validation workflow |
 | `scripts/collect-conduit-traces.sh` | collects CloudFormation, ECS, and CloudWatch `chain_id` evidence |
+| `scripts/relay-control-interactive-v2.sh` | interactive ECS-only operator control panel |
 | `scripts/teardown-conduit-full.sh` | deletes only `gbn-conduit-full-*` stacks |
 | `scripts/run-conduit-e2e.sh` | runs the distributed local e2e harness |
 | `scripts/status-snapshot.sh` | legacy prototype stack status helper |
 | `scripts/build-and-push.sh` | legacy prototype image build helper |
 | `scripts/deploy-bridge-test.sh` | legacy prototype stack deploy helper |
 | `scripts/teardown-bridge-test.sh` | deletes only legacy `gbn-bridge-phase2-*` stacks |
+
+### Interactive Control Panel
+
+The interactive operator panel is at
+[`infra/scripts/relay-control-interactive-v2.sh`](scripts/relay-control-interactive-v2.sh).
+Run it with:
+
+```bash
+bash prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh
+```
+
+Override stack name or region with `GBN_BRIDGE_STACK_NAME` and
+`GBN_BRIDGE_AWS_REGION`. `LiveMetrics` derives the CloudWatch `Stack` dimension from
+the stack's `EnvironmentName` parameter; override it with
+`GBN_BRIDGE_METRICS_STACK_DIMENSION` if needed.
+
+The panel discovers all running ECS tasks for the selected stack and presents a numbered
+menu. Admin actions use `aws ecs execute-command --interactive` against each task's
+localhost admin port, `127.0.0.1:9090`; no public admin ingress is required.
+
+Menu items:
+
+- `Status`, `StackOutputs`, `TailLogs`, `ExecShell`, `ShowCatalog`: diagnostics.
+- `DumpBridges`, `DumpFrames`, `AdminMetrics`: localhost admin endpoints.
+- `LiveMetrics`: CloudWatch dashboard for namespace `Veritas/Conduit`.
+- `SendDummy`: pick any node to act as creator and trace the returned `chain_id`.
+- `TriggerCommand`: push a bridge control payload through the authority admin endpoint.
+- `CheckImages`: compare each task's running image digest with ECR `latest`.
+- `BootstrapSmoke`, `Refresh`, `Teardown`, `Exit`: operational workflows.
 
 ### What The Full Stack Creates
 

@@ -1,6 +1,6 @@
 # GBN-PROTO-007 - Execution Phase 4 Detailed Plan: Universal Creator Capability Library
 
-**Status:** Pending — depends on Phase 1 landing first
+**Status:** Completed
 **Primary Goal:** introduce a shared library crate `gbn-bridge-creator` that implements
 the creator side of the V2 bootstrap + frame-upload protocol, link it into all three
 Conduit V2 service binaries, and expose `POST /v1/admin/send-dummy` on every node so any
@@ -446,6 +446,9 @@ After Phase 4 lands:
    --filter-pattern '<chain_id>'` returns log lines from the originating node.
 9. Same filter against the assigned bridge's log group returns lines.
 10. Same filter against the receiver's log group returns lines.
+11. Update the Status Trackers table in
+    [GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
+    before starting the next phase.
 
 ---
 
@@ -462,3 +465,22 @@ After Phase 4 lands:
    If V2 protocol later supports per-frame derived ids, the return becomes a vector.
 5. **Reqwest vs hyper for HTTP** — the creator client makes one HTTPS-ish call to authority.
    Pick whichever is already in workspace; do not add a new HTTP client dep.
+
+---
+
+## 8. Implementation Notes
+
+- Implemented `gbn-bridge-creator` as a library-only crate with `CreatorClient`,
+  `CreatorSession`, `SendDummyResult`, and a small UDP upload envelope used between the
+  creator client and the assigned bridge.
+- The creator bootstrap path posts the existing signed `/v1/bootstrap/join` request shape
+  to the authority and verifies the signed `BootstrapJoinReply`.
+- The upload path sends `BridgeOpen`, `BridgeData`, and `BridgeClose` over UDP to the
+  assigned bridge. The bridge listener forwards through the existing bridge runtime, so the
+  receiver ingest routes still see frames signed and forwarded by the assigned bridge.
+- The implementation intentionally avoids adding a dedicated creator service, image, or ECS
+  task. Authority, receiver, and bridge binaries all expose `POST /v1/admin/send-dummy`.
+- Receiver-as-creator uses an ephemeral startup signing key. Bridge-as-creator reuses the
+  bridge signing key and accepts the documented self-assignment collapse.
+- The detailed spec's initial `tokio`/`url` sketch was adapted to the workspace's existing
+  synchronous stdlib HTTP style to avoid introducing another runtime into the admin path.

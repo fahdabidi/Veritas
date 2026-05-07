@@ -1,6 +1,6 @@
 # GBN-PROTO-007 - Execution Phase 5 Detailed Plan: Interactive Control Script Port
 
-**Status:** Pending — depends on Phases 1, 2, 3, 4 landing first
+**Status:** Completed — implementation landed; live AWS/Kubernetes walk-through deferred until local infrastructure is available
 **Primary Goal:** replace the 47-line
 [relay-control-interactive-v2.sh](../../../prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh)
 with a structurally adapted port of V1's 1,415-line
@@ -16,7 +16,7 @@ originator-node + assigned-bridge + receiver log groups after every SendDummy.
 
 | Item | Current Value | Why It Matters |
 |---|---|---|
-| V2 script in place | [relay-control-interactive-v2.sh](../../../prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh) — 47 lines, 3 menu items | Phase 5 replaces this in place per [GBN-PROTO-007 §4.4](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md) |
+| V2 script in place | [relay-control-interactive-v2.sh](../../../prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh) — ECS-only interactive operator panel | Phase 5 replaced the legacy 47-line stub in place per [GBN-PROTO-007 §4.4](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md) |
 | V1 reference script | [relay-control-interactive.sh](../../../prototype/gbn-proto/infra/scripts/relay-control-interactive.sh) — 1,415 lines | source of structure and patterns; do **not** modify |
 | Existing companion scripts | `status-snapshot.sh`, `bootstrap-smoke.sh`, `teardown-conduit-full.sh`, `smoke-conduit-full.sh` already exist | the port wraps these, does not duplicate them |
 | Phase 1 admin endpoints | available on every binary at `127.0.0.1:9090` | Phase 5 reaches them via `aws ecs execute-command --interactive --command "curl ..."` |
@@ -285,7 +285,7 @@ do_live_metrics() {
         val="$(aws cloudwatch get-metric-statistics \
           --namespace "$CW_NAMESPACE" \
           --metric-name "$metric" \
-          --dimensions Name=Service,Value="$service" Name=Stack,Value="$STACK_NAME" \
+          --dimensions Name=Service,Value="$service" Name=Stack,Value="$(metric_stack_dimension)" \
           --start-time "$(date -u -d '5 minutes ago' +%FT%TZ)" \
           --end-time "$(date -u +%FT%TZ)" \
           --period 60 --statistics Sum --region "$AWS_REGION" \
@@ -474,43 +474,77 @@ Menu items:
 
 ---
 
-## 6. Validation
+## 6. Implementation Notes
 
-After Phase 5 lands:
+Phase 5 landed as an in-place replacement of
+[relay-control-interactive-v2.sh](../../../prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh)
+plus the operator documentation update in
+[README-infra.md](../../../prototype/gbn-bridge-proto/infra/README-infra.md).
 
-1. `shellcheck prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh`
-   passes with no errors (warnings acceptable but reviewed).
-2. Deploy `gbn-conduit-full-dev` stack.
-3. Run the script. Walk every menu item. Each must succeed or print a meaningful error.
-4. SendDummy from each of the 5 nodes (Authority, Receiver, all 3 Bridges):
+Implementation details that changed from the draft specification:
+
+1. `ShowCatalog` uses the Phase 1 authority admin bridge registry
+   (`GET /v1/admin/bridges`) instead of `GET /v1/creator/catalog`. The current V2
+   creator API exposes signed bootstrap/catalog behavior through `POST /v1/creator/bootstrap`,
+   not an unauthenticated live `GET /v1/creator/catalog` route.
+2. `TriggerCommand` generates serde-compatible, internally tagged
+   `BridgeCommandPayload` JSON for `catalog_refresh` and `revoke`, and also allows raw
+   operator-provided `BridgeCommandPayload` JSON. `SeedAssign` is left to the raw JSON
+   path because the real variant needs signed seed-assignment fields.
+3. `SendDummy` parses `chain_id` and `assigned_bridge_id` from the Phase 4 admin
+   response, then offers a CloudWatch Logs trace pass across authority, receiver, and
+   bridge log groups.
+4. `LiveMetrics` queries the CloudWatch `Stack` dimension using the stack's
+   `EnvironmentName` parameter, matching the Phase 3 metrics emitter. Operators can
+   override this with `GBN_BRIDGE_METRICS_STACK_DIMENSION`.
+5. The Status Trackers table in
+   [GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
+   has been updated to mark Phase 5 complete.
+
+---
+
+## 7. Validation
+
+Completed local validation:
+
+1. `bash -n prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh`
+   passes.
+2. `shellcheck` is not installed in the current local environment, so shellcheck validation
+   remains a follow-up when that tool is available.
+3. V1 protected-path diff remains clean; this phase only edits V2 paths and docs.
+
+Deferred live validation once the local Kubernetes or deployed AWS stack is available:
+
+1. Deploy `gbn-conduit-full-dev` stack.
+2. Run the script. Walk every menu item. Each must succeed or print a meaningful error.
+3. SendDummy from each discovered node:
    - returns a chain_id
    - the trace collection step finds the chain_id in at least the originator-node and
      receiver log groups (assigned-bridge log group too unless authority assigned the
      originator-bridge to itself, in which case the bridge appears once)
-5. TriggerCommand `CatalogRefresh` to a chosen bridge: bridge log group shows the
+4. TriggerCommand `CatalogRefresh` to a chosen bridge: bridge log group shows the
    refresh arriving with the issued seq_no.
-6. LiveMetrics renders non-empty rows within 3 minutes of a fresh deploy.
-7. CheckImages prints `up-to-date` for tasks whose images match ECR `:latest`.
-8. Teardown removes the stack and exits cleanly.
-9. V1 protected-path diff is clean (this script only edits V2 paths).
-10. Re-run script after teardown — the discovery step prints "no nodes discovered" and
+5. LiveMetrics renders non-empty rows within 3 minutes of a fresh deploy.
+6. CheckImages prints `up-to-date` for tasks whose images match ECR `:latest`.
+7. Teardown removes the stack and exits cleanly.
+8. Re-run script after teardown - the discovery step prints "no nodes discovered" and
     exits with non-zero, not a panic.
+9. Update this phase document with live-validation results once that pass completes.
 
 ---
 
-## 7. Open Questions Carried Into Implementation
+## 8. Open Questions Carried Into Implementation
 
 1. **HTML report for SendDummy** — V1 generates a styled HTML report at
    [lines 1034-1271](../../../prototype/gbn-proto/infra/scripts/relay-control-interactive.sh#L1034-L1271).
    Skip in this phase, ship as Phase 5b later if operators want it.
-2. **`shellcheck` strictness level** — recommend running with default flags only;
-   `-S warning` may surface noise from the V1-borrowed retry logic that is worth keeping.
-3. **`_metric_names_for` bash function** — needs to enumerate the 10 authority + 5
-   receiver + 6 bridge metrics. Hardcoded list vs CloudWatch `list-metrics` discovery.
-   Recommend: hardcoded, faster startup, predictable output.
-4. **`SeedAssign` payload shape** — `TriggerCommand` issues `SeedAssign` but the protocol
-   variant requires fields. Decide whether the script asks the operator to provide JSON
-   inline or fills sane defaults.
+2. **`shellcheck` strictness level** — run with default flags once shellcheck is available;
+   warnings should be reviewed rather than blanket-suppressed.
+3. **Metric discovery** — `_metric_names_for` intentionally hardcodes the Phase 3 metric
+   names for fast, predictable output instead of calling `cloudwatch list-metrics` on every
+   refresh.
+4. **`SeedAssign` payload shape** — the script supports it through the raw JSON path.
+   A structured prompt can be added later if operators need frequent seed assignment tests.
 5. **Concurrent operator sessions** — two operators running the script at once is
    technically fine (admin endpoints are stateless), but may cause confusion. No locking.
    Recommend: ship without locking; add advisory check later if needed.

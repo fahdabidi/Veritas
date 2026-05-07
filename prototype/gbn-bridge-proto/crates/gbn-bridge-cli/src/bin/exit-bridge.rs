@@ -1,14 +1,22 @@
 use std::env;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
+use gbn_bridge_creator::{CreatorBridgeRequest, CreatorBridgeResponse};
 use gbn_bridge_protocol::{
-    publisher_identity, BridgeCapability, BridgeIngressEndpoint, PublicKeyBytes, ReachabilityClass,
+    publisher_identity, BridgeCapability, BridgeCommandAckStatus, BridgeIngressEndpoint,
+    PublicKeyBytes, ReachabilityClass,
 };
-use gbn_bridge_publisher::admin::{AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR};
+use gbn_bridge_publisher::{
+    admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
+    metrics_emitter::{spawn_cloudwatch_emitter, MetricsEmitterConfig},
+    BridgeMetrics,
+};
 use gbn_bridge_runtime::{
     default_chain_id, default_request_id, BridgeControlClient, ExitBridgeConfig, ExitBridgeRuntime,
     ForwarderClient, HttpJsonTransport, HttpTransportConfig, PublisherApiClient,
@@ -95,15 +103,40 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = BridgeServiceConfig::from_env()?;
-    let admin_addr: SocketAddr = DEFAULT_ADMIN_BIND_ADDR
-        .parse()
-        .expect("default admin bind address should be valid");
-    let admin_server = AdminHttpServer::bind(admin_addr, AdminState::stub(), 1_048_576)
-        .map_err(|error| error.to_string())?;
-    let _admin_handle = admin_server.spawn().map_err(|error| error.to_string())?;
     let signing_key = config.load_signing_key()?;
     let publisher_public_key = config.load_publisher_public_key()?;
     let bridge_identity = PublicKeyBytes::from_verifying_key(&signing_key.verifying_key());
+    let metrics = Arc::new(Mutex::new(BridgeMetrics::default()));
+    let admin_addr: SocketAddr = DEFAULT_ADMIN_BIND_ADDR
+        .parse()
+        .expect("default admin bind address should be valid");
+    let admin_creator = AdminCreatorConfig {
+        actor_id: config.node_id.clone(),
+        signing_key: signing_key.clone(),
+        publisher_pub: publisher_public_key.clone(),
+        authority_url: config.authority_url.clone(),
+        creator_ip_addr: config.ingress_host.clone(),
+        udp_punch_port: config.punch_port,
+        timeout: Duration::from_secs(5),
+    };
+    let admin_server = AdminHttpServer::bind(
+        admin_addr,
+        AdminState::bridge_with_creator(metrics.clone(), admin_creator),
+        1_048_576,
+    )
+    .map_err(|error| error.to_string())?;
+    let _admin_handle = admin_server.spawn().map_err(|error| error.to_string())?;
+    let metrics_for_emitter = metrics.clone();
+    let _metrics_handle = spawn_cloudwatch_emitter(
+        MetricsEmitterConfig::from_env("bridge"),
+        move |service, stack| {
+            metrics_for_emitter
+                .lock()
+                .expect("bridge metrics mutex poisoned while emitting metrics")
+                .snapshot()
+                .cloudwatch_data(service, stack)
+        },
+    );
 
     let authority_transport =
         HttpJsonTransport::new(HttpTransportConfig::new(config.authority_url.clone()))
@@ -176,15 +209,28 @@ fn run() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     runtime.attach_control_client(control_client);
+    metrics
+        .lock()
+        .expect("bridge metrics mutex poisoned")
+        .record_control_reconnect();
+    let (creator_upload_tx, creator_upload_rx) = mpsc::channel();
+    let _creator_upload_handle =
+        spawn_creator_upload_listener(config.punch_port, creator_upload_tx)
+            .map_err(|error| error.to_string())?;
 
     let mut last_keepalive_ms = now_ms();
     loop {
         let current_ms = now_ms();
+        handle_pending_creator_uploads(&mut runtime, &metrics, &creator_upload_rx);
 
         if let Some(ack) = runtime
             .receive_next_control_command(current_ms)
             .map_err(|error| error.to_string())?
         {
+            metrics
+                .lock()
+                .expect("bridge metrics mutex poisoned")
+                .record_command_ack(matches!(ack.status, BridgeCommandAckStatus::Rejected));
             eprintln!(
                 "exit-bridge node_id={} applied command command_id={} seq_no={} chain_id={} status={:?}",
                 config.node_id, ack.command_id, ack.seq_no, ack.chain_id, ack.status
@@ -209,6 +255,162 @@ fn run() -> Result<(), String> {
         }
 
         thread::sleep(Duration::from_millis(config.poll_interval_ms));
+    }
+}
+
+fn spawn_creator_upload_listener(
+    punch_port: u16,
+    work_tx: Sender<CreatorUploadWork>,
+) -> io::Result<thread::JoinHandle<()>> {
+    let socket = UdpSocket::bind(("0.0.0.0", punch_port))?;
+    socket.set_read_timeout(Some(Duration::from_secs(1)))?;
+    Ok(thread::spawn(move || {
+        let mut buffer = vec![0_u8; 60 * 1024];
+        loop {
+            let (read, peer) = match socket.recv_from(&mut buffer) {
+                Ok(received) => received,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("exit-bridge creator upload listener error: {error}");
+                    continue;
+                }
+            };
+            let request = match serde_json::from_slice::<CreatorBridgeRequest>(&buffer[..read]) {
+                Ok(request) => request,
+                Err(error) => {
+                    let response = CreatorBridgeResponse::Error {
+                        message: format!("invalid creator upload packet: {error}"),
+                    };
+                    if let Ok(payload) = serde_json::to_vec(&response) {
+                        let _ = socket.send_to(&payload, peer);
+                    }
+                    continue;
+                }
+            };
+            let (response_tx, response_rx) = mpsc::channel();
+            if work_tx
+                .send(CreatorUploadWork {
+                    request,
+                    response_tx,
+                })
+                .is_err()
+            {
+                let response = CreatorBridgeResponse::Error {
+                    message: "bridge upload worker is unavailable".to_string(),
+                };
+                if let Ok(payload) = serde_json::to_vec(&response) {
+                    let _ = socket.send_to(&payload, peer);
+                }
+                continue;
+            }
+            let response = match response_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(response) => response,
+                Err(error) => CreatorBridgeResponse::Error {
+                    message: format!("bridge upload worker timed out: {error}"),
+                },
+            };
+            let payload = match serde_json::to_vec(&response) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    eprintln!("exit-bridge creator upload response serialization error: {error}");
+                    continue;
+                }
+            };
+            let _ = socket.send_to(&payload, peer);
+        }
+    }))
+}
+
+struct CreatorUploadWork {
+    request: CreatorBridgeRequest,
+    response_tx: Sender<CreatorBridgeResponse>,
+}
+
+fn handle_pending_creator_uploads(
+    runtime: &mut ExitBridgeRuntime,
+    metrics: &Arc<Mutex<BridgeMetrics>>,
+    work_rx: &Receiver<CreatorUploadWork>,
+) {
+    while let Ok(work) = work_rx.try_recv() {
+        let response = handle_creator_upload_request(work.request, runtime, metrics);
+        let _ = work.response_tx.send(response);
+    }
+}
+
+fn handle_creator_upload_request(
+    request: CreatorBridgeRequest,
+    runtime: &mut ExitBridgeRuntime,
+    metrics: &Arc<Mutex<BridgeMetrics>>,
+) -> CreatorBridgeResponse {
+    match request {
+        CreatorBridgeRequest::Open(open) => {
+            let chain_id = open.chain_id.clone();
+            let session_id = open.session_id.clone();
+            let now = now_ms();
+            match runtime.open_data_session_with_chain_id(&chain_id, open, now) {
+                Ok(()) => {
+                    eprintln!(
+                        "exit-bridge creator upload opened session_id={} chain_id={}",
+                        session_id, chain_id
+                    );
+                    CreatorBridgeResponse::Opened {
+                        chain_id,
+                        session_id,
+                    }
+                }
+                Err(error) => CreatorBridgeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
+        CreatorBridgeRequest::Frame(frame) => {
+            let chain_id = frame.chain_id.clone();
+            let bytes = frame.ciphertext.len();
+            let now = now_ms();
+            match runtime.forward_session_frame_with_chain_id(&chain_id, frame, now) {
+                Ok(ack) => {
+                    metrics
+                        .lock()
+                        .expect("bridge metrics mutex poisoned")
+                        .record_frame_forwarded(bytes);
+                    eprintln!(
+                        "exit-bridge creator upload forwarded session_id={} sequence={} chain_id={} status={:?}",
+                        ack.session_id, ack.acked_sequence, ack.chain_id, ack.status
+                    );
+                    CreatorBridgeResponse::Ack(ack)
+                }
+                Err(error) => CreatorBridgeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
+        CreatorBridgeRequest::Close(close) => {
+            let chain_id = close.chain_id.clone();
+            let session_id = close.session_id.clone();
+            let now = now_ms();
+            match runtime.close_data_session_with_chain_id(&chain_id, close, now) {
+                Ok(()) => {
+                    eprintln!(
+                        "exit-bridge creator upload closed session_id={} chain_id={}",
+                        session_id, chain_id
+                    );
+                    CreatorBridgeResponse::Closed {
+                        chain_id,
+                        session_id,
+                    }
+                }
+                Err(error) => CreatorBridgeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
     }
 }
 

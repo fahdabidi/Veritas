@@ -140,6 +140,18 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: conduit-full-cloudwatch-metrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "cloudwatch:namespace": Veritas/Conduit
 
   DatabaseCredentialsSecret:
     Type: AWS::SecretsManager::Secret
@@ -356,6 +368,8 @@ Resources:
               Value: !Ref PostgresTlsAcceptInvalidCerts
             - Name: GBN_BRIDGE_PUBLISHER_SIGNING_MODE
               Value: hex
+            - Name: GBN_BRIDGE_STACK_ENV
+              Value: !Ref EnvironmentName
           Secrets:
             - Name: GBN_BRIDGE_POSTGRES_PASSWORD
               ValueFrom: !Sub "${DatabaseCredentialsSecret}:password::"
@@ -391,6 +405,12 @@ Resources:
               Value: !Sub "0.0.0.0:${ReceiverPort}"
             - Name: GBN_BRIDGE_AUTHORITY_URL
               Value: !Sub "http://publisher-authority.conduit-${EnvironmentName}.internal:${AuthorityPort}"
+            - Name: GBN_BRIDGE_PUBLISHER_PUBLIC_KEY_HEX
+              Value: !Ref PublisherPublicKeyHex
+            - Name: GBN_BRIDGE_CREATOR_SIGNING_MODE
+              Value: ephemeral
+            - Name: GBN_BRIDGE_STACK_ENV
+              Value: !Ref EnvironmentName
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -437,6 +457,8 @@ Resources:
               Value: "5000"
             - Name: GBN_BRIDGE_POLL_INTERVAL_MS
               Value: "250"
+            - Name: GBN_BRIDGE_STACK_ENV
+              Value: !Ref EnvironmentName
           Secrets:
             - Name: GBN_BRIDGE_BRIDGE_SIGNING_SEED_HEX
               ValueFrom: !Ref BridgeSigningSeedSecretArn

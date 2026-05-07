@@ -18,6 +18,7 @@ pub mod http;
 pub mod ingest;
 pub mod lease;
 pub mod metrics;
+pub mod metrics_emitter;
 pub mod policy;
 pub mod punch;
 pub mod receiver;
@@ -45,7 +46,11 @@ pub use authority::PublisherAuthority;
 pub use batching::FinalizedBatch;
 pub use bootstrap::AuthorityBootstrapPlan;
 pub use config::PublisherServiceConfig;
-pub use metrics::{AuthorityMetrics, AuthorityMetricsSnapshot};
+pub use control::BridgeAdminCommandReceipt;
+pub use metrics::{
+    AuthorityMetrics, AuthorityMetricsSnapshot, BridgeMetrics, BridgeMetricsSnapshot,
+    ReceiverMetrics, ReceiverMetricsSnapshot,
+};
 pub use receiver_proxy::{ReceiverProxyConfig, ReceiverProxyHandle, ReceiverProxyServer};
 pub use server::{AuthorityServer, AuthorityServerHandle, BoundAuthorityServer};
 pub use service::{AuthorityService, ServiceError};

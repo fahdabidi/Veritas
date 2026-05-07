@@ -85,6 +85,16 @@ pub fn queue_catalog_refresh_command(
     )
 }
 
+pub fn queue_admin_command(
+    storage: &mut InMemoryAuthorityStorage,
+    bridge_id: &str,
+    chain_id: &str,
+    issued_at_ms: u64,
+    payload: BridgeCommandPayload,
+) -> BridgeCommandRecord {
+    queue_bridge_command(storage, bridge_id, chain_id, issued_at_ms, payload)
+}
+
 pub fn wire_command(session_id: &str, record: &BridgeCommandRecord) -> BridgeControlCommand {
     BridgeControlCommand {
         session_id: session_id.to_string(),

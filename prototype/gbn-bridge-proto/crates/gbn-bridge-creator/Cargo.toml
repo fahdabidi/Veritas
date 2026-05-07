@@ -1,5 +1,5 @@
 [package]
-name = "gbn-bridge-cli"
+name = "gbn-bridge-creator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,10 +7,7 @@ repository.workspace = true
 
 [dependencies]
 ed25519-dalek = { workspace = true }
-gbn-bridge-creator = { path = "../gbn-bridge-creator" }
 gbn-bridge-protocol = { path = "../gbn-bridge-protocol" }
-gbn-bridge-publisher = { path = "../gbn-bridge-publisher" }
-gbn-bridge-runtime = { path = "../gbn-bridge-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
+thiserror = { workspace = true }

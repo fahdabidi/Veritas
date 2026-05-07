@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
@@ -84,6 +85,30 @@ fn stub_admin_server() -> gbn_bridge_publisher::admin::AdminHttpServerHandle {
     let admin = AdminHttpServer::bind(
         "127.0.0.1:0".parse().unwrap(),
         AdminState::stub(),
+        1_048_576,
+    )
+    .unwrap();
+    admin.spawn().unwrap()
+}
+
+fn receiver_admin_server(
+    metrics: Arc<Mutex<gbn_bridge_publisher::ReceiverMetrics>>,
+) -> gbn_bridge_publisher::admin::AdminHttpServerHandle {
+    let admin = AdminHttpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        AdminState::receiver(metrics),
+        1_048_576,
+    )
+    .unwrap();
+    admin.spawn().unwrap()
+}
+
+fn bridge_admin_server(
+    metrics: Arc<Mutex<gbn_bridge_publisher::BridgeMetrics>>,
+) -> gbn_bridge_publisher::admin::AdminHttpServerHandle {
+    let admin = AdminHttpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        AdminState::bridge(metrics),
         1_048_576,
     )
     .unwrap();
@@ -226,8 +251,11 @@ fn admin_metrics_returns_authority_snapshot() {
         get_json(handle.local_addr(), AuthorityRoute::AdminMetrics.path());
 
     assert_eq!(status, 200);
-    assert_eq!(response.authority.successful_registrations, 1);
-    assert_eq!(response.authority.rejected_registrations, 0);
+    let MetricsResponse::Authority(snapshot) = response else {
+        panic!("expected authority metrics");
+    };
+    assert_eq!(snapshot.successful_registrations, 1);
+    assert_eq!(snapshot.rejected_registrations, 0);
     handle.join().unwrap();
 }
 
@@ -238,7 +266,10 @@ fn admin_stub_metrics_returns_zero_snapshot_and_authority_only_routes_501() {
     let (status, metrics): (u16, MetricsResponse) =
         get_json(handle.local_addr(), AuthorityRoute::AdminMetrics.path());
     assert_eq!(status, 200);
-    assert_eq!(metrics.authority.successful_registrations, 0);
+    let MetricsResponse::Authority(snapshot) = metrics else {
+        panic!("expected authority metrics");
+    };
+    assert_eq!(snapshot.successful_registrations, 0);
 
     let (status, error): (u16, AdminErrorResponse) =
         get_json(handle.local_addr(), AuthorityRoute::AdminBridges.path());
@@ -257,5 +288,41 @@ fn admin_frames_rejects_invalid_limit() {
 
     assert_eq!(status, 400);
     assert_eq!(error.error.code, "bad_query");
+    handle.join().unwrap();
+}
+
+#[test]
+fn admin_metrics_returns_receiver_snapshot_variant() {
+    let metrics = Arc::new(Mutex::new(gbn_bridge_publisher::ReceiverMetrics::default()));
+    metrics.lock().unwrap().record_frame_accepted(128);
+    let handle = receiver_admin_server(metrics);
+
+    let (status, response): (u16, MetricsResponse) =
+        get_json(handle.local_addr(), AuthorityRoute::AdminMetrics.path());
+
+    assert_eq!(status, 200);
+    let MetricsResponse::Receiver(snapshot) = response else {
+        panic!("expected receiver metrics");
+    };
+    assert_eq!(snapshot.frames_accepted, 1);
+    assert_eq!(snapshot.bytes_ingested, 128);
+    handle.join().unwrap();
+}
+
+#[test]
+fn admin_metrics_returns_bridge_snapshot_variant() {
+    let metrics = Arc::new(Mutex::new(gbn_bridge_publisher::BridgeMetrics::default()));
+    metrics.lock().unwrap().record_command_ack(false);
+    let handle = bridge_admin_server(metrics);
+
+    let (status, response): (u16, MetricsResponse) =
+        get_json(handle.local_addr(), AuthorityRoute::AdminMetrics.path());
+
+    assert_eq!(status, 200);
+    let MetricsResponse::Bridge(snapshot) = response else {
+        panic!("expected bridge metrics");
+    };
+    assert_eq!(snapshot.commands_received, 1);
+    assert_eq!(snapshot.commands_acked, 1);
     handle.join().unwrap();
 }

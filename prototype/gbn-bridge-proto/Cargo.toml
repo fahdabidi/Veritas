@@ -10,6 +10,7 @@ publish = false
 resolver = "2"
 members = [
     "crates/gbn-bridge-protocol",
+    "crates/gbn-bridge-creator",
     "crates/gbn-bridge-runtime",
     "crates/gbn-bridge-publisher",
     "crates/gbn-bridge-cli",
@@ -22,6 +23,8 @@ license = "Apache-2.0"
 repository = "https://github.com/fahdabidi/Veritas"
 
 [workspace.dependencies]
+aws-config = "1"
+aws-sdk-cloudwatch = "1"
 ed25519-dalek = { version = "2", features = ["rand_core", "std"] }
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 postgres-native-tls = "0.5"
@@ -30,11 +33,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "1"
+tokio = { version = "1", features = ["rt", "time"] }
 tungstenite = "0.24"
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
 gbn-bridge-protocol = { path = "crates/gbn-bridge-protocol" }
+gbn-bridge-creator = { path = "crates/gbn-bridge-creator" }
 gbn-bridge-publisher = { path = "crates/gbn-bridge-publisher" }
 gbn-bridge-runtime = { path = "crates/gbn-bridge-runtime" }
 postgres.workspace = true

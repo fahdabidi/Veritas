@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gbn_bridge_protocol::{BridgeControlError, BridgeControlFrame};
+use serde::{Deserialize, Serialize};
 use tungstenite::{accept, Error as WebSocketError, Message};
 
 use crate::service::{AuthorityService, ServiceError};
@@ -21,6 +22,13 @@ pub struct ControlSessionState {
     pub connected_at_ms: u64,
     pub last_seen_at_ms: u64,
     pub sender: Sender<BridgeControlFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeAdminCommandReceipt {
+    pub command_id: String,
+    pub seq_no: u64,
+    pub dispatched_at_ms: u64,
 }
 
 #[derive(Debug, Default)]

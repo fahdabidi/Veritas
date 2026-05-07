@@ -1,11 +1,13 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde_json::Value;
+
+use crate::metrics::ReceiverMetrics;
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8081";
 const DEFAULT_AUTHORITY_URL: &str = "http://127.0.0.1:8080";
@@ -54,6 +56,7 @@ impl ReceiverProxyConfig {
 pub struct ReceiverProxyServer {
     listener: TcpListener,
     config: ReceiverProxyConfig,
+    metrics: Arc<Mutex<ReceiverMetrics>>,
 }
 
 pub struct ReceiverProxyHandle {
@@ -64,8 +67,19 @@ pub struct ReceiverProxyHandle {
 
 impl ReceiverProxyServer {
     pub fn bind(config: ReceiverProxyConfig) -> io::Result<Self> {
+        Self::bind_with_metrics(config, Arc::new(Mutex::new(ReceiverMetrics::default())))
+    }
+
+    pub fn bind_with_metrics(
+        config: ReceiverProxyConfig,
+        metrics: Arc<Mutex<ReceiverMetrics>>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(config.socket_addr()?)?;
-        Ok(Self { listener, config })
+        Ok(Self {
+            listener,
+            config,
+            metrics,
+        })
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -89,8 +103,9 @@ impl ReceiverProxyServer {
         loop {
             let (stream, _) = self.listener.accept()?;
             let config = self.config.clone();
+            let metrics = Arc::clone(&self.metrics);
             thread::spawn(move || {
-                if let Err(error) = handle_connection(stream, &config) {
+                if let Err(error) = handle_connection(stream, &config, &metrics) {
                     eprintln!("publisher-receiver proxy error: {error}");
                 }
             });
@@ -107,8 +122,9 @@ impl ReceiverProxyServer {
             match self.listener.accept() {
                 Ok((stream, _)) => {
                     let config = self.config.clone();
+                    let metrics = Arc::clone(&self.metrics);
                     thread::spawn(move || {
-                        if let Err(error) = handle_connection(stream, &config) {
+                        if let Err(error) = handle_connection(stream, &config, &metrics) {
                             eprintln!("publisher-receiver proxy error: {error}");
                         }
                     });
@@ -155,7 +171,11 @@ struct ParsedEndpoint {
     port: u16,
 }
 
-fn handle_connection(mut stream: TcpStream, config: &ReceiverProxyConfig) -> io::Result<()> {
+fn handle_connection(
+    mut stream: TcpStream,
+    config: &ReceiverProxyConfig,
+    metrics: &Arc<Mutex<ReceiverMetrics>>,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
@@ -178,12 +198,16 @@ fn handle_connection(mut stream: TcpStream, config: &ReceiverProxyConfig) -> io:
     }
 
     match forward_request(config, &request) {
-        Ok(response) => stream.write_all(&response)?,
+        Ok(response) => {
+            record_receiver_metrics(metrics, &request, response_status(&response));
+            stream.write_all(&response)?
+        }
         Err(error) => {
             eprintln!(
                 "publisher-receiver upstream failure path={} detail={error}",
                 request.path
             );
+            record_receiver_metrics(metrics, &request, Some(502));
             stream.write_all(&json_response(
                 502,
                 "upstream_unavailable",
@@ -193,6 +217,24 @@ fn handle_connection(mut stream: TcpStream, config: &ReceiverProxyConfig) -> io:
     }
 
     Ok(())
+}
+
+fn record_receiver_metrics(
+    metrics: &Arc<Mutex<ReceiverMetrics>>,
+    request: &HttpRequest,
+    status: Option<u16>,
+) {
+    let ok = status
+        .map(|status| (200..300).contains(&status))
+        .unwrap_or(false);
+    let mut metrics = metrics.lock().expect("receiver metrics mutex poisoned");
+    match request.path.as_str() {
+        "/v1/receiver/open" if ok => metrics.record_session_opened(),
+        "/v1/receiver/close" if ok => metrics.record_session_closed(),
+        "/v1/receiver/frame" if ok => metrics.record_frame_accepted(request.body.len()),
+        "/v1/receiver/frame" => metrics.record_frame_rejected(),
+        _ => {}
+    }
 }
 
 fn allowed_path(path: &str) -> bool {
@@ -365,6 +407,20 @@ fn extract_chain_id(body: &[u8]) -> Option<String> {
         .get("chain_id")?
         .as_str()
         .map(|value| value.to_string())
+}
+
+fn response_status(response: &[u8]) -> Option<u16> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?;
+    let header = std::str::from_utf8(&response[..header_end]).ok()?;
+    header
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse::<u16>()
+        .ok()
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {

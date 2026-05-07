@@ -77,6 +77,7 @@ belongs on the **task role** (`ServiceTaskRole`), not the execution role.
    automatically assumed via the ECS metadata endpoint).
 3. CloudFormation template still validates.
 4. `cargo fmt --all --check` and `cargo test --workspace` pass.
+5. V1 protected paths show no local diff.
 
 ---
 
@@ -366,6 +367,7 @@ abstraction over the client) to verify call shape without hitting AWS.
    remains queryable for the standard 15-month retention).
 9. Cost note: confirm the additional metric line items in Cost Explorer next billing day
    stay under $0.20/day for one stack.
+10. V1 protected-path diff is clean.
 
 ---
 

@@ -1,6 +1,6 @@
 # GBN-PROTO-007 - Execution Phase 1 Detailed Plan: Read-Only Admin HTTP Endpoints
 
-**Status:** Pending
+**Status:** Completed
 **Primary Goal:** add three read-only admin HTTP endpoints (`/v1/admin/bridges`,
 `/v1/admin/frames`, `/v1/admin/metrics`) bound to `127.0.0.1:9090` inside every service
 binary, sharing one new admin module so Phases 2–4 can extend it without restructuring.
@@ -460,6 +460,9 @@ After Phase 1 lands:
 8. Confirm a `nmap -p 9090 <task-private-ip>` from another VPC host fails (port not
    exposed).
 9. V1 protected-path diff stays clean.
+10. Update the Status Trackers table in
+    [GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
+    before starting the next phase.
 
 ---
 

@@ -243,6 +243,9 @@ an admin command race; assert each got a unique seq_no allocated from the shared
      (or alternately a future Phase 1 admin endpoint listing recent acks).
 4. From a non-authority container, the same POST returns HTTP 501.
 5. POSTing an unknown `bridge_id` returns HTTP 404 with `{error: "..."}`.
+6. Update the Status Trackers table in
+   [GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
+   before starting the next phase.
 
 ---
 

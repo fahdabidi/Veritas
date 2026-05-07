@@ -74,6 +74,7 @@ the local-k8s analog)
 2. `helm version` works (installed by `bootstrap-k8s.sh`).
 3. The `veritas` namespace is healthy (Conduit pods Running).
 4. Outbound HTTPS to Helm chart repos.
+5. V1 protected paths show no local diff.
 
 ---
 
@@ -400,6 +401,8 @@ Add a section "Local Observability" pointing at:
    absent until Phase 3 wires OTLP export.
 8. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-observability-down.sh`,
    confirm with `y`, namespace and Helm releases are removed.
+9. V1 protected-path diff is clean (this phase only adds new files under
+   `infra/k8s/observability/` and `infra/scripts/`; no V1 path is touched).
 
 ---
 

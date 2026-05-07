@@ -68,7 +68,9 @@
       "WebSearch",
       "Bash(gh repo *)",
       "Bash(where gh.exe)",
-      "Bash(where gh *)"
+      "Bash(where gh *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

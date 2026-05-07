@@ -212,6 +212,9 @@ pub enum AuthorityRoute {
     ReceiverOpen,
     ReceiverFrame,
     ReceiverClose,
+    AdminBridges,
+    AdminFrames,
+    AdminMetrics,
 }
 
 impl AuthorityRoute {
@@ -227,6 +230,9 @@ impl AuthorityRoute {
             Self::ReceiverOpen => "/v1/receiver/open",
             Self::ReceiverFrame => "/v1/receiver/frame",
             Self::ReceiverClose => "/v1/receiver/close",
+            Self::AdminBridges => "/v1/admin/bridges",
+            Self::AdminFrames => "/v1/admin/frames",
+            Self::AdminMetrics => "/v1/admin/metrics",
         }
     }
 }

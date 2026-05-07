@@ -151,6 +151,15 @@ Same as GBN-PROTO-007: one PR per phase. Phases 1 → 2 → 3 → 4 of this plan
 Phase 3 of this plan can land independently of GBN-PROTO-007 Phase 3 (they don't conflict;
 they touch different code paths gated by feature flags or env vars).
 
+### 3.7 V1 Regression Rule
+
+Every GBN-PROTO-008 phase must finish with the V1 cargo test suite passing on the V1
+workspace, even though no V1 files are modified. Phases 3 and 4 in particular touch
+shared workspace `Cargo.toml` deps and feature flags, so a clean V1 build is the
+guardrail against accidental regressions to the protected V1 baseline. The protected
+path list from [GBN-PROTO-007 §3.2](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
+applies verbatim to this track.
+
 ---
 
 ## 4. Locked Decisions

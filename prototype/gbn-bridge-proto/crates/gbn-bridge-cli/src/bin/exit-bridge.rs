@@ -8,6 +8,7 @@ use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
     publisher_identity, BridgeCapability, BridgeIngressEndpoint, PublicKeyBytes, ReachabilityClass,
 };
+use gbn_bridge_publisher::admin::{AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR};
 use gbn_bridge_runtime::{
     default_chain_id, default_request_id, BridgeControlClient, ExitBridgeConfig, ExitBridgeRuntime,
     ForwarderClient, HttpJsonTransport, HttpTransportConfig, PublisherApiClient,
@@ -94,6 +95,12 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = BridgeServiceConfig::from_env()?;
+    let admin_addr: SocketAddr = DEFAULT_ADMIN_BIND_ADDR
+        .parse()
+        .expect("default admin bind address should be valid");
+    let admin_server = AdminHttpServer::bind(admin_addr, AdminState::stub(), 1_048_576)
+        .map_err(|error| error.to_string())?;
+    let _admin_handle = admin_server.spawn().map_err(|error| error.to_string())?;
     let signing_key = config.load_signing_key()?;
     let publisher_public_key = config.load_publisher_public_key()?;
     let bridge_identity = PublicKeyBytes::from_verifying_key(&signing_key.verifying_key());
@@ -149,6 +156,7 @@ fn run() -> Result<(), String> {
         config.authority_url,
         config.receiver_url
     );
+    eprintln!("exit-bridge admin listening on {DEFAULT_ADMIN_BIND_ADDR}");
 
     let control_chain_id =
         default_chain_id("bridge-control-connect", &config.node_id, &lease.lease_id);

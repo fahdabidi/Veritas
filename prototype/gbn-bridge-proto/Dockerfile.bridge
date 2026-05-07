@@ -9,6 +9,9 @@ COPY . .
 RUN cargo build --release -p gbn-bridge-cli --bin exit-bridge
 
 FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 10001 veritas
 USER veritas
 WORKDIR /app

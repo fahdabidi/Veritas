@@ -20,7 +20,7 @@ use crate::storage::{
     postgres::{PostgresAuthorityStorage, PostgresStorageConfig},
     recovery::RecoverySummary,
     BootstrapSessionRecord, BridgeCommandRecord, BridgeRecord, CatalogIssuanceRecord,
-    InMemoryAuthorityStorage, UploadSessionRecord,
+    InMemoryAuthorityStorage, IngestedFrameRecord, UploadSessionRecord,
 };
 use crate::{AuthorityConfig, AuthorityError, AuthorityPolicy, AuthorityResult};
 
@@ -141,6 +141,37 @@ impl PublisherAuthority {
 
     pub fn bridge_record(&self, bridge_id: &str) -> Option<&BridgeRecord> {
         self.storage.bridges.get(bridge_id)
+    }
+
+    pub fn list_bridges(&self) -> Vec<BridgeRecord> {
+        let mut bridges = self.storage.bridges.values().cloned().collect::<Vec<_>>();
+        bridges.sort_by(|left, right| left.bridge_id.cmp(&right.bridge_id));
+        bridges
+    }
+
+    pub fn list_frames(&self, chain_id: Option<&str>, limit: usize) -> Vec<IngestedFrameRecord> {
+        let mut frames = self
+            .storage
+            .upload_sessions
+            .values()
+            .flat_map(|session| session.frames_by_sequence.values())
+            .filter(|record| match chain_id {
+                Some(chain_id) => {
+                    record.chain_id.as_deref() == Some(chain_id)
+                        || record.frame.chain_id == chain_id
+                }
+                None => true,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        frames.sort_by(|left, right| {
+            right
+                .received_at_ms
+                .cmp(&left.received_at_ms)
+                .then_with(|| left.frame.frame_id.cmp(&right.frame.frame_id))
+        });
+        frames.truncate(limit);
+        frames
     }
 
     pub fn last_bridge_command_seq(&self, bridge_id: &str) -> Option<u64> {

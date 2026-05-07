@@ -2,6 +2,7 @@
 
 pub mod ack;
 pub mod ack_service;
+pub mod admin;
 pub mod api;
 pub mod assignment;
 pub mod auth;

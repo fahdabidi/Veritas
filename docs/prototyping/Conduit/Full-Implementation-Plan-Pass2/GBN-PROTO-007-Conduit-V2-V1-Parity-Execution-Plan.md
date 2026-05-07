@@ -25,7 +25,7 @@ Refresh, Exit). Investigation found this is not just a script gap — it is a ba
 
 | Phase | Title | Status |
 |---|---|---|
-| 1 | Read-only Admin HTTP Endpoints | `[ ]` |
+| 1 | Read-only Admin HTTP Endpoints | `[x]` |
 | 2 | Admin Command Injection Endpoint | `[ ]` |
 | 3 | CloudWatch Metrics Emission | `[ ]` |
 | 4 | Universal Creator Capability Library | `[ ]` |

@@ -1,0 +1,278 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conduit-overview
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+data:
+  conduit-overview.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "liveNow": false,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 0,
+            "y": 0
+          },
+          "id": 1,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(conduit_authority_successful_registrations_total[5m]))",
+              "legendFormat": "registrations",
+              "refId": "A"
+            }
+          ],
+          "title": "Authority Registrations",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 6,
+            "y": 0
+          },
+          "id": 2,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(conduit_authority_bootstrap_requests_total[5m]))",
+              "legendFormat": "bootstrap requests",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(conduit_authority_rejected_bootstrap_requests_total[5m]))",
+              "legendFormat": "rejected bootstrap",
+              "refId": "B"
+            }
+          ],
+          "title": "Authority Bootstrap",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 12,
+            "y": 0
+          },
+          "id": 3,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(conduit_receiver_bytes_ingested_total[5m]))",
+              "legendFormat": "bytes ingested",
+              "refId": "A"
+            }
+          ],
+          "title": "Receiver Throughput",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 18,
+            "y": 0
+          },
+          "id": 4,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(conduit_bridge_frames_forwarded_total[5m]))",
+              "legendFormat": "frames forwarded",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(conduit_bridge_commands_received_total[5m]))",
+              "legendFormat": "commands received",
+              "refId": "B"
+            }
+          ],
+          "title": "Bridge Activity",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 0,
+            "y": 6
+          },
+          "id": 5,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "expr": "{namespace=\"veritas\"} |= \"$chain_id\"",
+              "refId": "A"
+            }
+          ],
+          "title": "Conduit Logs By chain_id",
+          "type": "logs"
+        },
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 12,
+            "y": 6
+          },
+          "id": 6,
+          "options": {
+            "showHeader": true
+          },
+          "targets": [
+            {
+              "query": "{ .chain_id = \"$chain_id\" }",
+              "queryType": "traceql",
+              "refId": "A"
+            }
+          ],
+          "title": "Tempo TraceQL By chain_id",
+          "type": "table"
+        }
+      ],
+      "refresh": "15s",
+      "schemaVersion": 39,
+      "tags": [
+        "conduit",
+        "local-k8s"
+      ],
+      "templating": {
+        "list": [
+          {
+            "current": {
+              "selected": false,
+              "text": "",
+              "value": ""
+            },
+            "hide": 0,
+            "label": "chain_id",
+            "name": "chain_id",
+            "options": [],
+            "query": "",
+            "skipUrlSync": false,
+            "type": "textbox"
+          }
+        ]
+      },
+      "time": {
+        "from": "now-30m",
+        "to": "now"
+      },
+      "timepicker": {},
+      "timezone": "utc",
+      "title": "Conduit V2 Overview",
+      "uid": "conduit-overview",
+      "version": 1,
+      "weekStart": ""
+    }

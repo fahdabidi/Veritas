@@ -1,0 +1,30 @@
+# Local Tempo single-binary deployment for Conduit OTLP spans.
+tempo:
+  retention: 24h
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 512Mi
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClassName: local-path
+
+service:
+  type: ClusterIP

@@ -1,0 +1,119 @@
+# Local-only Prometheus/Grafana sizing and Conduit pod discovery.
+fullnameOverride: kube-prom
+
+alertmanager:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: true
+
+nodeExporter:
+  enabled: false
+
+prometheusOperator:
+  admissionWebhooks:
+    enabled: false
+    patch:
+      enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 512Mi
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    retention: 7d
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    additionalScrapeConfigs:
+      - job_name: conduit-pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - veritas
+        relabel_configs:
+          - source_labels:
+              - __meta_kubernetes_pod_annotation_prometheus_io_scrape
+            action: keep
+            regex: "true"
+          - source_labels:
+              - __meta_kubernetes_pod_annotation_prometheus_io_path
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels:
+              - __address__
+              - __meta_kubernetes_pod_annotation_prometheus_io_port
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels:
+              - __meta_kubernetes_namespace
+            target_label: namespace
+          - source_labels:
+              - __meta_kubernetes_pod_name
+            target_label: pod
+          - source_labels:
+              - __meta_kubernetes_pod_label_veritas_role
+            target_label: service
+
+grafana:
+  adminUser: admin
+  adminPassword: admin
+  defaultDashboardsEnabled: false
+  defaultDashboardsTimezone: UTC
+  service:
+    type: NodePort
+    nodePort: 30030
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 512Mi
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: observability
+      folder: Conduit
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
+      defaultDatasourceUID: prometheus
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      access: proxy
+      url: http://loki.observability.svc.cluster.local:3100
+      isDefault: false
+    - name: Tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      url: http://tempo.observability.svc.cluster.local:3200
+      isDefault: false
+      jsonData:
+        tracesToLogs:
+          datasourceUid: loki
+          tags:
+            - chain_id
+          mappedTags:
+            - key: chain_id
+              value: chain_id

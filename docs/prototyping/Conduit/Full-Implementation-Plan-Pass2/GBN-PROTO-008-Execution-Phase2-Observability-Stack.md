@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 2 Detailed Plan: Observability Stack (Prometheus + Grafana + Loki + Promtail + Tempo)
 
-**Status:** Pending — depends on Phase 1
+**Status:** Implemented locally — live Helm install pending a WSL2 Docker/k3d session
 **Primary Goal:** install a self-contained observability stack into the local k3d cluster
 that provides metrics (Prometheus), dashboards + UI (Grafana), log aggregation (Loki +
 Promtail), and distributed tracing (Tempo). Pre-provision Grafana datasources and a
@@ -17,7 +17,7 @@ the local-k8s analog)
 
 | Item | Current Value | Why It Matters |
 |---|---|---|
-| Phase 1 deliverable | `infra/k8s/conduit/` manifests; cluster reachable at `localhost:8080` | Phase 2 adds a sibling `infra/k8s/observability/` tree |
+| Phase 1 deliverable | `infra/k8s/conduit/` manifests and k3d kubeconfig context | Phase 2 adds a sibling `infra/k8s/observability/` tree |
 | Existing observability code in Conduit | none | Phase 2 only stands up the **stack**; Phase 3 wires Conduit binaries into it |
 | Pod scrape annotations | added in Phase 1 (`prometheus.io/scrape: "true"` on each Conduit Deployment) | Prometheus needs configuration that honors these annotations |
 | Helm | installed in Phase 1's bootstrap script | available for chart installs |
@@ -378,7 +378,49 @@ Add a section "Local Observability" pointing at:
 
 ---
 
-## 7. Validation
+## 7. Implementation Notes
+
+Phase 2 landed as local-only Helm values, dashboard provisioning, and install/remove
+scripts:
+
+1. `infra/k8s/observability/values/kube-prometheus-stack.values.yaml` installs
+   Prometheus and Grafana with local resource limits, NodePort `30030`, annotation-based
+   scraping for Conduit pods in the `veritas` namespace, and Loki/Tempo datasources.
+2. `infra/k8s/observability/values/loki-stack.values.yaml` installs Loki and Promtail
+   with 7-day retention and a Promtail pipeline that extracts `chain_id` labels from
+   container logs when present.
+3. `infra/k8s/observability/values/tempo.values.yaml` installs single-binary Tempo with
+   local storage, 24-hour retention, and OTLP gRPC/HTTP receivers ready for Phase 3.
+4. `infra/k8s/observability/dashboards/conduit-overview.json` and
+   `conduit-overview-cm.yaml` pre-provision the `Conduit V2 Overview` dashboard through
+   Grafana's dashboard sidecar.
+5. `infra/scripts/k8s-observability-up.sh` adds Helm repos, installs Loki, Tempo, and
+   kube-prometheus-stack into `observability`, applies the dashboard ConfigMap, and prints
+   the Grafana/Prometheus/Tempo access URLs.
+6. `infra/scripts/k8s-observability-down.sh` removes the Helm releases and namespace.
+7. The Status Trackers table in
+   [GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md](GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md)
+   has been updated to mark Phase 2 complete.
+
+Empty Prometheus panels are expected until Phase 3 adds `/metrics` endpoints to the
+Conduit binaries. Loki should still show pod logs after the live install.
+
+---
+
+## 8. Validation
+
+Completed static/local validation in the current Windows-hosted shell:
+
+1. `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-observability-up.sh prototype/gbn-bridge-proto/infra/scripts/k8s-observability-down.sh`
+   passed.
+2. PyYAML parsed every YAML file under `prototype/gbn-bridge-proto/infra/k8s/observability`.
+3. Python `json` parsed `conduit-overview.json`.
+4. The embedded `conduit-overview.json` content inside `conduit-overview-cm.yaml` parsed as JSON.
+5. `git diff --check` passed with only Windows LF/CRLF warnings.
+6. V1 protected-path diff was clean.
+
+Deferred live WSL2 validation because this PowerShell environment does not have `docker`,
+`k3d`, `kubectl`, or `helm` on PATH:
 
 1. Phase 1's cluster is up.
 2. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-observability-up.sh`. Within
@@ -391,9 +433,8 @@ Add a section "Local Observability" pointing at:
    Tempo all green.
 5. **Empty data is expected** until Phase 3 of this plan emits metrics. Confirm Prometheus
    has discovered the Conduit pod targets:
-   `Status → Targets` shows 5 targets with state UP (paths return 404 for now since
-   `/metrics` is not yet implemented — that is fine; Prometheus marks them as up but
-   scraping fails until Phase 3).
+   `Status -> Targets` shows Conduit pod targets for the `conduit-pods` job. They may be
+   DOWN with HTTP 404 scrape errors until `/metrics` is implemented in Phase 3.
 6. Promtail is shipping logs. Grafana → Explore → Loki, query
    `{namespace="veritas"}` — recent log lines from Conduit pods appear.
 7. Tempo accepts OTLP (verify with the Tempo Service `kubectl -n observability port-forward
@@ -401,21 +442,19 @@ Add a section "Local Observability" pointing at:
    absent until Phase 3 wires OTLP export.
 8. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-observability-down.sh`,
    confirm with `y`, namespace and Helm releases are removed.
-9. V1 protected-path diff is clean (this phase only adds new files under
-   `infra/k8s/observability/` and `infra/scripts/`; no V1 path is touched).
+9. Update this document with live Helm output once the WSL2 run completes.
 
 ---
 
-## 8. Open Questions Carried Into Implementation
+## 9. Open Questions Carried Into Implementation
 
 1. **Resource budget on a 8 GB WSL distro** — Prometheus is the heaviest component
    (~700 MB working set). If WSL has < 6 GB allocated to k3d, drop the kube-state-metrics
    and node-exporter scrapes to fit.
-2. **Loki single-binary vs read/write split** — single-binary is the default; sufficient
-   for dev. Stick with default.
+2. **Loki single-binary vs read/write split** — single-binary remains the local dev shape.
 3. **Tempo OTLP gRPC vs HTTP** — Phase 3 of this plan will pick one. HTTP is simpler from
-   Rust; gRPC has less per-span overhead. Defer until Phase 3.
-4. **Default Grafana admin password** — `admin/admin`. Add a README warning that this is
-   safe only because the cluster is local-only.
+   Rust; gRPC has less per-span overhead. The Phase 2 Tempo values expose both.
+4. **Default Grafana admin password** — `admin/admin`; README now warns that this is
+   local-only.
 5. **Dashboard JSON updates during iteration** — the ConfigMap-based load means a
    `kubectl apply` reloads the dashboard when JSON changes. Document this loop.

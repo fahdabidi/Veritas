@@ -579,6 +579,48 @@ The script opens `kubectl port-forward svc/postgres 15432:5432`, exports the
 `cargo test -p gbn-bridge-publisher --test persistence_flow`. Pass cargo arguments after
 the script name to run a broader suite against the same database.
 
+### Local Observability
+
+After `k8s-up.sh` succeeds, install the local observability stack:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-observability-up.sh
+```
+
+This installs Prometheus, Grafana, Loki, Promtail, and Tempo into the `observability`
+namespace using Helm values under [`infra/k8s/observability`](k8s/observability).
+
+Grafana is exposed at:
+
+```text
+http://localhost:30030
+```
+
+Default local credentials are `admin/admin`. Do not reuse those credentials outside this
+local-only k3d stack.
+
+The `Conduit V2 Overview` dashboard is pre-provisioned under the `Conduit` folder. Before
+GBN-PROTO-008 Phase 3 lands, Prometheus panels can be empty because `/metrics` is not
+implemented yet; Loki log queries should still show pod logs from the `veritas` namespace.
+Use the dashboard `chain_id` textbox to filter Loki and Tempo panels once `SendDummy`
+produces a chain ID.
+
+Useful observability commands:
+
+```bash
+kubectl -n observability get pods,svc
+kubectl -n observability port-forward svc/kube-prom-prometheus 9090:9090
+kubectl -n observability port-forward svc/tempo 3200:3200
+```
+
+Remove observability without deleting the Conduit cluster:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-observability-down.sh
+```
+
 ### Tear Down Local Conduit
 
 ```bash
@@ -616,6 +658,8 @@ Set `VERITAS_K8S_ASSUME_YES=1` for non-interactive cleanup.
 | `scripts/k8s-up.sh` | creates local k3d Conduit topology and runs local smoke validation |
 | `scripts/k8s-smoke.sh` | validates local Postgres, admin endpoints, bridge registration, and SendDummy |
 | `scripts/k8s-test-publisher-postgres.sh` | port-forwards local k8s Postgres and runs publisher persistence tests |
+| `scripts/k8s-observability-up.sh` | installs Prometheus, Grafana, Loki, Promtail, and Tempo locally |
+| `scripts/k8s-observability-down.sh` | removes the local observability namespace and Helm releases |
 | `scripts/k8s-down.sh` | deletes the local k3d Conduit cluster |
 | `scripts/teardown-conduit-full.sh` | deletes only `gbn-conduit-full-*` stacks |
 | `scripts/run-conduit-e2e.sh` | runs the distributed local e2e harness |

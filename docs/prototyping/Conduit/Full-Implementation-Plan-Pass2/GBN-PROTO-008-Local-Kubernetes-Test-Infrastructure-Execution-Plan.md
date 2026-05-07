@@ -1,7 +1,7 @@
 # GBN-PROTO-008 - Local Kubernetes Test Infrastructure - Execution Plan
 
 **Document ID:** GBN-PROTO-008
-**Status:** Active - Phase 1 implemented locally; Phases 2 through 4 pending
+**Status:** Active - Phases 1 and 2 implemented locally; Phases 3 and 4 pending
 **Last Updated:** 2026-05-07
 **Related Docs:**
 [GBN-PROTO-007 V2-V1 Parity Execution Plan](GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md),
@@ -28,7 +28,7 @@ CloudWatch + `aws ecs`.
 | Phase | Title | Status |
 |---|---|---|
 | 1 | Local Kubernetes Cluster + Conduit Manifests | `[x]` |
-| 2 | Observability Stack (Prometheus + Grafana + Loki + Tempo) | `[ ]` |
+| 2 | Observability Stack (Prometheus + Grafana + Loki + Tempo) | `[x]` |
 | 3 | Prometheus Metrics Emission (variant of GBN-PROTO-007 Phase 3) | `[ ]` |
 | 4 | Local Kubernetes Operator Script (variant of GBN-PROTO-007 Phase 5) | `[ ]` |
 
@@ -266,8 +266,9 @@ SendDummy queries Tempo via its HTTP API for a `chain_id` filter and prints the 
 After all four GBN-PROTO-008 phases land:
 
 1. Fresh WSL2 Ubuntu shell. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-up.sh`.
-2. Within ~5 minutes, the cluster is up, all 5 Conduit pods are `Ready`, and Grafana is
-   reachable at `http://localhost:3000` (default creds documented in Phase 2).
+2. Within ~5 minutes, the cluster is up, all 5 Conduit pods plus Postgres are `Ready`,
+   and Grafana is reachable at `http://localhost:30030` (default creds documented in
+   Phase 2).
 3. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh`.
 4. Walk every menu item; each succeeds or prints a meaningful error.
 5. SendDummy from each of the 5 pods (Authority, Receiver, all 3 Bridges):

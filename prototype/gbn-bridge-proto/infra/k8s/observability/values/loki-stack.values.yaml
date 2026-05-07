@@ -1,0 +1,47 @@
+# Local-only Loki + Promtail stack. Grafana and Prometheus are supplied by kube-prometheus-stack.
+loki:
+  enabled: true
+  isDefault: false
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClassName: local-path
+  config:
+    limits_config:
+      retention_period: 168h
+    table_manager:
+      retention_deletes_enabled: true
+      retention_period: 168h
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 512Mi
+
+promtail:
+  enabled: true
+  config:
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+    snippets:
+      pipelineStages:
+        - cri: {}
+        - regex:
+            expression: '.*chain_id[=:]"?(?P<chain_id>[A-Za-z0-9_.:-]+)"?.*'
+        - labels:
+            chain_id:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 256Mi
+
+grafana:
+  enabled: false
+
+prometheus:
+  enabled: false

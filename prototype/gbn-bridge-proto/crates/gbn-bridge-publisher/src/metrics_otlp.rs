@@ -42,7 +42,7 @@ pub fn init_otlp_tracing_from_env(service_name: &str) -> Result<Option<OtlpTraci
         .with_endpoint(endpoint);
     let runtime = Builder::new_multi_thread()
         .worker_threads(1)
-        .enable_time()
+        .enable_all()
         .build()
         .map_err(|error| format!("failed to create OTLP runtime: {error}"))?;
     let tracer =

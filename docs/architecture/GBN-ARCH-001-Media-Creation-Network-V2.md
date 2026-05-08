@@ -4,7 +4,7 @@
 **Architecture Codename:** Conduit  
 **Version:** 0.1 (Draft)  
 **Status:** Decision Recorded - Experimental Conduit coexistence accepted
-**Last Updated:** 2026-04-23
+**Last Updated:** 2026-05-08
 **Parent Architecture:** [GBN-ARCH-000-V2 (Conduit)](GBN-ARCH-000-System-Architecture-V2.md)  
 **Related Prototype:** [GBN-PROTO-005](../prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md)
 
@@ -124,7 +124,115 @@ The one-time first-contact boot flow is:
 11. Simultaneously, `ExitBridgeB` instructs the `NewCreator` to begin tunneling toward those 9 `ExitBridge` nodes. The Publisher may optionally attach additional bridge-entry payloads for those bridges to pass back.
 12. For every successful bridge tunnel, the `NewCreator` marks that DHT entry active in its local table.
 
-### 3.4 Upload Session And Progressive Fanout
+### 3.4 Pre-Processing Pipeline
+
+Conduit uses the same privacy boundary as Lattice: all content preparation happens on the creator device before any upload traffic leaves the device. The Publisher, HostCreator, and ExitBridges must never receive unsanitized media.
+
+```text
+Creator UI / Importer
+  -> load raw media from camera roll, live capture, or file picker
+  -> hand off local file handle to the on-device processing core
+
+Sanitizer
+  -> strip EXIF and container metadata
+  -> remove encoder/device identifiers
+  -> normalize timestamps and creation metadata
+  -> optionally run visual anonymization before network upload
+
+Chunker
+  -> split sanitized bytes into fixed-size chunks
+  -> compute per-chunk plaintext hash
+  -> compute full-content hash for the upload manifest
+
+Session Builder
+  -> create upload session id
+  -> load Publisher trust root
+  -> load local signed DHT / bridge catalog entries
+  -> discard expired or invalid Publisher-signed entries before route selection
+```
+
+The local DHT / discovery table is not a global authority. It is a cache of Publisher-signed creator and bridge entries that lets a creator continue selecting reachable bridges without asking the Publisher for every route decision. A bridge also maintains local lease, peer, and session state needed to keep active tunnels alive, but bridge use is valid only while the Publisher signature and lease window remain valid.
+
+### 3.5 Encryption And Packet Build
+
+The creator encrypts content for the Publisher before assigning chunks to bridges. ExitBridges forward opaque packets and cannot decrypt media or inspect chunk plaintext.
+
+```text
+Per-upload keys
+  -> generate creator ephemeral X25519 keypair
+  -> derive shared secret with Publisher encryption key
+  -> derive upload content key and nonce base with HKDF
+
+Per-chunk encryption
+  -> input: session_id, chunk_index, total_chunks, plaintext_hash, plaintext_chunk
+  -> AAD: session_id || chunk_index || total_chunks || plaintext_hash
+  -> encrypt plaintext_chunk with upload content key
+  -> output: encrypted chunk packet
+
+Encrypted chunk packet
+  [session_id]
+  [chunk_index]
+  [total_chunks]
+  [plaintext_hash]
+  [ciphertext]
+  [auth_tag]
+
+Manifest packet
+  [session_id]
+  [creator_ephemeral_pubkey]
+  [publisher_key_id]
+  [total_chunks]
+  [content_hash]
+  [sanitization_profile]
+  [created_at_ms]
+```
+
+The manifest and chunks are encrypted for the Publisher, then wrapped in bridge data messages for transport. Bridge wrapping is separate from content encryption: it protects the creator-to-bridge tunnel and carries routing/session metadata, but the media payload remains Publisher-only ciphertext.
+
+### 3.6 Circuit Construction & Upload
+
+Conduit does not build a V1 guard-middle-exit onion circuit. Its V2 "circuit" is a set of active Publisher-authorized bridge tunnels selected from the creator's local signed bridge catalog. The creator should treat each active bridge tunnel as an independent upload lane.
+
+```text
+Creator Local DHT / Bridge Catalog
+  -> verify Publisher signatures
+  -> remove expired entries
+  -> rank entries by active tunnel state, reachability, lease expiry, and recent ACK health
+  -> select N upload lanes, preferring diverse bridges
+
+Creator
+  -> send BridgeOpen to selected ExitBridge entries
+  -> include session_id, Publisher key id, and upload-lane metadata
+  -> start or reuse UDP punch tunnel if needed
+
+ExitBridge
+  -> verify its own lease is current
+  -> bind creator session to local tunnel state
+  -> forward opaque BridgeOpen to Publisher receiver
+
+Publisher
+  -> validate session open
+  -> ACK session readiness through the bridge
+
+Creator
+  -> send manifest over one active bridge lane
+  -> disperse encrypted chunks across active bridge lanes
+  -> track each chunk against bridge_id, lane_id, send time, and ACK state
+
+ExitBridge
+  -> forward BridgeData packets to Publisher
+  -> forward Publisher BridgeAck packets back to Creator
+  -> never decrypt content ciphertext
+
+Publisher
+  -> decrypt and verify chunks
+  -> validate plaintext_hash and content_hash
+  -> emit signed ACKs for accepted chunks and manifest completion
+```
+
+Because the creator selects from its local signed bridge table, a temporary Publisher discovery outage must not immediately stop an already-bootstrapped creator from constructing upload lanes. The Publisher remains the trust root and final receiver, but route choice for valid cached entries is local to the creator.
+
+### 3.7 Upload Session And Progressive Fanout
 
 ```text
 NewCreator
@@ -216,6 +324,7 @@ BridgeBatchAssign
 
 ```text
 BridgeOpen
+BridgeManifest
 BridgeData
 BridgeAck
 BridgeClose
@@ -317,6 +426,9 @@ prototype/gbn-proto/
 - creator establishes bidirectional UDP tunnel ACKs on default port `443` unless overridden
 - bridge successfully registers and renews lease
 - creator uploads through one bridge
+- creator sanitizes media before any network upload begins
+- creator encrypts manifest and chunks so bridges only see opaque payloads
+- creator constructs upload lanes from locally cached Publisher-signed bridge entries
 - publisher returns ACK through same bridge session
 - creator fails over to a second bridge after first-bridge loss
 - creator reuses active bridges when fewer than 10 tunnels are available before timeout

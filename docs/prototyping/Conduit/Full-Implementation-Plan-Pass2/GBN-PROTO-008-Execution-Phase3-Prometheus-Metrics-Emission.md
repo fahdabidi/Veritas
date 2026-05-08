@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 3 Detailed Plan: Prometheus Metrics Emission + OTLP Tracing
 
-**Status:** Implemented - local k8s smoke and workspace validation passed; direct observability query validation blocked by WSL Docker restarts
+**Status:** Implemented - local k8s smoke, workspace validation, and direct observability query validation passed
 **Primary Goal:** add a `/metrics` HTTP endpoint to each Conduit V2 service binary using
 the `prometheus` Rust crate, exposing the same counter set as the AWS variant
 (`AuthorityMetricsSnapshot`, new `ReceiverMetricsSnapshot`, `BridgeMetricsSnapshot`).
@@ -431,10 +431,11 @@ Live WSL2 update (2026-05-07):
    `infra/scripts/k8s-test-publisher-postgres.sh --workspace` against the Kubernetes
    Postgres StatefulSet.
 5. The observability stack rolled out and Prometheus reported Available. Direct
-   Prometheus/Tempo/Loki query checks were attempted but blocked by WSL Docker daemon
-   restarts that stopped the k3d node containers.
+   Prometheus/Tempo/Loki query checks passed after fixing WSL Docker instability:
+   Prometheus returned Conduit `up` and `conduit_*` series, Loki returned recent
+   `chain_id` log streams, and Tempo reported `chain_id` tags plus received spans.
 
-Retained live validation checklist for the next stable WSL2 Docker session:
+Retained live validation checklist for future reruns:
 
 For future direct-observability reruns:
 

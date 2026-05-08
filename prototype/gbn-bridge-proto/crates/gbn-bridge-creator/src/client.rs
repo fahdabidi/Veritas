@@ -4,9 +4,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    sign_payload, verify_payload, BootstrapJoinReply, BridgeAckStatus, BridgeClose,
-    BridgeCloseReason, BridgeData, BridgeOpen, CreatorJoinRequest, PendingCreator, PublicKeyBytes,
-    SignatureBytes, DEFAULT_UDP_PUNCH_PORT,
+    sign_payload, verify_payload, BootstrapJoinReply, BridgeAckStatus, BridgeCatalogRequest,
+    BridgeCatalogResponse, BridgeClose, BridgeCloseReason, BridgeData, BridgeOpen,
+    CreatorJoinRequest, PendingCreator, PublicKeyBytes, SignatureBytes, DEFAULT_UDP_PUNCH_PORT,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,7 @@ use crate::session::CreatorSession;
 use crate::upload::{CreatorBridgeRequest, CreatorBridgeResponse};
 
 const BOOTSTRAP_JOIN_PATH: &str = "/v1/bootstrap/join";
+const CREATOR_CATALOG_PATH: &str = "/v1/creator/catalog";
 const HTTP_TIMESTAMP_GUARD_MS: u64 = 25;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_UDP_DATAGRAM_BYTES: usize = 60 * 1024;
@@ -63,6 +64,16 @@ impl CreatorClient {
         let now_ms = now_ms();
         let request_id = format!("send-dummy-{}-{now_ms}", self.actor_id);
         let chain_id = default_chain_id("send-dummy", &self.actor_id, &request_id);
+        self.bootstrap_join_with_ids(authority_url, chain_id, request_id, now_ms)
+    }
+
+    fn bootstrap_join_with_ids(
+        &self,
+        authority_url: &str,
+        chain_id: String,
+        request_id: String,
+        now_ms: u64,
+    ) -> Result<CreatorSession, CreatorError> {
         let join = CreatorJoinRequest {
             chain_id: chain_id.clone(),
             request_id: request_id.clone(),
@@ -113,6 +124,73 @@ impl CreatorClient {
             bridge_address: format!("{}:{}", seed_bridge.ip_addr, seed_bridge.udp_punch_port),
             bootstrap_chain_id: reply.chain_id,
             started_at: Instant::now(),
+        })
+    }
+
+    pub fn discovery_probe(
+        &self,
+        authority_url: &str,
+    ) -> Result<DiscoveryProbeResult, CreatorError> {
+        let started = Instant::now();
+        let now_ms = now_ms();
+        let request_id = format!("discovery-probe-{}-{now_ms}", self.actor_id);
+        let chain_id = default_chain_id("discovery-probe", &self.actor_id, &request_id);
+        let catalog_request_id = format!("{request_id}-catalog");
+        let bootstrap_request_id = format!("{request_id}-bootstrap");
+        let catalog_request = BridgeCatalogRequest {
+            creator_id: self.actor_id.clone(),
+            known_catalog_id: None,
+            direct_only: false,
+            refresh_hint: None,
+        };
+        let catalog_response: AuthorityApiResponse<BridgeCatalogResponse> = self
+            .post_authority_json(
+                authority_url,
+                CREATOR_CATALOG_PATH,
+                AuthorityApiRequestUnsigned {
+                    chain_id: chain_id.clone(),
+                    request_id: catalog_request_id.clone(),
+                    sent_at_ms: now_ms.saturating_sub(HTTP_TIMESTAMP_GUARD_MS),
+                    actor_id: self.actor_id.clone(),
+                    body: CatalogRequestBody {
+                        request: catalog_request,
+                        now_ms,
+                    },
+                },
+            )?;
+        self.verify_authority_response(&catalog_response, &chain_id, &catalog_request_id)?;
+        if !catalog_response.ok {
+            return Err(CreatorError::BootstrapFailed(
+                catalog_response
+                    .error
+                    .map(|error| format!("{}: {}", error.code, error.message))
+                    .unwrap_or_else(|| "authority rejected catalog without an error body".into()),
+            ));
+        }
+        let catalog = catalog_response.body.ok_or_else(|| {
+            CreatorError::BootstrapFailed("authority catalog response had no body".into())
+        })?;
+        catalog.verify_authority(&self.publisher_pub, now_ms)?;
+
+        let known_bridge_ids = catalog
+            .bridges
+            .iter()
+            .map(|bridge| bridge.bridge_id.clone())
+            .collect::<Vec<_>>();
+        let session = self.bootstrap_join_with_ids(
+            authority_url,
+            chain_id.clone(),
+            bootstrap_request_id,
+            now_ms,
+        )?;
+        Ok(DiscoveryProbeResult {
+            chain_id,
+            actor_id: self.actor_id.clone(),
+            assigned_bridge_id: session.bridge_id,
+            bridge_address: session.bridge_address,
+            known_bridge_count: known_bridge_ids.len(),
+            known_bridge_ids,
+            elapsed_ms: started.elapsed().as_millis() as u64,
         })
     }
 
@@ -376,8 +454,25 @@ pub struct SendDummyResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryProbeResult {
+    pub chain_id: String,
+    pub actor_id: String,
+    pub assigned_bridge_id: String,
+    pub bridge_address: String,
+    pub known_bridge_count: usize,
+    pub known_bridge_ids: Vec<String>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BootstrapJoinBody {
     request: CreatorJoinRequest,
+    now_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CatalogRequestBody {
+    request: BridgeCatalogRequest,
     now_ms: u64,
 }
 

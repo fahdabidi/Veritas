@@ -9,6 +9,15 @@ COPY . .
 RUN cargo build --release -p gbn-bridge-cli --bin exit-bridge
 
 FROM debian:bookworm-slim
+ARG VERITAS_BUILD_VERSION=unknown
+ARG VERITAS_BUILD_SOURCE=unknown
+ARG VERITAS_BUILD_CREATED=unknown
+LABEL org.opencontainers.image.title="veritas-exit-bridge" \
+    org.opencontainers.image.version="${VERITAS_BUILD_VERSION}" \
+    org.opencontainers.image.revision="${VERITAS_BUILD_SOURCE}" \
+    org.opencontainers.image.created="${VERITAS_BUILD_CREATED}" \
+    veritas.component="exit-bridge" \
+    veritas.build.version="${VERITAS_BUILD_VERSION}"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -19,7 +28,10 @@ COPY --from=builder /workspace/target/release/exit-bridge /usr/local/bin/exit-br
 ENV GBN_BRIDGE_ROLE=exit-bridge \
     GBN_BRIDGE_RUN_MODE=serve \
     GBN_BRIDGE_PUNCH_PORT=443 \
-    GBN_BRIDGE_BATCH_WINDOW_MS=500
+    GBN_BRIDGE_BATCH_WINDOW_MS=500 \
+    VERITAS_CONDUIT_BUILD_VERSION="${VERITAS_BUILD_VERSION}" \
+    VERITAS_CONDUIT_BUILD_SOURCE="${VERITAS_BUILD_SOURCE}" \
+    VERITAS_CONDUIT_BUILD_CREATED="${VERITAS_BUILD_CREATED}"
 EXPOSE 443/udp
 ENTRYPOINT ["/usr/local/bin/exit-bridge"]
 CMD ["--serve"]

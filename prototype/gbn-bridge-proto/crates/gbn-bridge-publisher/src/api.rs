@@ -217,6 +217,7 @@ pub enum AuthorityRoute {
     AdminMetrics,
     AdminBridgeCommand,
     AdminSendDummy,
+    AdminDiscoveryProbe,
 }
 
 impl AuthorityRoute {
@@ -237,6 +238,7 @@ impl AuthorityRoute {
             Self::AdminMetrics => "/v1/admin/metrics",
             Self::AdminBridgeCommand => "/v1/admin/bridges/:bridge_id/command",
             Self::AdminSendDummy => "/v1/admin/send-dummy",
+            Self::AdminDiscoveryProbe => "/v1/admin/discovery-probe",
         }
     }
 }

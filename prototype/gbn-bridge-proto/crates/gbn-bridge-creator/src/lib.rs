@@ -8,7 +8,7 @@ pub mod error;
 pub mod session;
 pub mod upload;
 
-pub use client::{CreatorClient, SendDummyResult};
+pub use client::{CreatorClient, DiscoveryProbeResult, SendDummyResult};
 pub use error::CreatorError;
 pub use session::CreatorSession;
 pub use upload::{CreatorBridgeRequest, CreatorBridgeResponse};

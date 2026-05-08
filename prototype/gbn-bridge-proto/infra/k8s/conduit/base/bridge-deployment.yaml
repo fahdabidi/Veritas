@@ -25,7 +25,7 @@ spec:
       containers:
         - name: exit-bridge
           image: veritas/exit-bridge:dev
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           ports:
             - name: udp-punch
               containerPort: 4443

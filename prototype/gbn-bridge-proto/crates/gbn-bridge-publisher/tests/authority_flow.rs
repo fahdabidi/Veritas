@@ -115,6 +115,44 @@ fn registration_rejection_and_heartbeat_renewal_work() {
 }
 
 #[test]
+fn active_bridge_registration_is_idempotent_for_same_identity() {
+    let mut authority = authority();
+
+    let first = authority
+        .register_bridge(
+            bridge_register("bridge-restart", 43, "198.51.100.10", 443),
+            ReachabilityClass::Direct,
+            1_000,
+        )
+        .unwrap();
+    let refreshed = authority
+        .register_bridge(
+            bridge_register("bridge-restart", 43, "198.51.100.11", 443),
+            ReachabilityClass::Direct,
+            2_000,
+        )
+        .unwrap();
+
+    assert_eq!(refreshed.bridge_id, "bridge-restart");
+    assert_ne!(refreshed.lease_id, first.lease_id);
+    assert_eq!(authority.active_bridge_count(2_000), 1);
+
+    let error = authority
+        .register_bridge(
+            bridge_register("bridge-restart", 44, "198.51.100.12", 443),
+            ReachabilityClass::Direct,
+            2_500,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        AuthorityError::BridgeAlreadyRegistered {
+            bridge_id: "bridge-restart".into(),
+        }
+    );
+}
+
+#[test]
 fn heartbeat_after_expiry_is_rejected() {
     let mut authority = authority_with_config(AuthorityConfig {
         lease_ttl_ms: 100,

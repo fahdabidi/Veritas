@@ -6,7 +6,9 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
-use gbn_bridge_creator::{CreatorBridgeRequest, CreatorBridgeResponse, SendDummyResult};
+use gbn_bridge_creator::{
+    CreatorBridgeRequest, CreatorBridgeResponse, DiscoveryProbeResult, SendDummyResult,
+};
 use gbn_bridge_protocol::{
     publisher_identity, BridgeCapability, BridgeIngressEndpoint, BridgeRegister, PublicKeyBytes,
     ReachabilityClass, DEFAULT_UDP_PUNCH_PORT,
@@ -347,6 +349,53 @@ fn send_dummy_from_authority_returns_chain_id_and_admin_frames_row() {
 }
 
 #[test]
+fn discovery_probe_from_authority_returns_catalog_without_persisting_frames() {
+    let topology = start_topology(AdminStateKind::Authority);
+
+    let (status, result): (u16, DiscoveryProbeResult) = post_json(
+        topology.admin.local_addr(),
+        "/v1/admin/discovery-probe",
+        r#"{}"#,
+    );
+
+    assert_eq!(status, 200);
+    assert!(result.chain_id.starts_with("discovery-probe-"));
+    assert_eq!(result.actor_id, "publisher-authority");
+    assert_eq!(result.assigned_bridge_id, "bridge-dummy");
+    assert_eq!(result.known_bridge_count, 1);
+    assert_eq!(result.known_bridge_ids, vec!["bridge-dummy".to_string()]);
+    assert!(result
+        .bridge_address
+        .ends_with(&format!(":{}", topology.fake_bridge.addr().port())));
+
+    let path = format!("/v1/admin/frames?chain_id={}&limit=10", result.chain_id);
+    let (status, frames): (u16, FramesResponse) = get_json(topology.admin.local_addr(), &path);
+    assert_eq!(status, 200);
+    assert!(frames.frames.is_empty());
+
+    topology.shutdown();
+}
+
+#[test]
+fn discovery_probe_from_receiver_returns_catalog() {
+    let topology = start_topology(AdminStateKind::Receiver);
+
+    let (status, result): (u16, DiscoveryProbeResult) = post_json(
+        topology.admin.local_addr(),
+        "/v1/admin/discovery-probe",
+        r#"{}"#,
+    );
+
+    assert_eq!(status, 200);
+    assert!(result.chain_id.starts_with("discovery-probe-"));
+    assert_eq!(result.actor_id, "publisher-receiver");
+    assert_eq!(result.assigned_bridge_id, "bridge-dummy");
+    assert_eq!(result.known_bridge_ids, vec!["bridge-dummy".to_string()]);
+
+    topology.shutdown();
+}
+
+#[test]
 fn send_dummy_from_receiver_returns_chain_id() {
     let topology = start_topology(AdminStateKind::Receiver);
 
@@ -402,6 +451,25 @@ fn send_dummy_without_creator_config_returns_501() {
 
     let (status, error): (u16, gbn_bridge_publisher::admin::AdminErrorResponse) =
         post_json(admin.local_addr(), "/v1/admin/send-dummy", r#"{}"#);
+
+    assert_eq!(status, 501);
+    assert_eq!(error.error.code, "not_supported");
+    admin.join().unwrap();
+}
+
+#[test]
+fn discovery_probe_without_creator_config_returns_501() {
+    let admin = AdminHttpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        AdminState::stub(),
+        1_048_576,
+    )
+    .unwrap()
+    .spawn()
+    .unwrap();
+
+    let (status, error): (u16, gbn_bridge_publisher::admin::AdminErrorResponse) =
+        post_json(admin.local_addr(), "/v1/admin/discovery-probe", r#"{}"#);
 
     assert_eq!(status, 501);
     assert_eq!(error.error.code, "not_supported");

@@ -1,6 +1,6 @@
 //! Local admin HTTP surface for Conduit V2 service containers.
 //!
-//! This listener is intended to bind to 127.0.0.1:9090 inside each container.
+//! This listener binds to 127.0.0.1:9090 by default inside each container.
 //! Operators reach it through ECS exec; it is not exposed through public ingress.
 
 use std::io::{self, Read, Write};
@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
-use gbn_bridge_creator::{CreatorClient, CreatorError, SendDummyResult};
+use gbn_bridge_creator::{CreatorClient, CreatorError, DiscoveryProbeResult, SendDummyResult};
 use gbn_bridge_protocol::{BridgeCommandPayload, PublicKeyBytes};
 use serde::{Deserialize, Serialize};
 
@@ -21,13 +21,22 @@ use crate::metrics::{
     AuthorityMetricsSnapshot, BridgeMetrics, BridgeMetricsSnapshot, ReceiverMetrics,
     ReceiverMetricsSnapshot,
 };
+use crate::metrics_otlp;
 use crate::service::{AuthorityService, ServiceError};
 use crate::storage::{BridgeRecord, IngestedFrameRecord};
 
+pub const ADMIN_BIND_ADDR_ENV: &str = "GBN_BRIDGE_ADMIN_BIND_ADDR";
 pub const DEFAULT_ADMIN_BIND_ADDR: &str = "127.0.0.1:9090";
 const DEFAULT_FRAME_LIMIT: usize = 1_000;
 const DEFAULT_SEND_DUMMY_SIZE: usize = 512;
 const MAX_SEND_DUMMY_SIZE: usize = 8 * 1024;
+
+pub fn admin_bind_addr_from_env() -> Result<SocketAddr, String> {
+    std::env::var(ADMIN_BIND_ADDR_ENV)
+        .unwrap_or_else(|_| DEFAULT_ADMIN_BIND_ADDR.to_string())
+        .parse()
+        .map_err(|_| format!("{ADMIN_BIND_ADDR_ENV} must be a valid socket address"))
+}
 
 #[derive(Debug, Clone)]
 pub struct AdminState {
@@ -81,6 +90,9 @@ pub struct InjectCommandRequest {
 pub struct SendDummyRequest {
     pub size: Option<usize>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryProbeRequest {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminErrorResponse {
@@ -304,6 +316,9 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         ("POST", path) if path == AuthorityRoute::AdminSendDummy.path() => {
             inject_send_dummy(state, &request.body)
         }
+        ("POST", path) if path == AuthorityRoute::AdminDiscoveryProbe.path() => {
+            inject_discovery_probe(state, &request.body)
+        }
         ("POST", path) => match admin_bridge_command_target(path) {
             Some(bridge_id) => inject_bridge_command(state, bridge_id, &request.body),
             None => error_response(404, "not_found", "admin route not found"),
@@ -355,7 +370,51 @@ fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
     .with_creator_endpoint(config.creator_ip_addr.clone(), config.udp_punch_port)
     .with_timeout(config.timeout);
     match client.send_dummy(&config.authority_url, size) {
-        Ok(result) => json_response::<SendDummyResult>(200, &result),
+        Ok(result) => {
+            let _chain_span =
+                metrics_otlp::chain_span("admin_send_dummy", &result.chain_id).entered();
+            metrics_otlp::record_chain_id(&result.chain_id);
+            json_response::<SendDummyResult>(200, &result)
+        }
+        Err(error) => creator_error_response(error),
+    }
+}
+
+fn inject_discovery_probe(state: &AdminState, body: &[u8]) -> Vec<u8> {
+    let Some(config) = &state.creator else {
+        return error_response(
+            501,
+            "not_supported",
+            "discovery-probe is not configured on this admin listener",
+        );
+    };
+    if !body.is_empty() {
+        match serde_json::from_slice::<DiscoveryProbeRequest>(body) {
+            Ok(_) => {}
+            Err(error) => {
+                return error_response(
+                    400,
+                    "bad_request",
+                    &format!("invalid discovery-probe json: {error}"),
+                )
+            }
+        }
+    }
+
+    let client = CreatorClient::new(
+        config.actor_id.clone(),
+        config.signing_key.clone(),
+        config.publisher_pub.clone(),
+    )
+    .with_creator_endpoint(config.creator_ip_addr.clone(), config.udp_punch_port)
+    .with_timeout(config.timeout);
+    match client.discovery_probe(&config.authority_url) {
+        Ok(result) => {
+            let _chain_span =
+                metrics_otlp::chain_span("admin_discovery_probe", &result.chain_id).entered();
+            metrics_otlp::record_chain_id(&result.chain_id);
+            json_response::<DiscoveryProbeResult>(200, &result)
+        }
         Err(error) => creator_error_response(error),
     }
 }

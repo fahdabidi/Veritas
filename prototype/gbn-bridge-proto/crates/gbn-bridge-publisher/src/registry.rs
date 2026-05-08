@@ -23,14 +23,16 @@ pub fn register_bridge(
         });
     }
 
-    if storage
+    if let Some(record) = storage
         .bridges
         .get(&request.bridge_id)
-        .is_some_and(|record| record.is_active(now_ms))
+        .filter(|record| record.is_active(now_ms))
     {
-        return Err(AuthorityError::BridgeAlreadyRegistered {
-            bridge_id: request.bridge_id,
-        });
+        if record.identity_pub != request.identity_pub {
+            return Err(AuthorityError::BridgeAlreadyRegistered {
+                bridge_id: request.bridge_id,
+            });
+        }
     }
 
     let bridge_id = request.bridge_id.clone();

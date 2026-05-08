@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 4 Detailed Plan: Local Kubernetes Operator Script
 
-**Status:** Implemented - smoke path validated; full interactive menu walkthrough pending stable WSL Docker
+**Status:** Implemented - smoke path validated; backend stability blocker resolved; manual menu walkthrough retained for operator UX acceptance
 **Primary Goal:** ship a sibling operator script
 `prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh` that mirrors the V1
 operator panel using `kubectl exec` instead of `aws ecs execute-command`. Same menu items
@@ -504,12 +504,12 @@ Live WSL2 update (2026-05-07):
 2. The non-interactive smoke path validated the same critical operator flow as the script's
    `SendDummy` action: authority, receiver, and each bridge pod could trigger
    `/v1/admin/send-dummy` and receive a `chain_id`, assigned bridge, and `frames=1`.
-3. The local control script remains implemented and syntax-checked. A full manual
-   interactive walkthrough of every menu action is still retained below for the next
-   stable WSL Docker session because Docker daemon restarts stopped the k3d node
-   containers during direct observability validation.
+3. The local control script remains implemented and syntax-checked. The Docker stability
+   blocker that interrupted direct observability validation is resolved; a full manual
+   walkthrough of every menu action is still retained below as operator UX acceptance
+   coverage.
 
-Retained live validation checklist for the next stable WSL2 Docker session:
+Retained live validation checklist for future operator UX reruns:
 
 1. Cluster + observability + Phase 3 metrics emission are live (run `k8s-up.sh` then
    `k8s-observability-up.sh`).

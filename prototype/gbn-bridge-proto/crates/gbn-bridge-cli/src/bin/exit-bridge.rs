@@ -10,10 +10,10 @@ use ed25519_dalek::SigningKey;
 use gbn_bridge_creator::{CreatorBridgeRequest, CreatorBridgeResponse};
 use gbn_bridge_protocol::{
     publisher_identity, BridgeCapability, BridgeCommandAckStatus, BridgeIngressEndpoint,
-    PublicKeyBytes, ReachabilityClass,
+    BridgeLease, PublicKeyBytes, ReachabilityClass,
 };
 use gbn_bridge_publisher::{
-    admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
+    admin::{admin_bind_addr_from_env, AdminCreatorConfig, AdminHttpServer, AdminState},
     metrics_emitter::{cloudwatch_metrics_enabled, spawn_cloudwatch_emitter, MetricsEmitterConfig},
     metrics_http::MetricsHttpServer,
     metrics_otlp,
@@ -22,7 +22,7 @@ use gbn_bridge_publisher::{
 };
 use gbn_bridge_runtime::{
     default_chain_id, default_request_id, BridgeControlClient, ExitBridgeConfig, ExitBridgeRuntime,
-    ForwarderClient, HttpJsonTransport, HttpTransportConfig, PublisherApiClient,
+    ForwarderClient, HttpJsonTransport, HttpTransportConfig, PublisherApiClient, RuntimeError,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -32,6 +32,7 @@ const DEFAULT_RECEIVER_URL: &str = "http://127.0.0.1:8081";
 const DEFAULT_CONTROL_URL: &str = "ws://127.0.0.1:8080/v1/bridge/control";
 const DEFAULT_NODE_ID: &str = "exit-bridge";
 const DEFAULT_INGRESS_HOST: &str = "127.0.0.1";
+const STARTUP_RETRY_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_SIGNING_KEY_HEX: &str = "11\
 11\
 11\
@@ -111,9 +112,7 @@ fn run() -> Result<(), String> {
     let publisher_public_key = config.load_publisher_public_key()?;
     let bridge_identity = PublicKeyBytes::from_verifying_key(&signing_key.verifying_key());
     let metrics = Arc::new(Mutex::new(BridgeMetrics::default()));
-    let admin_addr: SocketAddr = DEFAULT_ADMIN_BIND_ADDR
-        .parse()
-        .expect("default admin bind address should be valid");
+    let admin_addr = admin_bind_addr_from_env()?;
     let admin_creator = AdminCreatorConfig {
         actor_id: config.node_id.clone(),
         signing_key: signing_key.clone(),
@@ -166,6 +165,11 @@ fn run() -> Result<(), String> {
         None
     };
 
+    let (build_version, build_source, build_created, image) = conduit_build_metadata();
+    eprintln!(
+        "exit-bridge build_version={} build_source={} build_created={} image={}",
+        build_version, build_source, build_created, image
+    );
     let authority_transport =
         HttpJsonTransport::new(HttpTransportConfig::new(config.authority_url.clone()))
             .map_err(|error| error.to_string())?;
@@ -205,9 +209,7 @@ fn run() -> Result<(), String> {
         receiver_transport,
     ));
 
-    let lease = runtime
-        .startup(config.reachability_class.clone(), now_ms())
-        .map_err(|error| error.to_string())?;
+    let lease = start_bridge_with_retry(&mut runtime, &config)?;
     eprintln!(
         "exit-bridge node_id={} ingress_host={} udp_punch_port={} lease_id={} authority_url={} receiver_url={}",
         config.node_id,
@@ -218,27 +220,17 @@ fn run() -> Result<(), String> {
         config.receiver_url
     );
     eprintln!(
-        "exit-bridge admin listening on {DEFAULT_ADMIN_BIND_ADDR}; prometheus metrics listening on {prometheus_local_addr}"
+        "exit-bridge admin listening on {admin_addr}; prometheus metrics listening on {prometheus_local_addr}"
     );
 
-    let control_chain_id =
-        default_chain_id("bridge-control-connect", &config.node_id, &lease.lease_id);
-    metrics_otlp::record_chain_id(&control_chain_id);
-    let control_request_id = default_request_id("control-hello", &config.node_id, now_ms());
-    let control_client = BridgeControlClient::connect(
-        &config.control_url,
-        &config.node_id,
-        &lease.lease_id,
+    let control_client = connect_bridge_control_with_retry(
+        &config,
+        &lease,
         &bridge_identity,
         &signing_key,
         &publisher_public_key,
-        &control_chain_id,
-        &control_request_id,
-        now_ms(),
         None,
-        config.control_max_skew_ms,
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     runtime.attach_control_client(control_client);
     metrics
         .lock()
@@ -254,10 +246,26 @@ fn run() -> Result<(), String> {
         let current_ms = now_ms();
         handle_pending_creator_uploads(&mut runtime, &metrics, &creator_upload_rx);
 
-        if let Some(ack) = runtime
-            .receive_next_control_command(current_ms)
-            .map_err(|error| error.to_string())?
-        {
+        let control_ack = match runtime.receive_next_control_command(current_ms) {
+            Ok(ack) => ack,
+            Err(error) if is_control_transport_error(&error) => {
+                try_reconnect_bridge_control(
+                    &mut runtime,
+                    &metrics,
+                    &config,
+                    &bridge_identity,
+                    &signing_key,
+                    &publisher_public_key,
+                    &error,
+                );
+                last_keepalive_ms = now_ms();
+                thread::sleep(Duration::from_millis(config.poll_interval_ms));
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+
+        if let Some(ack) = control_ack {
             let _chain_span =
                 metrics_otlp::chain_span("bridge_control_command", &ack.chain_id).entered();
             metrics_otlp::record_chain_id(&ack.chain_id);
@@ -282,14 +290,175 @@ fn run() -> Result<(), String> {
         }
 
         if current_ms.saturating_sub(last_keepalive_ms) >= config.keepalive_interval_ms {
-            runtime
-                .send_control_keepalive(current_ms)
-                .map_err(|error| error.to_string())?;
-            last_keepalive_ms = current_ms;
+            match runtime.send_control_keepalive(current_ms) {
+                Ok(()) => {
+                    last_keepalive_ms = current_ms;
+                }
+                Err(error) if is_control_transport_error(&error) => {
+                    try_reconnect_bridge_control(
+                        &mut runtime,
+                        &metrics,
+                        &config,
+                        &bridge_identity,
+                        &signing_key,
+                        &publisher_public_key,
+                        &error,
+                    );
+                    last_keepalive_ms = now_ms();
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         }
 
         thread::sleep(Duration::from_millis(config.poll_interval_ms));
     }
+}
+
+fn start_bridge_with_retry(
+    runtime: &mut ExitBridgeRuntime,
+    config: &BridgeServiceConfig,
+) -> Result<BridgeLease, String> {
+    let started_at_ms = now_ms();
+    loop {
+        match runtime.startup(config.reachability_class.clone(), now_ms()) {
+            Ok(lease) => return Ok(lease),
+            Err(error) if is_startup_retryable(&error) => {
+                if now_ms().saturating_sub(started_at_ms) >= STARTUP_RETRY_TIMEOUT_MS {
+                    return Err(error.to_string());
+                }
+                eprintln!(
+                    "exit-bridge node_id={} waiting for authority during startup: {error}",
+                    config.node_id
+                );
+                thread::sleep(Duration::from_millis(config.poll_interval_ms.max(250)));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+fn connect_bridge_control_with_retry(
+    config: &BridgeServiceConfig,
+    lease: &BridgeLease,
+    bridge_identity: &PublicKeyBytes,
+    signing_key: &SigningKey,
+    publisher_public_key: &PublicKeyBytes,
+    resume_acked_seq_no: Option<u64>,
+) -> Result<BridgeControlClient, String> {
+    let started_at_ms = now_ms();
+    loop {
+        match connect_bridge_control(
+            config,
+            lease,
+            bridge_identity,
+            signing_key,
+            publisher_public_key,
+            resume_acked_seq_no,
+        ) {
+            Ok(client) => return Ok(client),
+            Err(error) => {
+                if now_ms().saturating_sub(started_at_ms) >= STARTUP_RETRY_TIMEOUT_MS {
+                    return Err(error);
+                }
+                eprintln!(
+                    "exit-bridge node_id={} waiting for control endpoint during startup: {error}",
+                    config.node_id
+                );
+                thread::sleep(Duration::from_millis(config.poll_interval_ms.max(250)));
+            }
+        }
+    }
+}
+
+fn connect_bridge_control(
+    config: &BridgeServiceConfig,
+    lease: &BridgeLease,
+    bridge_identity: &PublicKeyBytes,
+    signing_key: &SigningKey,
+    publisher_public_key: &PublicKeyBytes,
+    resume_acked_seq_no: Option<u64>,
+) -> Result<BridgeControlClient, String> {
+    let connected_at_ms = now_ms();
+    let control_chain_id =
+        default_chain_id("bridge-control-connect", &config.node_id, &lease.lease_id);
+    metrics_otlp::record_chain_id(&control_chain_id);
+    let control_request_id = default_request_id("control-hello", &config.node_id, connected_at_ms);
+    BridgeControlClient::connect(
+        &config.control_url,
+        &config.node_id,
+        &lease.lease_id,
+        bridge_identity,
+        signing_key,
+        publisher_public_key,
+        &control_chain_id,
+        &control_request_id,
+        connected_at_ms,
+        resume_acked_seq_no,
+        config.control_max_skew_ms,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn try_reconnect_bridge_control(
+    runtime: &mut ExitBridgeRuntime,
+    metrics: &Arc<Mutex<BridgeMetrics>>,
+    config: &BridgeServiceConfig,
+    bridge_identity: &PublicKeyBytes,
+    signing_key: &SigningKey,
+    publisher_public_key: &PublicKeyBytes,
+    cause: &RuntimeError,
+) {
+    eprintln!(
+        "exit-bridge node_id={} reconnecting control session after {cause}",
+        config.node_id
+    );
+    let Some(lease) = runtime.current_lease().cloned() else {
+        eprintln!(
+            "exit-bridge node_id={} cannot reconnect control session without an active lease",
+            config.node_id
+        );
+        return;
+    };
+    let resume_acked_seq_no = runtime
+        .control_client()
+        .and_then(|client| client.last_acked_seq_no());
+    match connect_bridge_control(
+        config,
+        &lease,
+        bridge_identity,
+        signing_key,
+        publisher_public_key,
+        resume_acked_seq_no,
+    ) {
+        Ok(control_client) => {
+            runtime.attach_control_client(control_client);
+            metrics
+                .lock()
+                .expect("bridge metrics mutex poisoned")
+                .record_control_reconnect();
+            eprintln!(
+                "exit-bridge node_id={} reconnected control session",
+                config.node_id
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "exit-bridge node_id={} control reconnect attempt failed: {error}",
+                config.node_id
+            );
+        }
+    }
+}
+
+fn is_control_transport_error(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::ControlTransport { .. } | RuntimeError::MissingControlClient
+    )
+}
+
+fn is_startup_retryable(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::AuthorityTransport { .. })
 }
 
 fn spawn_creator_upload_listener(
@@ -763,6 +932,15 @@ fn parse_env_u64(key: &str, default: u64) -> Result<u64, String> {
             .map_err(|_| format!("{key} must be a valid u64, got {value:?}")),
         Err(_) => Ok(default),
     }
+}
+
+fn conduit_build_metadata() -> (String, String, String, String) {
+    (
+        env::var("VERITAS_CONDUIT_BUILD_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+        env::var("VERITAS_CONDUIT_BUILD_SOURCE").unwrap_or_else(|_| "unknown".to_string()),
+        env::var("VERITAS_CONDUIT_BUILD_CREATED").unwrap_or_else(|_| "unknown".to_string()),
+        env::var("VERITAS_CONDUIT_IMAGE").unwrap_or_else(|_| "unknown".to_string()),
+    )
 }
 
 #[cfg(test)]

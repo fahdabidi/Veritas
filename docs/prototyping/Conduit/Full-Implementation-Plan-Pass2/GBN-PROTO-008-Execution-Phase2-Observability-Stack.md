@@ -1,6 +1,6 @@
 # GBN-PROTO-008 - Execution Phase 2 Detailed Plan: Observability Stack (Prometheus + Grafana + Loki + Promtail + Tempo)
 
-**Status:** Implemented locally - Helm rollout validated; backend query validation blocked by WSL Docker restarts
+**Status:** Implemented locally - Helm rollout and direct Prometheus/Tempo/Loki backend query validation passed
 **Primary Goal:** install a self-contained observability stack into the local k3d cluster
 that provides metrics (Prometheus), dashboards + UI (Grafana), log aggregation (Loki +
 Promtail), and distributed tracing (Tempo). Pre-provision Grafana datasources and a
@@ -430,10 +430,12 @@ Live WSL2 update (2026-05-07):
 4. `kubectl -n observability get pods,svc,statefulset,deploy -o wide` showed Grafana,
    kube-state-metrics, the Prometheus operator, Prometheus, Loki, Tempo, and Promtail
    running.
-5. Direct Prometheus/Tempo/Loki backend query validation was attempted but blocked by WSL
-   Docker daemon restarts that stopped the k3d node containers after rollout.
+5. Direct Prometheus/Tempo/Loki backend query validation passed after fixing WSL Docker
+   instability. Prometheus, Tempo, and Loki readiness endpoints were healthy; Prometheus
+   returned Conduit `up` and `conduit_*` series; Loki and Tempo discovery both exposed
+   `chain_id`.
 
-Retained live validation checklist for the next stable WSL2 Docker session:
+Retained live validation checklist for future reruns:
 
 1. Phase 1's cluster is up.
 2. Run `bash prototype/gbn-bridge-proto/infra/scripts/k8s-observability-up.sh`. Within

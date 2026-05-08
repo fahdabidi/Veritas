@@ -534,11 +534,15 @@ Implementation adjustments made while landing Phase 1:
    Prometheus path is still pending Phase 3.
 4. `k8s-up.sh` generates `overlays/dev/password.txt` if it is missing, applies the dev
    Kustomize overlay, waits for rollouts, and then runs `k8s-smoke.sh --send-dummy`.
-5. `k8s-smoke.sh` exists specifically to close the GBN-PROTO-007 validation gap locally:
+5. The local authority Deployment uses `Recreate` and `k8s-up.sh` restarts authority,
+   receiver, then bridges sequentially after same-tag image import. This keeps the local
+   single-authority control plane from splitting in-memory lease state across old and new
+   pods during rollouts.
+6. `k8s-smoke.sh` exists specifically to close the GBN-PROTO-007 validation gap locally:
    it verifies the full topology, local Postgres, localhost admin endpoints, bridge
    registration, `SendDummy` from all Conduit pods, authority frame persistence, and recent
    pod-log `chain_id` evidence.
-6. `k8s-test-publisher-postgres.sh` addresses the existing host-side
+7. `k8s-test-publisher-postgres.sh` addresses the existing host-side
    `persistence_flow` `ConnectionRefused` blocker by port-forwarding the Kubernetes
    Postgres service, exporting the matching `GBN_BRIDGE_POSTGRES_*` variables plus
    `GBN_BRIDGE_TEST_POSTGRES_URL`, and running
@@ -571,6 +575,9 @@ Live WSL2 update (2026-05-07):
    local Postgres `ConnectionRefused` blocker by running the workspace suite through a
    Kubernetes Postgres port-forward.
 5. The V1 regression suite passed with `cargo test --workspace` in `prototype/gbn-proto`.
+6. After the rollout fixes, `systemctl show docker` reported `ActiveState=active`,
+   `SubState=running`, and `NRestarts=0` while all Conduit and observability pods remained
+   Running.
 
 Retained live validation checklist for future fresh-cluster reruns:
 

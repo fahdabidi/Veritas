@@ -8,6 +8,8 @@ metadata:
     veritas-role: authority
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: publisher-authority
@@ -39,7 +41,7 @@ spec:
       containers:
         - name: publisher-authority
           image: veritas/publisher-authority:dev
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           ports:
             - name: http
               containerPort: 8080

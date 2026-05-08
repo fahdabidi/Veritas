@@ -11,11 +11,23 @@ COPY crates crates
 RUN cargo build --release --package gbn-bridge-cli --bin publisher-receiver
 
 FROM debian:bookworm-slim
+ARG VERITAS_BUILD_VERSION=unknown
+ARG VERITAS_BUILD_SOURCE=unknown
+ARG VERITAS_BUILD_CREATED=unknown
+LABEL org.opencontainers.image.title="veritas-publisher-receiver" \
+  org.opencontainers.image.version="${VERITAS_BUILD_VERSION}" \
+  org.opencontainers.image.revision="${VERITAS_BUILD_SOURCE}" \
+  org.opencontainers.image.created="${VERITAS_BUILD_CREATED}" \
+  veritas.component="publisher-receiver" \
+  veritas.build.version="${VERITAS_BUILD_VERSION}"
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /workspace/target/release/publisher-receiver /usr/local/bin/publisher-receiver
+ENV VERITAS_CONDUIT_BUILD_VERSION="${VERITAS_BUILD_VERSION}" \
+  VERITAS_CONDUIT_BUILD_SOURCE="${VERITAS_BUILD_SOURCE}" \
+  VERITAS_CONDUIT_BUILD_CREATED="${VERITAS_BUILD_CREATED}"
 
 EXPOSE 8081
 

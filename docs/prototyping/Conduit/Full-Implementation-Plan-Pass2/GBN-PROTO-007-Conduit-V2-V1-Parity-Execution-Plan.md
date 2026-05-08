@@ -317,20 +317,47 @@ Fixes made during validation:
 
 - The OTLP tracer now installs the tonic batch exporter inside a kept-alive Tokio runtime,
   fixing the prior local pod panic: `there is no reactor running`.
+- The OTLP runtime now enables Tokio IO as well as timers, allowing tonic/OTLP gRPC spans
+  to reach Tempo instead of failing with transport errors.
+- Bridge registration is idempotent when the same pod identity re-registers during a local
+  restart, while still rejecting active duplicate bridge IDs with different identities.
+- Exit bridges now retry authority/control startup and reconnect dropped control sessions,
+  preventing transient rollout connection refusals from terminating bridge pods.
+- The local authority Deployment uses `Recreate` so a single in-memory authority is never
+  split across old and new pods during same-tag image rollouts.
 - `k8s-up.sh` now restarts existing same-tag deployments after image import, while avoiding
-  duplicate fresh-cluster rollouts.
+  duplicate fresh-cluster rollouts. Restarts are now sequenced authority -> receiver ->
+  bridges so local dependency races do not create false failures.
 - `k8s-smoke.sh` now handles local k3d kubelet certificate drift and avoids false negatives
   from `grep -q` under `pipefail`.
 - The local kube-prometheus-stack values disable operator TLS for this single-node dev
   shape, preventing the missing `kube-prom-admission` secret mount failure.
+- WSL Docker now has explicit daemon DNS resolvers configured, avoiding the generated WSL
+  DNS tunneling address leaking into Docker bridge containers and causing resolver
+  timeouts.
+- A corrupted Docker image/build layer was pruned and the base images were re-pulled after
+  Docker reported an `unpigz` CRC mismatch.
+
+Completed backend validation after fixing the WSL Docker instability:
+
+- Prometheus `/ready`, Tempo `/ready`, and Loki `/ready` returned healthy responses.
+- Prometheus query validation passed:
+  - `up{namespace="veritas"}` returned 5 `up=1` series.
+  - `conduit_authority_successful_registrations_total` returned value `3`.
+  - `conduit_receiver_frames_accepted_total` returned value `5`.
+  - `conduit_bridge_frames_forwarded_total` returned 3 bridge series with non-zero traffic
+    after smoke traffic.
+- Loki validation passed:
+  - label discovery included `chain_id`.
+  - `{namespace="veritas", chain_id=~".+"}` returned 4 streams and 10 recent entries.
+- Tempo validation passed:
+  - tag discovery included `chain_id`.
+  - distributor metrics showed spans arriving:
+    `tempo_distributor_spans_received_total{tenant="single-tenant"} 1605`.
+- Docker stayed active after the fix:
+  `ActiveState=active`, `SubState=running`, `NRestarts=0`.
 
 Still deferred:
 
 - AWS ECS/CloudWatch acceptance items above remain AWS-only and were not exercised by the
   local k8s validation run.
-- Live backend queries against Prometheus, Tempo, and Loki were attempted after the
-  observability stack rolled out, but the WSL Docker daemon repeatedly restarted and
-  stopped the k3d node containers. This left backend port-forwards returning connection
-  refused. The observability pods reached Running and Prometheus reported Available before
-  the Docker restarts, so the remaining gap is environment stability for direct backend
-  query validation, not a Conduit compile, unit, persistence, or smoke failure.

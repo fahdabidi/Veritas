@@ -308,24 +308,46 @@ Passed:
   `observability` namespace. After disabling local operator TLS in the
   kube-prometheus-stack values, Prometheus reported Available and the observability pods
   reached Running.
+- Direct backend query validation passed after fixing the WSL Docker instability:
+  - Prometheus `/ready` was healthy and `up{namespace="veritas"}` returned 5 `up=1`
+    series.
+  - Prometheus returned the expected Conduit counters, including authority registrations,
+    receiver accepted frames, and bridge forwarded frames.
+  - Loki label discovery included `chain_id`, and a `{namespace="veritas",
+    chain_id=~".+"}` query returned recent SendDummy log streams.
+  - Tempo tag discovery included `chain_id`, and Tempo distributor metrics showed spans
+    arriving.
 
 Implementation fixes made during validation:
 
 - Same-tag local image redeploys now trigger deployment restarts after `k3d image import`.
 - OTLP tracing now keeps the Tokio runtime alive for the tonic batch exporter, preventing
   local service pod crashes.
+- OTLP tracing now enables Tokio IO as well as timers, allowing tonic/OTLP gRPC spans to
+  reach Tempo.
+- Bridge registration is idempotent for the same bridge identity, which makes pod restarts
+  safe while keeping duplicate bridge IDs with different identities rejected.
+- Exit bridges retry authority/control startup and reconnect dropped control sessions.
+- The local authority Deployment uses `Recreate` and `k8s-up.sh` restarts authority,
+  receiver, then bridges sequentially, avoiding local rollout races.
 - Smoke log checks now tolerate local k3d kubelet TLS drift and retry chain-id log matching
   without `pipefail` false negatives.
 - The kube-prometheus-stack local values disable operator TLS to avoid a missing local
   admission TLS secret when admission webhook patching is disabled.
+- WSL Docker now has explicit daemon DNS resolvers configured so Docker bridge containers
+  do not inherit the generated WSL DNS tunneling address.
+- A corrupted Docker image/build layer was pruned and base images were re-pulled after an
+  `unpigz` CRC mismatch.
 
-Remaining validation gap:
+Docker stability closure:
 
-- Direct Prometheus, Tempo, and Loki backend query checks were blocked by WSL Docker daemon
-  restarts that stopped the k3d server and agent containers after the stack rolled out.
-  This is tracked as an environment stability issue. The cluster, Conduit pods, Postgres,
-  smoke flow, persistence suite, and full V2 cargo suite all passed before that failure
-  mode appeared.
+- The earlier WSL Docker restart issue is resolved in the current local environment.
+  `systemctl show docker` reported `ActiveState=active`, `SubState=running`, and
+  `NRestarts=0` after the full rebuild, smoke run, and Prometheus/Tempo/Loki backend
+  queries.
+- Normal local cluster operations must apply `infra/k8s/conduit/overlays/dev`, not the
+  base Kustomize directory, because the dev overlay owns the generated Postgres password
+  used by the persistent local PVC.
 
 ---
 

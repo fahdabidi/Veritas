@@ -1,12 +1,11 @@
 use std::env;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{publisher_identity, PublicKeyBytes, DEFAULT_UDP_PUNCH_PORT};
 use gbn_bridge_publisher::{
-    admin::{AdminCreatorConfig, AdminHttpServer, AdminState, DEFAULT_ADMIN_BIND_ADDR},
+    admin::{admin_bind_addr_from_env, AdminCreatorConfig, AdminHttpServer, AdminState},
     metrics_emitter::{cloudwatch_metrics_enabled, spawn_cloudwatch_emitter, MetricsEmitterConfig},
     metrics_otlp, ReceiverMetrics, ReceiverProxyConfig, ReceiverProxyServer,
 };
@@ -69,9 +68,7 @@ fn run() -> Result<(), String> {
     };
     let server = ReceiverProxyServer::bind_with_metrics(config.clone(), metrics.clone())
         .map_err(|error| error.to_string())?;
-    let admin_addr: SocketAddr = DEFAULT_ADMIN_BIND_ADDR
-        .parse()
-        .expect("default admin bind address should be valid");
+    let admin_addr = admin_bind_addr_from_env()?;
     let admin_server = AdminHttpServer::bind(
         admin_addr,
         AdminState::receiver_with_creator(metrics.clone(), admin_creator),
@@ -94,11 +91,16 @@ fn run() -> Result<(), String> {
     } else {
         None
     };
+    let (build_version, build_source, build_created, image) = conduit_build_metadata();
+    println!(
+        "publisher-receiver build_version={} build_source={} build_created={} image={}",
+        build_version, build_source, build_created, image
+    );
     println!(
         "publisher-receiver proxy listening on {} and forwarding to {}; admin listening on {}",
         server.local_addr().map_err(|error| error.to_string())?,
         config.authority_url,
-        DEFAULT_ADMIN_BIND_ADDR
+        admin_addr
     );
     server.serve_forever().map_err(|error| error.to_string())
 }
@@ -156,4 +158,13 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
         .as_millis() as u64
+}
+
+fn conduit_build_metadata() -> (String, String, String, String) {
+    (
+        env::var("VERITAS_CONDUIT_BUILD_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+        env::var("VERITAS_CONDUIT_BUILD_SOURCE").unwrap_or_else(|_| "unknown".to_string()),
+        env::var("VERITAS_CONDUIT_BUILD_CREATED").unwrap_or_else(|_| "unknown".to_string()),
+        env::var("VERITAS_CONDUIT_IMAGE").unwrap_or_else(|_| "unknown".to_string()),
+    )
 }

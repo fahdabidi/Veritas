@@ -9,14 +9,15 @@
 Establish the deployment topology that the rest of Pass 3 depends on. Pass 1 and Pass 2
 left the cluster with no creator pods (the synthetic creator from Pass 2 lives inside
 the Publisher processes) and only 3 ExitBridge replicas. Pass 3 cannot select distinct
-HostCreator and NewCreator nodes, and cannot satisfy `GBN-ARCH-001-V2` section 3.3
-step 3 ("9 active ExitBridge nodes"), without changing the deployment.
+HostCreator and NewCreator nodes, and cannot let the Publisher seed a full 10-entry
+ExitBridge DHT set during bootstrap without changing the deployment.
 
 At completion, the local k3d cluster and AWS CloudFormation stack expose:
 
 - 2 dedicated creator pods/tasks (`creator-host`, `creator-new`)
-- 10 ExitBridge replicas (1 ExitBridgeA acting as HostCreator's relay path + 9 bridges
-  in the Publisher's bootstrap set, of which one is selected as ExitBridgeB)
+- 10 ExitBridge replicas (ExitBridgeA acts as HostCreator's relay path; the Publisher
+  still returns all 10 signed ExitBridge DHT entries to NewCreator during bootstrap,
+  with one non-ExitBridgeA entry selected as ExitBridgeB)
 - Container-local persistence for creator and bridge state (per Master plan §3.6 and
   Pass 3 D1: state survives container restart, not cluster destroy)
 

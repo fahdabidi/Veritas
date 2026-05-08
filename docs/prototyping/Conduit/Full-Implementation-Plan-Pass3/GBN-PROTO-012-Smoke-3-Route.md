@@ -43,6 +43,8 @@ Prove that:
 
 - Smoke 1 and Smoke 2 just passed.
 - `creator-new` reports `self_onboarding_state ∈ { onboarded, fanout_partial }`.
+- `creator-new` local DHT was populated from the Publisher-seeded bridge DHT set,
+  with no direct authority catalog/bootstrap shortcut during `SendDummy`.
 - `creator-new` local DHT contains ≥ 2 bridge entries with `active=true` (failover
   needs at least 2).
 

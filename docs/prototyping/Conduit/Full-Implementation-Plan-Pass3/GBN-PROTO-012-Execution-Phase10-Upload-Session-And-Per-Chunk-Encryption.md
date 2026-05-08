@@ -15,6 +15,11 @@ creator can prepare a multi-chunk upload session that is fully sanitized, chunke
 manifest-hashed, and Publisher-encrypted on a per-chunk basis. Bridges still see
 only ciphertext.
 
+The upload session builder inherits the Phase 5 route/trust premise: bridge candidates
+come from the creator-local DHT populated by the Publisher-seeded 10-entry ExitBridge
+DHT set during bootstrap. It must not refresh route candidates through a direct
+Publisher authority catalog shortcut.
+
 This phase does **not** dispatch the chunks across multiple bridges — Phase 11 owns
 multi-lane progressive fanout. Phase 10 produces a stored session ready for Phase 11
 to send.

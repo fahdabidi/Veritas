@@ -12,7 +12,7 @@ the Publisher (authority surface):
 
 1. Publisher (authority surface) initializes and maintains its Publisher-side signed
    DHT view for all 10 active ExitBridge nodes, then creates the NewCreator entry and
-   selects 9 bridge bootstrap entries from that Publisher DHT view.
+   returns all 10 bridge bootstrap entries from that Publisher DHT view.
 2. Publisher selects `ExitBridgeB`, distinct from `ExitBridgeA` where possible.
 3. Publisher sends the bootstrap payload to ExitBridgeB.
 4. ExitBridgeB ACKs and starts punching toward NewCreator.
@@ -24,7 +24,7 @@ the Publisher (authority surface):
 7. NewCreator requests the seeded bridge set from ExitBridgeB.
 8. ExitBridgeB returns the signed bridge entries.
 9. NewCreator stores entries in its local DHT / discovery state.
-10. Remaining 8 bridges and NewCreator perform punch / ACK fanout (Publisher signals
+10. Remaining bridge entries and NewCreator perform punch / ACK fanout (Publisher signals
     them via `BridgeBatchAssign`).
 11. NewCreator marks successful bridge entries `active`.
 
@@ -68,8 +68,8 @@ Required changes:
 - Bootstrap payload creation reads bridge DHT entries from this Publisher-side DHT
   view. It must not synthesize bridge DHT entries only at response construction time.
 - In the Pass 3 topology, `InitializePublisherDht` must materialize 10 signed bridge
-  entries. Bootstrap then excludes ExitBridgeA and returns exactly 9 Publisher-signed
-  bridge entries to the NewCreator.
+  entries. Bootstrap returns all 10 Publisher-signed bridge entries to the NewCreator
+  while still selecting ExitBridgeB distinct from ExitBridgeA for the seed handoff.
 - Missing, stale, unsigned, or below-threshold Publisher DHT state fails fast before
   payload issue with an operator-visible error such as
   `PublisherBridgeDhtEntryMissing` or `InsufficientBootstrapBridges`.
@@ -91,7 +91,7 @@ Required changes:
 | NewCreator → ExitBridgeB bridge-set request | Creator → Bridge | `BridgeSetRequest` |
 | ExitBridgeB → NewCreator bridge-set response | Bridge → Creator | `BridgeSetResponse` |
 | NewCreator local DHT update | (internal) | applies `BridgeSetResponse.bridge_entries` to `LocalDiscoveryTable` |
-| Publisher → 8 remaining bridges fanout | Publisher → Bridges | `BridgeBatchAssign` |
+| Publisher → remaining bridges fanout | Publisher → Bridges | `BridgeBatchAssign` |
 | Each remaining bridge → NewCreator punch probes | Bridge → Creator | `BridgePunchProbe` |
 | Each tunnel ACK | Both | `BridgePunchAck` |
 | NewCreator marks each bridge `active` | (internal) | sets `BridgeDhtEntry.active=true` and emits `new_creator_bridge_entry_active` event |
@@ -149,7 +149,7 @@ Both directions emit `BootstrapProgress` to the Publisher (authority surface):
 
 The Publisher records both progress reports against the bootstrap session id so the
 Smoke 2 success-vs-degraded detection (below) can distinguish "only seed bridge
-acked" from "all 9 bridges acked".
+acked" from "all 10 bridges acked".
 
 ---
 
@@ -173,7 +173,7 @@ new_creator_seeded
   -> seed_tunnel_failed          (timeout before seed tunnel ACK)
 ```
 
-`onboarded` requires N ≥ 1 active bridge entries (typically all 9 over time, but the
+`onboarded` requires N ≥ 1 active bridge entries (typically all 10 over time, but the
 state is reachable as soon as the first non-seed bridge ACKs, so SendDummy can begin).
 `fanout_partial` is a successful-but-degraded terminal state — the operator may
 choose to leave the creator in this state or `reset-creator-state` and retry.
@@ -218,7 +218,7 @@ the foundation; SendDummy in Phase 5 consumes it.
 - `seed_tunnel_timeout_ms`: default 30 000 (30 s). Time from `seed_bridge_assigned`
   to first `BridgePunchAck` from ExitBridgeB. Configurable via env
   `GBN_BRIDGE_SEED_TUNNEL_TIMEOUT_MS`.
-- `fanout_timeout_ms`: default 60 000 (60 s). Time from `fanout_in_progress` to all 9
+- `fanout_timeout_ms`: default 60 000 (60 s). Time from `fanout_in_progress` to all 10
   bridges responding. Configurable via env `GBN_BRIDGE_FANOUT_TIMEOUT_MS`.
 - `suspect_ttl_ms`: default 300 000 (5 min). Time a bridge stays marked
   `suspect_until_ms` after a punch timeout, ACK miss, or BridgeData send failure.
@@ -296,8 +296,8 @@ Add tests in
   exist;
 - `InitializePublisherDht` materializes exactly 10 registered active ExitBridges into
   the Publisher's signed bridge DHT view before bootstrap begins;
-- bootstrap payload includes the NewCreator entry and exactly 9 bridge entries when
-  10 bridges are registered (1 ExitBridgeA excluded);
+- bootstrap payload includes the NewCreator entry and exactly 10 bridge entries when
+  10 bridges are registered;
 - ExitBridgeB records and ACKs the bootstrap payload via `BootstrapProgress`;
 - Publisher → ExitBridgeA → HostCreator → NewCreator return path delivers the
   encrypted `CreatorBootstrapResponse` end-to-end;
@@ -331,7 +331,8 @@ Completed 2026-05-08.
   `bridge_set` payloads while preserving the legacy `BootstrapDhtEntry` fields used by
   existing runtime callers.
 - `BridgeSetResponse` now carries `bridge_dht_entries` in addition to legacy bootstrap
-  hints so NewCreator local DHT state can verify Publisher signatures after onboarding.
+  hints so NewCreator local DHT state can verify Publisher signatures after onboarding;
+  in the 10-bridge Pass 3 topology this is the full 10-entry Publisher-seeded set.
 - Publisher maintains a signed bridge DHT view (`publisher_bridge_dht_entries`) for
   active ExitBridges. Bridge registration, heartbeat renewal, and reclassification
   refresh it; revoke/expiry remove stale entries.
@@ -340,8 +341,8 @@ Completed 2026-05-08.
   active initialized ExitBridges before running bootstrap smoke tests.
 - Publisher bootstrap selection consumes stored Publisher DHT entries and rejects a
   relay-only candidate set with
-  `InsufficientBootstrapBridges`; with enough direct bridges it excludes ExitBridgeA
-  from the seeded bridge set and selects ExitBridgeB separately.
+  `InsufficientBootstrapBridges`; with enough direct bridges it returns the full
+  Publisher-seeded bridge set and selects ExitBridgeB separately from ExitBridgeA.
 - The local admin bootstrap path consumes the returned payload into
   `LocalDiscoveryTable`, stores the NewCreator's own signed entry, marks received
   bridge entries active after the simulated ACK path, and records active tunnels.
@@ -356,10 +357,10 @@ Completed 2026-05-08.
   `SeedNewCreator` against a 10-bridge cluster.
 - Publisher DHT contains signed entries for all 10 active ExitBridges before the
   bootstrap payload is built.
-- Local DHT includes the NewCreator's own Publisher-signed creator entry plus 9 bridge
+- Local DHT includes the NewCreator's own Publisher-signed creator entry plus 10 bridge
   entries with valid signatures and unexpired lease/entry windows.
 - The seed bridge entry is active after seed tunnel ACK.
-- All 8 remaining reachable bridge entries become active after fanout completion.
+- All remaining reachable bridge entries become active after fanout completion.
 - The Publisher response uses the §3.3 step 6 return path
   (`Publisher → ExitBridgeA → HostCreator → NewCreator`); both event traces and
   `bootstrap_session.last_state` reflect this.

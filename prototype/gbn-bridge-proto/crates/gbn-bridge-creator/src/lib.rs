@@ -9,7 +9,7 @@ pub mod local_dht;
 pub mod session;
 pub mod upload;
 
-pub use client::{CreatorClient, DiscoveryProbeResult, SendDummyResult};
+pub use client::{BridgeFilterDrops, CreatorClient, DiscoveryProbeResult, SendDummyResult};
 pub use error::CreatorError;
 pub use local_dht::{
     LocalDhtCommand, LocalDhtError, LocalDhtMutation, LocalDhtStore, ResetCreatorStateResponse,

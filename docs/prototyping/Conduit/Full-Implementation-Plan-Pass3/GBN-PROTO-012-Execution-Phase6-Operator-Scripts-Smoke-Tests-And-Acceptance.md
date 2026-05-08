@@ -53,6 +53,7 @@ Files to update:
 `_seed_actions.sh` exports:
 
 - `action_seed_host_creator`
+- `action_initialize_publisher_dht`
 - `action_seed_new_creator`
 - `action_dump_local_dht`
 - `action_send_dummy`
@@ -68,6 +69,7 @@ shared library. The top-level scripts are thin transport adapters.
 
 ```text
 SeedHostCreator
+InitializePublisherDht
 SeedNewCreator
 DumpLocalDht
 SendDummy              (single-lane envelope demo, Phase 5)
@@ -87,7 +89,8 @@ pass.
 | Action | Steps |
 |---|---|
 | **SeedHostCreator** | discover creator pods → select → discover Publisher (one role, two surfaces) → discover direct ExitBridges → select ExitBridgeA → fetch metadata → resolve `bootstrap_genesis` flag → POST `/v1/admin/seed-host-creator` → print state and `chain_id` |
-| **SeedNewCreator** | discover creator pods → select NewCreator → select HostCreator → verify `host_role_state=host_seeded` → POST `/v1/admin/seed-new-creator` → poll `/local-dht` until terminal state or 120 s → print state, bridge counts, `chain_id` |
+| **InitializePublisherDht** | discover Publisher authority surface → POST `/v1/admin/publisher-dht/initialize` → require 10 initialized Publisher-side ExitBridge DHT entries before NewCreator bootstrap |
+| **SeedNewCreator** | discover creator pods → select NewCreator → select HostCreator → verify `host_role_state=host_seeded` → verify Publisher DHT has 10 initialized bridge entries → POST `/v1/admin/seed-new-creator` → poll `/local-dht` until terminal state or 120 s → print state, bridge counts, `chain_id` |
 | **DumpLocalDht** | discover any node → check `role` field → on creator pod print full table; on Publisher/exit_bridge print role-tagged not-applicable message |
 | **SendDummy** | discover creator pods → check `self_onboarding_state` ∈ {`onboarded`, `fanout_partial`} → prompt normal vs `force_bridge_failure` → POST `/v1/admin/send-dummy` → print `route_source`, `selected_bridge_ids`, `assigned_bridge_id`, `ciphertext_only_at_bridge`, `chain_id` |
 | **BuildUploadSession** | discover creator pods → check onboarded → prompt input source (synthetic / inline / path) → prompt chunk size → POST `/v1/admin/build-upload-session` → print `session_id`, manifest fields, sanitization report, `chain_id` |
@@ -158,7 +161,7 @@ trackable phase with its own plan doc:
   — first gate; proves Loki/Tempo/Prometheus instrumentation works for all 14 actor
   pods.
 - **Phase 8 (Smoke 2 — Discovery / Bootup):** [GBN-PROTO-012-Smoke-2-Discovery.md](GBN-PROTO-012-Smoke-2-Discovery.md)
-  — drives real `SeedHostCreator → SeedNewCreator → onboarded`; asserts full local
+  — drives real `SeedHostCreator → InitializePublisherDht → SeedNewCreator → onboarded`; asserts full local
   DHT, distinct actor chain, all 16 §2.5 events.
 - **Phase 9 (Smoke 3 — Route And Encryption Boundary):** [GBN-PROTO-012-Smoke-3-Route.md](GBN-PROTO-012-Smoke-3-Route.md)
   — drives two SendDummy invocations (normal + forced failover) and asserts
@@ -225,7 +228,7 @@ Run when AWS validation is requested. Uses
 # Inside WSL2 Ubuntu with AWS_PROFILE configured
 bash prototype/gbn-bridge-proto/infra/scripts/aws-smoke-creator-exec.sh   # T2.2 verification
 bash prototype/gbn-bridge-proto/infra/scripts/relay-control-interactive-v2.sh
-# Operator menu: SeedHostCreator → SeedNewCreator → DumpLocalDht → SendDummy →
+# Operator menu: SeedHostCreator → InitializePublisherDht → SeedNewCreator → DumpLocalDht → SendDummy →
 #                BuildUploadSession → SendUpload
 ```
 

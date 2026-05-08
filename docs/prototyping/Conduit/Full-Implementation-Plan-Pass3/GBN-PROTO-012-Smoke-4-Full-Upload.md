@@ -48,6 +48,8 @@ Prove that:
 - WSL2 Ubuntu host (Master plan §2.8 guard at top of script).
 - Smoke 1, Smoke 2, Smoke 3 all just passed.
 - `creator-new` reports `self_onboarding_state ∈ { onboarded, fanout_partial }`.
+- `creator-new` local DHT bridge entries came from the Publisher-seeded bootstrap set;
+  full upload must not refresh lanes from a direct authority catalog shortcut.
 - ≥ 5 active bridge entries in `creator-new`'s local DHT (failover proof needs
   redundancy).
 

@@ -50,6 +50,9 @@ pub enum ProtocolError {
 
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    #[error("encryption envelope error: {0}")]
+    Envelope(String),
 }
 
 impl From<serde_json::Error> for ProtocolError {

@@ -30,10 +30,9 @@ Current state:
 Pass 3 replaces the synthetic shortcut with the documented flow:
 
 0. Phase 0 deploys two dedicated creator pods (`creator-host`, `creator-new`) and
-   scales ExitBridge replicas from 3 to 10 so that the topology can satisfy §3.3 step
-   3 ("9 active ExitBridge nodes") plus a distinct ExitBridgeA relay path. Without
-   real creator pods, "select a HostCreator node" and "select a NewCreator node" have
-   no targets.
+   scales ExitBridge replicas from 3 to 10 so the Publisher can seed a full 10-entry
+   signed ExitBridge DHT set during bootstrap. Without real creator pods, "select a
+   HostCreator node" and "select a NewCreator node" have no targets.
 1. Operator runs `SeedHostCreator`, selects the `creator-host` pod, and provides one
    ExitBridge plus Publisher DHT metadata to make that node ready to act as
    `HostCreator`.
@@ -65,7 +64,7 @@ Pass 3 replaces the synthetic shortcut with the documented flow:
 | 2 | SeedHostCreator Admin API And Operator Command | `[x]` |
 | 3 | SeedNewCreator API And First-Contact Join Path | `[x]` |
 | 4 | Bootstrap Payload Delivery, Local DHT Population, And Punch Fanout | `[x]` |
-| 5 | Onboarded-Creator SendDummy And Local-DHT Single-Lane Envelope Demo | `[ ]` |
+| 5 | Onboarded-Creator SendDummy And Local-DHT Single-Lane Envelope Demo | `[x]` |
 | 6 | Operator Scripts And Acceptance Gate | `[ ]` |
 | 7 | Smoke 1 — Tracing Suite Implementation | `[ ]` |
 | 8 | Smoke 2 — Discovery / Bootup Suite Implementation | `[ ]` |
@@ -324,8 +323,9 @@ task count after Pass 3 (matches `GBN-ARCH-001-V2` section 3.3 exactly):
 | Creator (NewCreator candidate) | 1 (`creator-new`) | 1 |
 
 The 10 ExitBridges break down as: 1 ExitBridgeA acting as the HostCreator's relay path
-to the Publisher, plus 9 bridges in the Publisher's bootstrap payload (per §3.3 step
-3), one of which the Publisher selects as ExitBridgeB.
+to the Publisher, plus the full 10-entry Publisher-seeded bridge DHT set returned to
+the NewCreator during bootstrap. One non-ExitBridgeA entry is still selected as
+ExitBridgeB for the seed handoff.
 
 ---
 
@@ -371,10 +371,10 @@ request/response, local DHT population, and reachability ACK activation.
 Completed 2026-05-08. The Publisher now maintains its own signed bridge DHT view for
 all 10 active ExitBridges, exposes an `InitializePublisherDht` operator command to
 seed/rebuild that view before `SeedNewCreator`, and uses that Publisher DHT view when
-building bootstrap payloads. The bootstrap reply carries signed V2 creator and bridge
-DHT entries, selects ExitBridgeB distinct from ExitBridgeA, records local bootstrap
-progress, and the NewCreator stores the bridge set as active local discovery state after
-the simulated smoke-test ACK path.
+building bootstrap payloads. The bootstrap reply carries the signed V2 creator entry
+and all 10 Publisher-seeded bridge DHT entries, selects ExitBridgeB distinct from
+ExitBridgeA, records local bootstrap progress, and the NewCreator stores the bridge set
+as active local discovery state after the simulated smoke-test ACK path.
 
 ### Phase 5 - Onboarded-Creator SendDummy And Local-DHT Route Construction
 
@@ -382,6 +382,13 @@ the simulated smoke-test ACK path.
 
 Update `SendDummy` so it only runs from an onboarded NewCreator and constructs the upload
 route from local DHT / discovery state as described in architecture sections 3.6 and 3.7.
+
+Completed 2026-05-08. `SendDummy` now consumes the Publisher-seeded bridge entries
+stored in the creator's local DHT during Phase 4; the admin endpoint no longer performs
+a direct Publisher catalog/bootstrap shortcut. It rejects non-creator and non-onboarded
+nodes, filters local DHT bridge entries, supports forced bridge-suspect failover, and
+wraps the dummy frame in the Publisher-targeted encryption envelope so bridges only see
+ciphertext.
 
 ### Phase 6 - Operator Scripts And Acceptance Gate
 

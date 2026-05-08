@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod control;
 pub mod descriptor;
 pub mod dht;
+pub mod envelope;
 pub mod error;
 pub mod lease;
 pub mod messages;
@@ -38,6 +39,9 @@ pub use dht::{
     CreatorDhtEntryUnsigned, HostCreatorSeedState, HostRoleState, LocalDiscoveryTable,
     NewCreatorSeedState, PublisherDhtEntry, SelfOnboardingState, TunnelPeerRole, TunnelState,
     LOCAL_DISCOVERY_TABLE_SCHEMA_VERSION,
+};
+pub use envelope::{
+    decrypt_from_creator, encrypt_for_publisher, EncryptedFrame, EnvelopeKeyDerivation,
 };
 pub use error::ProtocolError;
 pub use lease::{

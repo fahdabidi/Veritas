@@ -23,9 +23,11 @@ license = "Apache-2.0"
 repository = "https://github.com/fahdabidi/Veritas"
 
 [workspace.dependencies]
+aes-gcm = "0.10"
 aws-config = "1"
 aws-sdk-cloudwatch = "1"
 ed25519-dalek = { version = "2", features = ["rand_core", "std"] }
+hkdf = "0.12"
 opentelemetry = { version = "0.21", features = ["trace"] }
 opentelemetry-otlp = { version = "0.14", features = ["trace", "grpc-tonic"] }
 opentelemetry_sdk = { version = "0.21", features = ["trace", "rt-tokio"] }
@@ -42,6 +44,7 @@ tracing = "0.1"
 tracing-opentelemetry = "0.22"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tungstenite = "0.24"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [dev-dependencies]
 ed25519-dalek.workspace = true

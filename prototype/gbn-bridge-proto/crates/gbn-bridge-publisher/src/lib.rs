@@ -185,7 +185,7 @@ impl Default for AuthorityConfig {
             bootstrap_entry_ttl_ms: 20_000,
             bootstrap_response_ttl_ms: 20_000,
             punch_instruction_ttl_ms: 20_000,
-            bootstrap_bridge_count: 9,
+            bootstrap_bridge_count: 10,
             bootstrap_seed_ack_timeout_ms: 5_000,
             bootstrap_seed_tunnel_timeout_ms: 10_000,
             bootstrap_bridge_set_timeout_ms: 10_000,

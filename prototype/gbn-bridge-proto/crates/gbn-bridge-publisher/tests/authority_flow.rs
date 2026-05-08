@@ -323,14 +323,14 @@ fn bootstrap_selects_a_direct_seed_bridge_and_signs_outputs() {
 
     assert_eq!(plan.response.seed_bridge.node_id, "bridge-seed");
     assert_eq!(plan.seed_punch.initiator_id, "bridge-seed");
-    assert_eq!(plan.response.assigned_bridge_count, 1);
-    assert_eq!(plan.bridge_set.bridge_entries.len(), 1);
-    assert_eq!(plan.bridge_set.bridge_dht_entries.len(), 1);
+    assert_eq!(plan.response.assigned_bridge_count, 2);
+    assert_eq!(plan.bridge_set.bridge_entries.len(), 2);
+    assert_eq!(plan.bridge_set.bridge_dht_entries.len(), 2);
     assert!(plan
         .bridge_set
         .bridge_entries
         .iter()
-        .all(|entry| entry.node_id != "bridge-relay"));
+        .any(|entry| entry.node_id == "bridge-relay"));
     assert!(plan
         .bridge_set
         .bridge_entries

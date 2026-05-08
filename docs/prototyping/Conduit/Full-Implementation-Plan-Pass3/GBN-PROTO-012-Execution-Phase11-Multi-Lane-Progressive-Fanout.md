@@ -55,6 +55,10 @@ Selects upload lanes from a local-DHT snapshot. Inputs: `LocalDiscoveryTable`
 snapshot from Phase 10's session, `target_lane_count` (default 10), filters
 inherited from Phase 5 §Route Selection Rules.
 
+The local-DHT snapshot is the Publisher-seeded bridge set stored during bootstrap.
+Phase 11 must not call the Publisher authority catalog to fill missing lanes; if fewer
+than 10 eligible local entries remain, it uses the reuse/failover rules below.
+
 ```rust
 pub struct LanePlan {
     pub target_lane_count: u32,

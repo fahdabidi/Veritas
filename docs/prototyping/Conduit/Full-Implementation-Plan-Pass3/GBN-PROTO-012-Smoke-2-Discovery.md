@@ -32,11 +32,11 @@ Prove that:
 4. `creator-new`'s local DHT contains:
    - its own Publisher-signed creator entry (validated against the Publisher trust
      root);
-   - 9 bridge entries (one per ExitBridge in the bootstrap set), each
+   - 10 bridge entries (one per Publisher-seeded ExitBridge DHT entry), each
      Publisher-signed, with valid `lease_expiry_ms` and `entry_expiry_ms`, and
      correct `reachability_class`;
    - the seed bridge entry marked `active=true`;
-   - all 8 fanout bridges marked `active=true` (or at least 5 if degraded
+   - all remaining fanout bridges marked `active=true` (or at least 5 if degraded
      `fanout_partial` is acceptable).
 5. The actor chain in distributed traces matches §3.3:
    `creator-new → creator-host → ExitBridgeA → publisher-authority → ExitBridgeB →
@@ -52,6 +52,8 @@ Prove that:
 - Smoke 1 has just passed (instrumentation alive).
 - `creator-host` and `creator-new` are Ready.
 - 10 ExitBridge pods are Ready and registered in the Publisher authority registry.
+- `InitializePublisherDht` succeeds and reports 10 initialized Publisher-side
+  ExitBridge DHT entries before `SeedNewCreator` is allowed to start.
 
 ---
 
@@ -86,14 +88,17 @@ Flags:
    ExitBridgeA). Build the seed payload. POST
    `/v1/admin/seed-host-creator?chain_id=<chain_id>` to `creator-host` with
    `bootstrap_genesis=true`. Assert response has `host_role_state=host_seeded`.
-5. **SeedNewCreator**: build the `host_creator_entry` payload from `creator-host`'s
+5. **InitializePublisherDht**: POST `/v1/admin/publisher-dht/initialize` to the
+   Publisher authority surface. Assert `initialized_bridge_count == 10` and
+   `publisher_dht_entry_count == 10`.
+6. **SeedNewCreator**: build the `host_creator_entry` payload from `creator-host`'s
    metadata + seed signature. POST
    `/v1/admin/seed-new-creator?chain_id=<chain_id>` to `creator-new` with
    `start_bootstrap=true`. Assert response has `self_onboarding_state=bootstrapping`.
-6. Poll `GET /v1/admin/local-dht` on `creator-new` every 1 s for up to
+7. Poll `GET /v1/admin/local-dht` on `creator-new` every 1 s for up to
    `--bootstrap-timeout` s. Track every state transition.
-7. Stop when `self_onboarding_state` reaches a terminal state.
-8. Run assertions.
+8. Stop when `self_onboarding_state` reaches a terminal state.
+9. Run assertions.
 
 ---
 
@@ -112,7 +117,7 @@ Flags:
 - `creator_entry.publisher_sig` verifies against the Publisher trust root pubkey
   (read once from the Publisher's `node-metadata` and pinned for the run).
 - `creator_entry.entry_expiry_ms > now_ms`.
-- `bridge_entries.length == 9`.
+- `bridge_entries.length == 10`.
 - For every `bridge_entries[i]`:
   - `publisher_sig` verifies;
   - `lease_expiry_ms > now_ms` AND `entry_expiry_ms > now_ms`;

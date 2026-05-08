@@ -382,13 +382,13 @@ fn full_bootstrap_payload_populates_local_dht_and_records_progress() {
             .map(|entry| entry.node_id.as_str()),
         Some("creator-new")
     );
-    assert_eq!(table.bridge_entries.len(), 9);
+    assert_eq!(table.bridge_entries.len(), 10);
     assert!(table.bridge_entries.iter().all(|entry| entry.active));
     assert!(table
         .bridge_entries
         .iter()
-        .all(|entry| entry.bridge_id != "exit-bridge-a"));
-    assert_eq!(table.active_tunnels.len(), 9);
+        .any(|entry| entry.bridge_id == "exit-bridge-a"));
+    assert_eq!(table.active_tunnels.len(), 10);
     for entry in &table.bridge_entries {
         entry
             .verify_authority(&public_key(9), now_ms())
@@ -403,12 +403,12 @@ fn full_bootstrap_payload_populates_local_dht_and_records_progress() {
     assert_eq!(session.state, BootstrapSessionState::Completed);
     assert_eq!(session.relay_bridge_id, "exit-bridge-a");
     assert_ne!(session.seed_bridge_id, session.relay_bridge_id);
-    assert_eq!(session.bridge_ids.len(), 9);
+    assert_eq!(session.bridge_ids.len(), 10);
     assert!(session
         .bridge_ids
         .iter()
-        .all(|bridge_id| bridge_id != "exit-bridge-a"));
-    assert_eq!(session.bridge_set.bridge_dht_entries.len(), 9);
+        .any(|bridge_id| bridge_id == "exit-bridge-a"));
+    assert_eq!(session.bridge_set.bridge_dht_entries.len(), 10);
     assert!(session
         .progress_events
         .iter()

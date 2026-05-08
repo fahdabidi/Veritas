@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_creator::{
-    CreatorClient, CreatorError, DiscoveryProbeResult, LocalDhtStore, SendDummyResult,
+    BridgeFilterDrops, CreatorClient, CreatorError, DiscoveryProbeResult, LocalDhtStore,
+    SendDummyResult,
 };
 use gbn_bridge_protocol::{
     BootstrapJoinReply, BootstrapSession, BridgeCommandPayload, BridgeDhtEntry, CreatorDhtEntry,
@@ -282,6 +283,8 @@ pub struct InjectCommandRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendDummyRequest {
     pub size: Option<usize>,
+    #[serde(default)]
+    pub force_bridge_failure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,6 +397,10 @@ pub struct AdminErrorResponse {
 pub struct AdminErrorBody {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_drops: Option<BridgeFilterDrops>,
 }
 
 fn default_true() -> bool {
@@ -1417,7 +1424,10 @@ fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
         );
     };
     let request = if body.is_empty() {
-        SendDummyRequest { size: None }
+        SendDummyRequest {
+            size: None,
+            force_bridge_failure: false,
+        }
     } else {
         match serde_json::from_slice::<SendDummyRequest>(body) {
             Ok(request) => request,
@@ -1439,6 +1449,16 @@ fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
         );
     }
 
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response_with_context(
+            409,
+            "creator_not_onboarded",
+            "selected node has not completed NewCreator onboarding",
+            Some("not_applicable".to_string()),
+            None,
+        );
+    };
+
     let client = CreatorClient::new(
         config.actor_id.clone(),
         config.signing_key.clone(),
@@ -1446,7 +1466,7 @@ fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
     )
     .with_creator_endpoint(config.creator_ip_addr.clone(), config.udp_punch_port)
     .with_timeout(config.timeout);
-    match client.send_dummy(&config.authority_url, size) {
+    match client.send_dummy_from_local_dht(store, size, request.force_bridge_failure) {
         Ok(result) => {
             let _chain_span =
                 metrics_otlp::chain_span("admin_send_dummy", &result.chain_id).entered();
@@ -2028,6 +2048,22 @@ fn begin_new_creator_bootstrap(
         entry.active = true;
     }
     table.self_onboarding_state = SelfOnboardingState::Onboarded;
+    table.publisher_entry = Some(PublisherDhtEntry {
+        node_id: "publisher".to_string(),
+        authority_url: config.authority_url.clone(),
+        receiver_url: state
+            .node_metadata
+            .receiver_url
+            .clone()
+            .unwrap_or_else(|| config.authority_url.clone()),
+        pub_key: relay.bootstrap_reply.response.publisher_pub.clone(),
+        entry_expiry_ms: bridge_set
+            .bridge_dht_entries
+            .iter()
+            .map(|entry| entry.entry_expiry_ms)
+            .max()
+            .unwrap_or_else(|| now_ms.saturating_add(300_000)),
+    });
     table.current_bootstrap_session = Some(BootstrapSession {
         session_id: relay.bootstrap_session_id.clone(),
         chain_id: Some(chain_id.to_string()),
@@ -2513,12 +2549,24 @@ where
 }
 
 fn error_response(status_code: u16, code: &str, message: &str) -> Vec<u8> {
+    error_response_with_context(status_code, code, message, None, None)
+}
+
+fn error_response_with_context(
+    status_code: u16,
+    code: &str,
+    message: &str,
+    current_state: Option<String>,
+    filter_drops: Option<BridgeFilterDrops>,
+) -> Vec<u8> {
     json_response(
         status_code,
         &AdminErrorResponse {
             error: AdminErrorBody {
                 code: code.to_string(),
                 message: message.to_string(),
+                current_state,
+                filter_drops,
             },
         },
     )
@@ -2531,11 +2579,35 @@ fn service_error_response(error: ServiceError) -> Vec<u8> {
 fn creator_error_response(error: CreatorError) -> Vec<u8> {
     let status = match &error {
         CreatorError::NoBridgeAssigned => 409,
+        CreatorError::CreatorNotOnboarded { .. }
+        | CreatorError::NoEligibleBridge { .. }
+        | CreatorError::MissingPublisherEntry => 409,
         CreatorError::BootstrapFailed(_) | CreatorError::FrameUploadFailed(_) => 502,
         CreatorError::Transport { .. } => 502,
-        CreatorError::Protocol(_) => 500,
+        CreatorError::Protocol(_) | CreatorError::LocalDht(_) => 500,
     };
-    error_response(status, "send_dummy_failed", &error.to_string())
+    match error {
+        CreatorError::CreatorNotOnboarded { current_state } => error_response_with_context(
+            status,
+            "creator_not_onboarded",
+            "selected node has not completed NewCreator onboarding",
+            Some(current_state),
+            None,
+        ),
+        CreatorError::NoEligibleBridge { filter_drops } => error_response_with_context(
+            status,
+            "no_eligible_bridge",
+            "no active publisher-signed direct/brokered bridge available in local DHT",
+            None,
+            Some(filter_drops),
+        ),
+        CreatorError::MissingPublisherEntry => error_response(
+            status,
+            "publisher_entry_missing",
+            "local DHT does not contain the Publisher trust-root entry needed to build the envelope",
+        ),
+        other => error_response(status, "send_dummy_failed", &other.to_string()),
+    }
 }
 
 fn raw_response(status_code: u16, body: Vec<u8>) -> Vec<u8> {

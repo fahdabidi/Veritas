@@ -792,6 +792,7 @@ fn map_protocol_error(error: ProtocolError) -> ServiceError {
         | ProtocolError::EmptyBridgeSet
         | ProtocolError::EmptyBatchAssignments
         | ProtocolError::InvalidUdpPunchPort
+        | ProtocolError::Envelope(_)
         | ProtocolError::Serialization(_) => ServiceError::BadRequest(error.to_string()),
     }
 }

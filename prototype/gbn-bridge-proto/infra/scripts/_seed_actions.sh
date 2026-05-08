@@ -333,3 +333,82 @@ PY
     [[ "${yn,,}" == "n" ]] || _collect_chain_traces "$chain_id"
   fi
 }
+
+do_send_dummy() {
+  local idx local_dht state eligible_summary size force yn payload result chain_id assigned selected route_source ciphertext_only
+
+  idx="$(_pick_node "Pick onboarded NewCreator:" "CREATOR")"
+  local_dht="$(_curl_admin "$idx" GET /v1/admin/local-dht)"
+  state="$(printf '%s' "$local_dht" | _seed_actions_json_get self_onboarding_state)"
+  if [[ "$state" != "onboarded" && "$state" != "fanout_partial" ]]; then
+    echo "ERROR: selected creator is not onboarded (self_onboarding_state=${state:-unknown}). Run SeedNewCreator first." >&2
+    printf '%s\n' "$local_dht" | _pretty_json >&2
+    return 1
+  fi
+
+  eligible_summary="$(printf '%s' "$local_dht" | python3 -c 'import json,sys,time
+table=json.load(sys.stdin)
+now=int(time.time()*1000)
+eligible=[]
+for e in table.get("bridge_entries") or []:
+    if not e.get("active"):
+        continue
+    if e.get("reachability_class") == "relay_only":
+        continue
+    if int(e.get("lease_expiry_ms") or 0) < now or int(e.get("entry_expiry_ms") or 0) < now:
+        continue
+    suspect=e.get("suspect_until_ms")
+    if suspect is not None and int(suspect) > now:
+        continue
+    eligible.append(e.get("bridge_id","unknown"))
+print(f"eligible={len(eligible)} ids={','.join(eligible)}")' 2>/dev/null || true)"
+  echo "Local DHT route candidates: ${eligible_summary:-unknown}" >&2
+
+  read -r -p "Frame size in bytes [512]: " size
+  size="${size:-512}"
+  if ! [[ "$size" =~ ^[0-9]+$ ]] || ((size < 1)); then
+    echo "ERROR: size must be a positive integer." >&2
+    return 1
+  fi
+
+  force=false
+  read -r -p "Force first-bridge failure before send? [y/N]: " yn
+  if [[ "${yn,,}" == "y" || "${yn,,}" == "yes" ]]; then
+    force=true
+  fi
+
+  payload="$(SIZE="$size" FORCE="$force" python3 - <<'PY'
+import json
+import os
+print(json.dumps({
+    "size": int(os.environ["SIZE"]),
+    "force_bridge_failure": os.environ["FORCE"] == "true",
+}, separators=(",", ":")))
+PY
+)"
+  echo "Triggering SendDummy on ${NODE_LABELS[$idx]} using local DHT route selection..." >&2
+  result="$(_curl_admin "$idx" POST /v1/admin/send-dummy "$payload")"
+  printf '%s\n' "$result" | _pretty_json
+
+  chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
+  assigned="$(printf '%s' "$result" | _seed_actions_json_get assigned_bridge_id)"
+  route_source="$(printf '%s' "$result" | _seed_actions_json_get route_source)"
+  ciphertext_only="$(printf '%s' "$result" | _seed_actions_json_get ciphertext_only_at_bridge)"
+  selected="$(printf '%s' "$result" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("selected_bridge_ids") or []))' 2>/dev/null || true)"
+  if [[ -z "$chain_id" ]]; then
+    echo "WARN: no chain_id in SendDummy response." >&2
+    return 1
+  fi
+
+  echo ""
+  echo "  Root chain_id:              $chain_id"
+  echo "  Route source:               ${route_source:-unknown}"
+  echo "  Selected bridge ids:        ${selected:-unknown}"
+  echo "  Assigned bridge_id:         ${assigned:-unknown}"
+  echo "  Ciphertext only at bridge:  ${ciphertext_only:-unknown}"
+  echo ""
+  if declare -F _collect_chain_traces >/dev/null 2>&1; then
+    read -r -p "Collect chain_id hits from recent logs now? [Y/n]: " yn
+    [[ "${yn,,}" == "n" ]] || _collect_chain_traces "$chain_id"
+  fi
+}

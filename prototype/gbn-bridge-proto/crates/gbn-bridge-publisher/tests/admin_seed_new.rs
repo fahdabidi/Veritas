@@ -427,15 +427,25 @@ fn valid_seed_with_bootstrap_relays_join_through_host_and_records_session() {
             .map(|entry| entry.node_id.as_str()),
         Some("creator-new")
     );
-    assert_eq!(table.bridge_entries.len(), 1);
-    assert_eq!(table.bridge_entries[0].bridge_id, "exit-bridge-b");
-    assert!(table.bridge_entries.iter().all(|entry| entry.active));
+    assert_eq!(table.bridge_entries.len(), 2);
     assert!(table
         .bridge_entries
         .iter()
-        .all(|entry| entry.bridge_id != "exit-bridge-a"));
-    assert_eq!(table.active_tunnels.len(), 1);
-    assert_eq!(table.active_tunnels[0].peer_id, "exit-bridge-b");
+        .any(|entry| entry.bridge_id == "exit-bridge-a"));
+    assert!(table
+        .bridge_entries
+        .iter()
+        .any(|entry| entry.bridge_id == "exit-bridge-b"));
+    assert!(table.bridge_entries.iter().all(|entry| entry.active));
+    assert_eq!(table.active_tunnels.len(), 2);
+    assert!(table
+        .active_tunnels
+        .iter()
+        .any(|tunnel| tunnel.peer_id == "exit-bridge-a"));
+    assert!(table
+        .active_tunnels
+        .iter()
+        .any(|tunnel| tunnel.peer_id == "exit-bridge-b"));
 
     let service = authority.service.lock().unwrap();
     let session = service
@@ -446,8 +456,11 @@ fn valid_seed_with_bootstrap_relays_join_through_host_and_records_session() {
     assert_eq!(session.host_creator_id, "creator-host");
     assert_eq!(session.relay_bridge_id, "exit-bridge-a");
     assert_eq!(session.seed_bridge_id, "exit-bridge-b");
-    assert_eq!(session.bridge_ids, vec!["exit-bridge-b".to_string()]);
-    assert_eq!(session.bridge_set.bridge_dht_entries.len(), 1);
+    assert_eq!(
+        session.bridge_ids,
+        vec!["exit-bridge-a".to_string(), "exit-bridge-b".to_string()]
+    );
+    assert_eq!(session.bridge_set.bridge_dht_entries.len(), 2);
     assert_eq!(
         session.state,
         gbn_bridge_publisher::storage::BootstrapSessionState::Completed

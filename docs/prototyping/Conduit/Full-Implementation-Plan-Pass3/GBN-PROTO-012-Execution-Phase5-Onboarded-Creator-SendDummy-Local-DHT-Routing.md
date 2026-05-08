@@ -1,6 +1,6 @@
 # GBN-PROTO-012 - Execution Phase 5 - Onboarded-Creator SendDummy Local-DHT Single-Lane Envelope Demo
 
-**Status:** Pending
+**Status:** Completed
 **Last Updated:** 2026-05-08
 **Phase:** 5 (Onboarded-Creator SendDummy And Local-DHT Single-Lane Envelope Demo)
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
@@ -30,6 +30,11 @@ selection, and the §3.7 progressive fanout are owned by Phases 10 and 11. Phase
 proves the encryption boundary and local-DHT route source on one frame so Phases
 10/11 can build on a known-good envelope rather than introducing the envelope and
 the multi-lane logic in the same change.
+
+Phase 5 consumes the bridge entries that Phase 4 stored in the creator's local DHT
+from the Publisher-seeded 10-entry ExitBridge DHT set. `SendDummy` must not issue a
+fresh Publisher authority catalog/bootstrap request, because that would bypass the
+bootstrap state being validated by Pass 3.
 
 Per Master plan §3.5, "Publisher" is one role with two surfaces. The dummy frame's
 ciphertext is destined for the Publisher (receiver surface); ACK signing happens at
@@ -328,8 +333,29 @@ Run inside WSL2 Ubuntu:
 uname -a | grep -i microsoft >/dev/null || { echo "Pass 3 tooling requires WSL2 Ubuntu" >&2; exit 1; }
 cd prototype/gbn-bridge-proto
 cargo test -p gbn-bridge-protocol --test encryption_envelope
-cargo test -p gbn-bridge-creator --test send_dummy_route
+cargo test -p gbn-bridge-publisher --test admin_send_dummy
 ```
+
+---
+
+## Implementation Notes
+
+Completed 2026-05-08.
+
+- `POST /v1/admin/send-dummy` now requires a creator-local DHT source and returns
+  `creator_not_onboarded` for Publisher/ExitBridge admin listeners or non-onboarded
+  creators.
+- Creator-side `SendDummy` selects the route from local DHT bridge entries populated
+  during Phase 4 bootstrap. The legacy authority-bootstrap client path remains only as
+  a lower-level compatibility helper and is not used by the admin endpoint.
+- Route filtering rejects expired, unsigned, inactive, suspect, and `relay_only`
+  entries before ranking candidates by recent tunnel activity and lease expiry.
+- `force_bridge_failure=true` marks the first candidate suspect and reselects from the
+  remaining local-DHT candidates.
+- The protocol now includes a Publisher-targeted X25519 + HKDF + AES-256-GCM
+  `EncryptedFrame`; bridge tests assert that a bridge key cannot decrypt the frame.
+- Operator `SendDummy` flow moved into `_seed_actions.sh`, filters to creator nodes,
+  checks onboarding state before POST, and exposes the failover flag.
 
 ---
 

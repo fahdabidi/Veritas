@@ -221,7 +221,6 @@ pub fn begin_bootstrap(
 
     let selected_bridge_records = eligible
         .into_iter()
-        .filter(|record| record.bridge_id != request.relay_bridge_id)
         .take(config.bootstrap_bridge_count)
         .collect::<Vec<_>>();
 

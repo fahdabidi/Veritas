@@ -105,7 +105,7 @@ fn creator_local_dht_can_complete_bootstrap_workflow_from_signed_payload() {
             now + 2,
         )
         .unwrap();
-    for index in 1..=9 {
+    for index in 1..=10 {
         store
             .mutate(
                 LocalDhtMutation::UpsertBridgeEntry(bridge_entry(index, false, now)),
@@ -119,7 +119,7 @@ fn creator_local_dht_can_complete_bootstrap_workflow_from_signed_payload() {
             now + 4,
         )
         .unwrap();
-    for index in 1..=9 {
+    for index in 1..=10 {
         store
             .mutate(
                 LocalDhtMutation::UpsertBridgeEntry(bridge_entry(index, true, now)),
@@ -127,7 +127,7 @@ fn creator_local_dht_can_complete_bootstrap_workflow_from_signed_payload() {
             )
             .unwrap();
     }
-    let tunnels = (1..=9)
+    let tunnels = (1..=10)
         .map(|index| TunnelState {
             peer_id: format!("exit-bridge-{index:02}"),
             peer_role: TunnelPeerRole::ExitBridge,
@@ -166,9 +166,9 @@ fn creator_local_dht_can_complete_bootstrap_workflow_from_signed_payload() {
             .map(|entry| entry.node_id.as_str()),
         Some("creator-new")
     );
-    assert_eq!(table.bridge_entries.len(), 9);
+    assert_eq!(table.bridge_entries.len(), 10);
     assert!(table.bridge_entries.iter().all(|entry| entry.active));
-    assert_eq!(table.active_tunnels.len(), 9);
+    assert_eq!(table.active_tunnels.len(), 10);
     assert_eq!(
         table
             .current_bootstrap_session
@@ -183,7 +183,7 @@ fn creator_local_dht_can_complete_bootstrap_workflow_from_signed_payload() {
         reloaded.self_onboarding_state,
         SelfOnboardingState::Onboarded
     );
-    assert_eq!(reloaded.bridge_entries.len(), 9);
+    assert_eq!(reloaded.bridge_entries.len(), 10);
 
     let _ = std::fs::remove_dir_all(dir);
 }

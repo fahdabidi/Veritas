@@ -4,13 +4,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    sign_payload, verify_payload, BootstrapJoinReply, BridgeAckStatus, BridgeCatalogRequest,
-    BridgeCatalogResponse, BridgeClose, BridgeCloseReason, BridgeData, BridgeOpen,
-    CreatorJoinRequest, PendingCreator, PublicKeyBytes, SignatureBytes, DEFAULT_UDP_PUNCH_PORT,
+    encrypt_for_publisher, sign_payload, verify_payload, BootstrapJoinReply, BridgeAckStatus,
+    BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCloseReason, BridgeData,
+    BridgeDhtEntry, BridgeIngressEndpointKind, BridgeOpen, CreatorJoinRequest,
+    DhtBridgeIngressEndpoint, LocalDiscoveryTable, PendingCreator, PublicKeyBytes,
+    ReachabilityClass, SelfOnboardingState, SignatureBytes, DEFAULT_UDP_PUNCH_PORT,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::CreatorError;
+use crate::local_dht::LocalDhtStore;
 use crate::session::CreatorSession;
 use crate::upload::{CreatorBridgeRequest, CreatorBridgeResponse};
 
@@ -19,6 +23,8 @@ const CREATOR_CATALOG_PATH: &str = "/v1/creator/catalog";
 const HTTP_TIMESTAMP_GUARD_MS: u64 = 25;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_UDP_DATAGRAM_BYTES: usize = 60 * 1024;
+const DEFAULT_SUSPECT_TTL_MS: u64 = 300_000;
+const ENCRYPTION_ENVELOPE_NAME: &str = "publisher_x25519_hkdf_aes256gcm_v1";
 
 #[derive(Debug, Clone)]
 pub struct CreatorClient {
@@ -282,8 +288,117 @@ impl CreatorClient {
         let chain_id = self.upload_frame(&session, frame)?;
         Ok(SendDummyResult {
             chain_id,
+            actor_id: self.actor_id.clone(),
+            route_source: "authority_bootstrap".to_string(),
+            candidate_bridge_ids: vec![session.bridge_id.clone()],
+            selected_bridge_ids: vec![session.bridge_id.clone()],
             assigned_bridge_id: session.bridge_id,
+            encryption_envelope: "legacy_plaintext".to_string(),
+            ciphertext_only_at_bridge: false,
+            frames: 1,
             elapsed_ms: started.elapsed().as_millis() as u64,
+            force_bridge_failure_used: false,
+        })
+    }
+
+    pub fn send_dummy_from_local_dht(
+        &self,
+        store: &LocalDhtStore,
+        size: usize,
+        force_bridge_failure: bool,
+    ) -> Result<SendDummyResult, CreatorError> {
+        let started = Instant::now();
+        let now_ms = now_ms();
+        let chain_id =
+            default_chain_id("send-dummy", &self.actor_id, &format!("local-dht-{now_ms}"));
+        let mut snapshot = store.snapshot();
+        ensure_onboarded(&snapshot)?;
+        let publisher_entry = snapshot
+            .publisher_entry
+            .clone()
+            .ok_or(CreatorError::MissingPublisherEntry)?;
+        publisher_entry.verify_trust_root(&self.publisher_pub, now_ms)?;
+
+        let (mut candidates, drops) =
+            select_route_candidates(&snapshot, &self.publisher_pub, now_ms);
+        if candidates.is_empty() {
+            return Err(CreatorError::NoEligibleBridge {
+                filter_drops: drops,
+            });
+        }
+        let candidate_bridge_ids = candidates
+            .iter()
+            .map(|candidate| candidate.entry.bridge_id.clone())
+            .collect::<Vec<_>>();
+
+        if force_bridge_failure {
+            let failed_bridge_id = candidates[0].entry.bridge_id.clone();
+            let suspect_until_ms = now_ms.saturating_add(DEFAULT_SUSPECT_TTL_MS);
+            if let Some(entry) = snapshot
+                .bridge_entries
+                .iter_mut()
+                .find(|entry| entry.bridge_id == failed_bridge_id)
+            {
+                entry.suspect_until_ms = Some(suspect_until_ms);
+            }
+            snapshot = store
+                .replace(snapshot)
+                .map_err(|error| CreatorError::LocalDht(error.to_string()))?;
+            let (reranked, rerank_drops) =
+                select_route_candidates(&snapshot, &self.publisher_pub, now_ms);
+            candidates = reranked;
+            if candidates.is_empty() {
+                return Err(CreatorError::NoEligibleBridge {
+                    filter_drops: rerank_drops,
+                });
+            }
+        }
+
+        let selected = candidates
+            .first()
+            .expect("candidate set checked above")
+            .entry
+            .clone();
+        let bridge_address = bridge_upload_address(&selected)?;
+        let session_id_bytes = session_id_bytes(&chain_id);
+        let session_id = hex_bytes(&session_id_bytes);
+        let frame = synthesize_frame(size);
+        let ephemeral_private = ephemeral_private_bytes(&self.actor_id, &chain_id, now_ms);
+        let encrypted = encrypt_for_publisher(
+            &frame,
+            &publisher_entry.pub_key,
+            publisher_entry.node_id.clone(),
+            session_id_bytes,
+            0,
+            1,
+            ephemeral_private,
+        )?;
+        let encrypted_frame = serde_json::to_vec(&encrypted).map_err(|error| {
+            CreatorError::Protocol(format!(
+                "failed to serialize encrypted dummy frame: {error}"
+            ))
+        })?;
+        let session = CreatorSession {
+            session_id: format!("upload-{session_id}"),
+            bridge_id: selected.bridge_id.clone(),
+            bridge_address,
+            bootstrap_chain_id: chain_id.clone(),
+            started_at: Instant::now(),
+        };
+        let ack_chain_id = self.upload_frame(&session, encrypted_frame)?;
+
+        Ok(SendDummyResult {
+            chain_id: ack_chain_id,
+            actor_id: self.actor_id.clone(),
+            route_source: "local_dht".to_string(),
+            candidate_bridge_ids,
+            selected_bridge_ids: vec![selected.bridge_id.clone()],
+            assigned_bridge_id: selected.bridge_id,
+            encryption_envelope: ENCRYPTION_ENVELOPE_NAME.to_string(),
+            ciphertext_only_at_bridge: true,
+            frames: 1,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            force_bridge_failure_used: force_bridge_failure,
         })
     }
 
@@ -446,11 +561,36 @@ impl CreatorClient {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeFilterDrops {
+    pub expired_lease: usize,
+    pub expired_entry: usize,
+    pub bad_signature: usize,
+    pub relay_only: usize,
+    pub suspect: usize,
+    pub inactive: usize,
+    pub no_ingress: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteCandidate {
+    entry: BridgeDhtEntry,
+    last_seen_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendDummyResult {
     pub chain_id: String,
+    pub actor_id: String,
+    pub route_source: String,
+    pub candidate_bridge_ids: Vec<String>,
+    pub selected_bridge_ids: Vec<String>,
     pub assigned_bridge_id: String,
+    pub encryption_envelope: String,
+    pub ciphertext_only_at_bridge: bool,
+    pub frames: u32,
     pub elapsed_ms: u64,
+    pub force_bridge_failure_used: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,6 +724,139 @@ fn synthesize_frame(size: usize) -> Vec<u8> {
         buf.push((i % 251) as u8);
     }
     buf
+}
+
+fn ensure_onboarded(table: &LocalDiscoveryTable) -> Result<(), CreatorError> {
+    if matches!(
+        table.self_onboarding_state,
+        SelfOnboardingState::Onboarded | SelfOnboardingState::FanoutPartial
+    ) {
+        return Ok(());
+    }
+    Err(CreatorError::CreatorNotOnboarded {
+        current_state: serde_json::to_value(table.self_onboarding_state)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| format!("{:?}", table.self_onboarding_state)),
+    })
+}
+
+fn select_route_candidates(
+    table: &LocalDiscoveryTable,
+    publisher_pub: &PublicKeyBytes,
+    now_ms: u64,
+) -> (Vec<RouteCandidate>, BridgeFilterDrops) {
+    let mut drops = BridgeFilterDrops::default();
+    let mut candidates = Vec::new();
+
+    for entry in &table.bridge_entries {
+        if now_ms > entry.lease_expiry_ms {
+            drops.expired_lease += 1;
+            continue;
+        }
+        if now_ms > entry.entry_expiry_ms {
+            drops.expired_entry += 1;
+            continue;
+        }
+        if entry.verify_authority(publisher_pub, now_ms).is_err() {
+            drops.bad_signature += 1;
+            continue;
+        }
+        if matches!(entry.reachability_class, ReachabilityClass::RelayOnly) {
+            drops.relay_only += 1;
+            continue;
+        }
+        if entry
+            .suspect_until_ms
+            .is_some_and(|suspect| suspect > now_ms)
+        {
+            drops.suspect += 1;
+            continue;
+        }
+        if !entry.active {
+            drops.inactive += 1;
+            continue;
+        }
+        if bridge_upload_address(entry).is_err() {
+            drops.no_ingress += 1;
+            continue;
+        }
+        let last_seen_ms = table
+            .active_tunnels
+            .iter()
+            .filter(|tunnel| tunnel.peer_id == entry.bridge_id)
+            .map(|tunnel| tunnel.last_seen_ms)
+            .max()
+            .unwrap_or(0);
+        candidates.push(RouteCandidate {
+            entry: entry.clone(),
+            last_seen_ms,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .last_seen_ms
+            .cmp(&left.last_seen_ms)
+            .then_with(|| right.entry.lease_expiry_ms.cmp(&left.entry.lease_expiry_ms))
+            .then_with(|| left.entry.bridge_id.cmp(&right.entry.bridge_id))
+    });
+    (candidates, drops)
+}
+
+fn bridge_upload_address(entry: &BridgeDhtEntry) -> Result<String, CreatorError> {
+    let endpoint = entry
+        .ingress_endpoints
+        .iter()
+        .find(|endpoint| {
+            matches!(
+                endpoint.kind,
+                BridgeIngressEndpointKind::Direct | BridgeIngressEndpointKind::Brokered
+            )
+        })
+        .or_else(|| entry.ingress_endpoints.first())
+        .ok_or_else(|| {
+            CreatorError::Protocol(format!(
+                "bridge `{}` has no ingress endpoint in local DHT",
+                entry.bridge_id
+            ))
+        })?;
+    endpoint_upload_address(endpoint)
+}
+
+fn endpoint_upload_address(endpoint: &DhtBridgeIngressEndpoint) -> Result<String, CreatorError> {
+    if endpoint.ip_addr.trim().is_empty() || endpoint.port == 0 {
+        return Err(CreatorError::Protocol(
+            "bridge ingress endpoint has empty host or zero port".to_string(),
+        ));
+    }
+    Ok(format!("{}:{}", endpoint.ip_addr, endpoint.port))
+}
+
+fn session_id_bytes(chain_id: &str) -> [u8; 16] {
+    let digest = Sha256::digest(chain_id.as_bytes());
+    let mut out = [0_u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+fn ephemeral_private_bytes(actor_id: &str, chain_id: &str, now_ms: u64) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"veritas/conduit/v2/send-dummy-ephemeral");
+    hasher.update(actor_id.as_bytes());
+    hasher.update(chain_id.as_bytes());
+    hasher.update(now_ms.to_le_bytes());
+    hasher.finalize().into()
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn default_chain_id(prefix: &str, actor_id: &str, request_id: &str) -> String {

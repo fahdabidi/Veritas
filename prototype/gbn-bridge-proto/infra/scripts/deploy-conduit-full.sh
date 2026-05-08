@@ -7,7 +7,7 @@ STACK_NAME="${GBN_BRIDGE_STACK_NAME:-gbn-conduit-full-dev}"
 REGION="${GBN_BRIDGE_AWS_REGION:-${AWS_REGION:-us-east-1}}"
 ENVIRONMENT_NAME="${GBN_BRIDGE_ENVIRONMENT:-dev}"
 ASSIGN_PUBLIC_IP="${GBN_BRIDGE_ASSIGN_PUBLIC_IP:-ENABLED}"
-DESIRED_BRIDGE_COUNT="${GBN_BRIDGE_DESIRED_BRIDGE_COUNT:-3}"
+DESIRED_BRIDGE_COUNT="${GBN_BRIDGE_DESIRED_BRIDGE_COUNT:-10}"
 AUTHORITY_PORT="${GBN_BRIDGE_AUTHORITY_PORT:-8080}"
 RECEIVER_PORT="${GBN_BRIDGE_RECEIVER_PORT:-8081}"
 UDP_PUNCH_PORT="${GBN_BRIDGE_PUNCH_PORT:-443}"
@@ -21,7 +21,7 @@ AUTHORITY_INGRESS_CIDR="${GBN_BRIDGE_AUTHORITY_INGRESS_CIDR:-0.0.0.0/0}"
 usage() {
   cat <<USAGE
 Usage: $0 --vpc-id VPC --service-subnet-ids SUBNET_A,SUBNET_B --database-subnet-ids SUBNET_C,SUBNET_D \
-  --authority-image URI --receiver-image URI --bridge-image URI \
+  --authority-image URI --receiver-image URI --bridge-image URI --creator-image URI \
   --publisher-signing-key-secret-arn ARN --bridge-signing-seed-secret-arn ARN --publisher-public-key-hex HEX [options]
 
 Options:
@@ -48,6 +48,7 @@ DATABASE_SUBNET_IDS=""
 AUTHORITY_IMAGE_URI=""
 RECEIVER_IMAGE_URI=""
 BRIDGE_IMAGE_URI=""
+CREATOR_IMAGE_URI=""
 PUBLISHER_SIGNING_KEY_SECRET_ARN=""
 BRIDGE_SIGNING_SEED_SECRET_ARN=""
 PUBLISHER_PUBLIC_KEY_HEX=""
@@ -63,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --authority-image) AUTHORITY_IMAGE_URI="$2"; shift 2 ;;
     --receiver-image) RECEIVER_IMAGE_URI="$2"; shift 2 ;;
     --bridge-image) BRIDGE_IMAGE_URI="$2"; shift 2 ;;
+    --creator-image) CREATOR_IMAGE_URI="$2"; shift 2 ;;
     --publisher-signing-key-secret-arn) PUBLISHER_SIGNING_KEY_SECRET_ARN="$2"; shift 2 ;;
     --bridge-signing-seed-secret-arn) BRIDGE_SIGNING_SEED_SECRET_ARN="$2"; shift 2 ;;
     --publisher-public-key-hex) PUBLISHER_PUBLIC_KEY_HEX="$2"; shift 2 ;;
@@ -87,7 +89,7 @@ if [[ "$STACK_NAME" != gbn-conduit-full-* ]]; then
   exit 2
 fi
 
-if [[ -z "$VPC_ID" || -z "$SERVICE_SUBNET_IDS" || -z "$DATABASE_SUBNET_IDS" || -z "$AUTHORITY_IMAGE_URI" || -z "$RECEIVER_IMAGE_URI" || -z "$BRIDGE_IMAGE_URI" || -z "$PUBLISHER_SIGNING_KEY_SECRET_ARN" || -z "$BRIDGE_SIGNING_SEED_SECRET_ARN" || -z "$PUBLISHER_PUBLIC_KEY_HEX" ]]; then
+if [[ -z "$VPC_ID" || -z "$SERVICE_SUBNET_IDS" || -z "$DATABASE_SUBNET_IDS" || -z "$AUTHORITY_IMAGE_URI" || -z "$RECEIVER_IMAGE_URI" || -z "$BRIDGE_IMAGE_URI" || -z "$CREATOR_IMAGE_URI" || -z "$PUBLISHER_SIGNING_KEY_SECRET_ARN" || -z "$BRIDGE_SIGNING_SEED_SECRET_ARN" || -z "$PUBLISHER_PUBLIC_KEY_HEX" ]]; then
   usage >&2
   exit 2
 fi
@@ -111,6 +113,7 @@ aws cloudformation deploy \
     AuthorityImageUri="$AUTHORITY_IMAGE_URI" \
     ReceiverImageUri="$RECEIVER_IMAGE_URI" \
     BridgeImageUri="$BRIDGE_IMAGE_URI" \
+    CreatorImageUri="$CREATOR_IMAGE_URI" \
     DesiredBridgeCount="$DESIRED_BRIDGE_COUNT" \
     AuthorityPort="$AUTHORITY_PORT" \
     ReceiverPort="$RECEIVER_PORT" \

@@ -3,14 +3,19 @@
 set -euo pipefail
 
 NAMESPACE="${VERITAS_K8S_NAMESPACE:-veritas}"
-EXPECTED_BRIDGES="${VERITAS_K8S_EXPECTED_BRIDGES:-3}"
+EXPECTED_BRIDGES="${VERITAS_K8S_EXPECTED_BRIDGES:-10}"
 ADMIN_PORT="${VERITAS_K8S_ADMIN_PORT:-9090}"
 SEND_DUMMY=0
+CHECK_CREATOR_RESTART_PERSISTENCE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --send-dummy)
       SEND_DUMMY=1
+      shift
+      ;;
+    --check-creator-restart-persistence)
+      CHECK_CREATOR_RESTART_PERSISTENCE=1
       shift
       ;;
     --namespace)
@@ -58,6 +63,99 @@ pod_for_selector() {
     awk '{print $1}'
 }
 
+assert_not_applicable_local_dht() {
+  local pod="$1" container="$2" expected_role="$3" expected_surface="${4:-}"
+  admin_curl "$pod" "$container" GET /v1/admin/local-dht | python3 -c '
+import json
+import sys
+
+expected_role, expected_surface = sys.argv[1:3]
+data = json.load(sys.stdin)
+if data.get("role") != expected_role:
+    raise SystemExit(f"expected local DHT role {expected_role!r}, got {data.get('role')!r}")
+if data.get("state") != "not_applicable":
+    raise SystemExit(f"expected state not_applicable, got {data.get('state')!r}")
+if expected_surface and data.get("publisher_surface") != expected_surface:
+    raise SystemExit(f"expected publisher_surface {expected_surface!r}, got {data.get('publisher_surface')!r}")
+if not data.get("reason"):
+    raise SystemExit(f"expected a not_applicable reason, got {data!r}")
+' "$expected_role" "$expected_surface"
+}
+
+assert_publisher_metadata() {
+  local pod="$1" container="$2" expected_surface="$3" expected_url_field="$4"
+  admin_curl "$pod" "$container" GET /v1/admin/node-metadata | python3 -c '
+import json
+import sys
+
+expected_surface, expected_url_field = sys.argv[1:3]
+data = json.load(sys.stdin)
+if data.get("role") != "publisher":
+    raise SystemExit(f"expected publisher role, got {data.get('role')!r}")
+if data.get("publisher_surface") != expected_surface:
+    raise SystemExit(f"expected publisher_surface {expected_surface!r}, got {data.get('publisher_surface')!r}")
+if not data.get(expected_url_field):
+    raise SystemExit(f"expected {expected_url_field} in metadata, got {data!r}")
+if not data.get("public_key") or not data.get("publisher_public_key"):
+    raise SystemExit(f"expected public_key and publisher_public_key, got {data!r}")
+' "$expected_surface" "$expected_url_field"
+}
+
+assert_bridge_metadata() {
+  local pod="$1"
+  admin_curl "$pod" exit-bridge GET /v1/admin/node-metadata | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+if data.get("role") != "exit_bridge":
+    raise SystemExit(f"expected exit_bridge role, got {data.get('role')!r}")
+if not data.get("ingress_endpoints"):
+    raise SystemExit(f"expected ingress_endpoints, got {data!r}")
+if not data.get("udp_punch_port"):
+    raise SystemExit(f"expected udp_punch_port, got {data!r}")
+if data.get("reachability_class") not in {"direct", "brokered", "relay_only"}:
+    raise SystemExit(f"unexpected reachability_class, got {data!r}")
+if not data.get("capabilities"):
+    raise SystemExit(f"expected capabilities, got {data!r}")
+if not data.get("public_key") or not data.get("publisher_public_key"):
+    raise SystemExit(f"expected public_key and publisher_public_key, got {data!r}")
+'
+}
+
+assert_creator_restart_persistence() {
+  local before_file after_file old_pod new_pod
+  before_file="$(mktemp)"
+  after_file="$(mktemp)"
+  old_pod="$creator_new_pod"
+  admin_curl "$old_pod" creator-runner GET /v1/admin/local-dht >"$before_file"
+
+  echo "Checking creator-new local DHT persistence across pod restart..."
+  kubectl -n "$NAMESPACE" delete pod "$old_pod" --wait=true --timeout=120s >/dev/null
+  kubectl -n "$NAMESPACE" rollout status deployment/creator-new --timeout=180s >/dev/null
+  new_pod="$(pod_for_selector 'app.kubernetes.io/name=creator-new')"
+  if [[ -z "$new_pod" || "$new_pod" == "$old_pod" ]]; then
+    echo "ERROR: creator-new pod did not restart cleanly (old=$old_pod new=${new_pod:-none})." >&2
+    exit 1
+  fi
+  creator_new_pod="$new_pod"
+  admin_curl "$new_pod" creator-runner GET /v1/admin/local-dht >"$after_file"
+
+  python3 - "$before_file" "$after_file" <<'PY'
+import json
+import sys
+
+before = json.load(open(sys.argv[1]))
+after = json.load(open(sys.argv[2]))
+for field in ("last_update_ms",):
+    before.pop(field, None)
+    after.pop(field, None)
+if before != after:
+    raise SystemExit(f"creator local DHT did not persist across restart\nbefore={before!r}\nafter={after!r}")
+PY
+  rm -f "$before_file" "$after_file"
+}
+
 echo "Checking namespace '$NAMESPACE'..."
 kubectl get namespace "$NAMESPACE" >/dev/null
 
@@ -65,17 +163,21 @@ echo "Checking rollout status..."
 kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=30s
 kubectl -n "$NAMESPACE" rollout status deployment/publisher-authority --timeout=30s
 kubectl -n "$NAMESPACE" rollout status deployment/publisher-receiver --timeout=30s
-kubectl -n "$NAMESPACE" rollout status deployment/exit-bridge --timeout=30s
+kubectl -n "$NAMESPACE" rollout status statefulset/exit-bridge --timeout=90s
+kubectl -n "$NAMESPACE" rollout status deployment/creator-host --timeout=30s
+kubectl -n "$NAMESPACE" rollout status deployment/creator-new --timeout=30s
 
 authority_pod="$(pod_for_selector 'veritas-role=authority')"
 receiver_pod="$(pod_for_selector 'veritas-role=receiver')"
+creator_host_pod="$(pod_for_selector 'app.kubernetes.io/name=creator-host')"
+creator_new_pod="$(pod_for_selector 'app.kubernetes.io/name=creator-new')"
 mapfile -t bridge_pods < <(
   kubectl -n "$NAMESPACE" get pods -l veritas-role=bridge \
     -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}'
 )
 
-if [[ -z "$authority_pod" || -z "$receiver_pod" || "${#bridge_pods[@]}" -lt "$EXPECTED_BRIDGES" ]]; then
-  echo "ERROR: expected authority, receiver, and $EXPECTED_BRIDGES bridge pods." >&2
+if [[ -z "$authority_pod" || -z "$receiver_pod" || -z "$creator_host_pod" || -z "$creator_new_pod" || "${#bridge_pods[@]}" -lt "$EXPECTED_BRIDGES" ]]; then
+  echo "ERROR: expected authority, receiver, creator-host, creator-new, and $EXPECTED_BRIDGES bridge pods." >&2
   kubectl -n "$NAMESPACE" get pods -o wide >&2
   exit 1
 fi
@@ -97,6 +199,53 @@ admin_curl "$receiver_pod" publisher-receiver GET /v1/admin/metrics >/dev/null
 for pod in "${bridge_pods[@]}"; do
   admin_curl "$pod" exit-bridge GET /v1/admin/metrics >/dev/null
 done
+
+echo "Checking node metadata and empty creator local DHT endpoints..."
+assert_publisher_metadata "$authority_pod" publisher-authority authority authority_url
+assert_publisher_metadata "$receiver_pod" publisher-receiver receiver receiver_url
+assert_not_applicable_local_dht "$authority_pod" publisher-authority publisher authority
+assert_not_applicable_local_dht "$receiver_pod" publisher-receiver publisher receiver
+for pod in "${bridge_pods[@]}"; do
+  assert_bridge_metadata "$pod"
+  assert_not_applicable_local_dht "$pod" exit-bridge exit_bridge
+done
+for check in "$creator_host_pod:host-creator" "$creator_new_pod:new-creator"; do
+  pod="${check%%:*}"
+  actor="${check##*:}"
+  metadata="$(admin_curl "$pod" creator-runner GET /v1/admin/node-metadata)"
+  local_dht="$(admin_curl "$pod" creator-runner GET /v1/admin/local-dht)"
+  printf '%s' "$metadata" | python3 -c '
+import json
+import sys
+
+actor = sys.argv[1]
+data = json.load(sys.stdin)
+if data.get("role") != "creator":
+    raise SystemExit(f"expected creator role, got {data.get('role')!r}")
+if data.get("conduit_actor") != actor:
+    raise SystemExit(f"expected actor {actor!r}, got {data.get('conduit_actor')!r}")
+' "$actor"
+  printf '%s' "$local_dht" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+if data.get("role") != "creator":
+    raise SystemExit(f"expected creator local DHT role, got {data.get('role')!r}")
+if data.get("actor_id") != sys.argv[1]:
+    raise SystemExit(f"expected actor_id {sys.argv[1]!r}, got {data.get('actor_id')!r}")
+if data.get("self_onboarding_state") != "none":
+    raise SystemExit(f"expected self_onboarding_state none, got {data.get('self_onboarding_state')!r}")
+if data.get("host_role_state") != "not_host":
+    raise SystemExit(f"expected host_role_state not_host, got {data.get('host_role_state')!r}")
+if data.get("bridge_entries") != [] or data.get("active_tunnels") != []:
+    raise SystemExit(f"expected empty bridge/tunnel state, got {data!r}")
+' "$actor"
+done
+
+if [[ "$CHECK_CREATOR_RESTART_PERSISTENCE" == "1" ]]; then
+  assert_creator_restart_persistence
+fi
 
 echo "Waiting for bridge registration..."
 for _ in {1..36}; do

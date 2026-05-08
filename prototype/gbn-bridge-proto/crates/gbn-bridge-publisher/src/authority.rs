@@ -1,9 +1,10 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
     publisher_identity, BootstrapJoinReply, BootstrapProgress, BootstrapProgressStage, BridgeAck,
-    BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCommandAck,
-    BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeHeartbeat, BridgeLease,
-    BridgeOpen, BridgeRegister, BridgeRevoke, CreatorJoinRequest, PublicKeyBytes,
+    BridgeCapability, BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCommandAck,
+    BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeDhtEntry,
+    BridgeDhtEntryUnsigned, BridgeHeartbeat, BridgeIngressEndpointKind, BridgeLease, BridgeOpen,
+    BridgeRegister, BridgeRevoke, CreatorJoinRequest, DhtBridgeIngressEndpoint, PublicKeyBytes,
     ReachabilityClass, RevocationReason,
 };
 use serde::Serialize;
@@ -40,6 +41,16 @@ pub struct PublisherAuthority {
 pub struct BootstrapProgressUpdate {
     pub stored_event_count: usize,
     pub activated_bridge_ids: Vec<String>,
+}
+
+fn bridge_capability_label(capability: &BridgeCapability) -> &'static str {
+    match capability {
+        BridgeCapability::BootstrapSeed => "bootstrap_seed",
+        BridgeCapability::CatalogRefresh => "catalog_refresh",
+        BridgeCapability::SessionRelay => "session_relay",
+        BridgeCapability::BatchAssignment => "batch_assignment",
+        BridgeCapability::ProgressReporting => "progress_reporting",
+    }
 }
 
 impl PublisherAuthority {
@@ -147,6 +158,68 @@ impl PublisherAuthority {
         let mut bridges = self.storage.bridges.values().cloned().collect::<Vec<_>>();
         bridges.sort_by(|left, right| left.bridge_id.cmp(&right.bridge_id));
         bridges
+    }
+
+    pub fn bridge_dht_entry(
+        &self,
+        bridge_id: &str,
+        now_ms: u64,
+    ) -> AuthorityResult<BridgeDhtEntry> {
+        let record =
+            self.storage
+                .bridges
+                .get(bridge_id)
+                .ok_or_else(|| AuthorityError::BridgeNotFound {
+                    bridge_id: bridge_id.to_string(),
+                })?;
+        if !record.is_active(now_ms) {
+            return Err(AuthorityError::LeaseExpired {
+                bridge_id: record.bridge_id.clone(),
+                lease_id: record.current_lease.lease_id.clone(),
+                lease_expiry_ms: record.current_lease.lease_expiry_ms,
+                heartbeat_at_ms: now_ms,
+            });
+        }
+
+        let endpoint_kind = match record.reachability_class {
+            ReachabilityClass::Direct => BridgeIngressEndpointKind::Direct,
+            ReachabilityClass::Brokered => BridgeIngressEndpointKind::Brokered,
+            ReachabilityClass::RelayOnly => BridgeIngressEndpointKind::RelayOnly,
+        };
+        let ingress_endpoints = record
+            .ingress_endpoints
+            .iter()
+            .map(|endpoint| DhtBridgeIngressEndpoint {
+                kind: endpoint_kind.clone(),
+                ip_addr: endpoint.host.clone(),
+                port: endpoint.port,
+                ttl_ms: None,
+            })
+            .collect::<Vec<_>>();
+
+        BridgeDhtEntry::sign(
+            BridgeDhtEntryUnsigned {
+                bridge_id: record.bridge_id.clone(),
+                identity_pub: record.identity_pub.clone(),
+                ingress_endpoints,
+                udp_punch_port: record.assigned_udp_punch_port,
+                reachability_class: record.reachability_class.clone(),
+                lease_expiry_ms: record.current_lease.lease_expiry_ms,
+                entry_expiry_ms: record
+                    .current_lease
+                    .lease_expiry_ms
+                    .min(now_ms + self.config.bootstrap_entry_ttl_ms),
+                capabilities: record
+                    .capabilities
+                    .iter()
+                    .map(bridge_capability_label)
+                    .map(ToOwned::to_owned)
+                    .collect(),
+            },
+            &self.signing_key,
+            true,
+        )
+        .map_err(Into::into)
     }
 
     pub fn list_frames(&self, chain_id: Option<&str>, limit: usize) -> Vec<IngestedFrameRecord> {

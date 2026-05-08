@@ -91,3 +91,23 @@ pub fn ensure_not_expired(
 
     Ok(())
 }
+
+pub fn ensure_replay_window(
+    sent_at_ms: u64,
+    now_ms: u64,
+    max_skew_ms: u64,
+) -> Result<(), ProtocolError> {
+    if sent_at_ms.saturating_sub(now_ms) > max_skew_ms {
+        return Err(ProtocolError::ReplayTimestampInFuture { sent_at_ms, now_ms });
+    }
+
+    if now_ms.saturating_sub(sent_at_ms) > max_skew_ms {
+        return Err(ProtocolError::ReplayWindowExpired {
+            sent_at_ms,
+            now_ms,
+            max_age_ms: max_skew_ms,
+        });
+    }
+
+    Ok(())
+}

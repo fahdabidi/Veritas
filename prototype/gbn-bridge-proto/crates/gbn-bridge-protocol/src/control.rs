@@ -7,7 +7,8 @@ use crate::error::ProtocolError;
 use crate::lease::BridgeRevoke;
 use crate::punch::{BootstrapProgress, BridgeBatchAssign, BridgePunchStart};
 use crate::signing::{
-    ensure_not_expired, sign_payload, verify_payload, PublicKeyBytes, SignatureBytes,
+    ensure_not_expired, ensure_replay_window, sign_payload, verify_payload, PublicKeyBytes,
+    SignatureBytes,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,19 +84,7 @@ impl BridgeControlHello {
     pub fn verify_bridge(&self, now_ms: u64, max_age_ms: u64) -> Result<(), ProtocolError> {
         let unsigned = self.unsigned_payload();
         unsigned.validate_shape()?;
-        if unsigned.sent_at_ms > now_ms {
-            return Err(ProtocolError::ReplayTimestampInFuture {
-                sent_at_ms: unsigned.sent_at_ms,
-                now_ms,
-            });
-        }
-        if now_ms.saturating_sub(unsigned.sent_at_ms) > max_age_ms {
-            return Err(ProtocolError::ReplayWindowExpired {
-                sent_at_ms: unsigned.sent_at_ms,
-                now_ms,
-                max_age_ms,
-            });
-        }
+        ensure_replay_window(unsigned.sent_at_ms, now_ms, max_age_ms)?;
         verify_payload(&unsigned, &self.bridge_pub, &self.bridge_sig)
     }
 }

@@ -5,7 +5,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::api::AuthorityApiRequest;
-use gbn_bridge_protocol::BridgeControlHello;
+use gbn_bridge_protocol::{ensure_replay_window, BridgeControlHello};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AuthError {
@@ -65,22 +65,7 @@ impl RequestAuthenticator {
             return Err(AuthError::EmptyActorId);
         }
 
-        if request.sent_at_ms > now_ms {
-            return Err(AuthError::Protocol(
-                ProtocolError::ReplayTimestampInFuture {
-                    sent_at_ms: request.sent_at_ms,
-                    now_ms,
-                },
-            ));
-        }
-
-        if now_ms.saturating_sub(request.sent_at_ms) > self.max_skew_ms {
-            return Err(AuthError::Protocol(ProtocolError::ReplayWindowExpired {
-                sent_at_ms: request.sent_at_ms,
-                now_ms,
-                max_age_ms: self.max_skew_ms,
-            }));
-        }
+        ensure_replay_window(request.sent_at_ms, now_ms, self.max_skew_ms)?;
 
         self.reap(now_ms);
 

@@ -27,7 +27,10 @@ use gbn_bridge_protocol::punch::{
 use gbn_bridge_protocol::session::{
     BridgeAck, BridgeAckStatus, BridgeClose, BridgeCloseReason, BridgeData, BridgeOpen,
 };
-use gbn_bridge_protocol::{publisher_identity, ProtocolError, PublicKeyBytes};
+use gbn_bridge_protocol::{
+    publisher_identity, BridgeControlHello, BridgeControlHelloUnsigned, ProtocolError,
+    PublicKeyBytes,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -462,6 +465,66 @@ fn replay_window_validation_rejects_stale_envelopes() {
             sent_at_ms: 1_000,
             now_ms: 10_000,
             max_age_ms: 5_000,
+        }
+    );
+}
+
+#[test]
+fn replay_window_validation_allows_bounded_future_skew() {
+    let envelope = ProtocolEnvelope::with_replay(
+        sample_protocol_message(),
+        ReplayProtection {
+            message_id: "msg-003".into(),
+            nonce: 56,
+            sent_at_ms: 10_250,
+        },
+    );
+
+    envelope.validate(10_000, 500).unwrap();
+
+    let envelope = ProtocolEnvelope::with_replay(
+        sample_protocol_message(),
+        ReplayProtection {
+            message_id: "msg-004".into(),
+            nonce: 57,
+            sent_at_ms: 10_501,
+        },
+    );
+
+    assert_eq!(
+        envelope.validate(10_000, 500).unwrap_err(),
+        ProtocolError::ReplayTimestampInFuture {
+            sent_at_ms: 10_501,
+            now_ms: 10_000,
+        }
+    );
+}
+
+#[test]
+fn bridge_control_hello_allows_bounded_future_skew() {
+    let bridge_key = SigningKey::from_bytes(&[9_u8; 32]);
+    let bridge_pub = publisher_identity(&bridge_key);
+    let hello = BridgeControlHello::sign(
+        BridgeControlHelloUnsigned {
+            bridge_id: "bridge-clock-skew".into(),
+            lease_id: "lease-clock-skew".into(),
+            bridge_pub,
+            sent_at_ms: 10_350,
+            request_id: "hello-clock-skew".into(),
+            resume_acked_seq_no: None,
+            chain_id: "control-clock-skew".into(),
+        },
+        &bridge_key,
+    )
+    .unwrap();
+
+    hello.verify_bridge(10_000, 500).unwrap();
+
+    assert_eq!(
+        hello.verify_bridge(9_000, 500).unwrap_err(),
+        ProtocolError::ReplayTimestampInFuture {
+            sent_at_ms: 10_350,
+            now_ms: 9_000,
         }
     );
 }

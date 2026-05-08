@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+
+FROM rust:1-bookworm AS builder
+WORKDIR /workspace
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN cargo build --release -p gbn-bridge-cli --bin creator_runner
+
+FROM debian:bookworm-slim
+ARG VERITAS_BUILD_VERSION=unknown
+ARG VERITAS_BUILD_SOURCE=unknown
+ARG VERITAS_BUILD_CREATED=unknown
+LABEL org.opencontainers.image.title="veritas-creator-runner" \
+    org.opencontainers.image.version="${VERITAS_BUILD_VERSION}" \
+    org.opencontainers.image.revision="${VERITAS_BUILD_SOURCE}" \
+    org.opencontainers.image.created="${VERITAS_BUILD_CREATED}" \
+    veritas.component="creator-runner" \
+    veritas.build.version="${VERITAS_BUILD_VERSION}"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --uid 10001 veritas
+USER veritas
+WORKDIR /app
+COPY --from=builder /workspace/target/release/creator_runner /usr/local/bin/creator_runner
+ENV GBN_BRIDGE_ROLE=creator \
+    GBN_BRIDGE_RUN_MODE=serve \
+    GBN_BRIDGE_STATE_DIR=/var/lib/gbn-conduit \
+    VERITAS_CONDUIT_BUILD_VERSION="${VERITAS_BUILD_VERSION}" \
+    VERITAS_CONDUIT_BUILD_SOURCE="${VERITAS_BUILD_SOURCE}" \
+    VERITAS_CONDUIT_BUILD_CREATED="${VERITAS_BUILD_CREATED}"
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/creator_runner"]

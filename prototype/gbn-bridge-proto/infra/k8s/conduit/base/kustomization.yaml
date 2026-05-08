@@ -15,3 +15,5 @@ resources:
   - receiver-deployment.yaml
   - bridge-service.yaml
   - bridge-deployment.yaml
+  - creator-host-deployment.yaml
+  - creator-new-deployment.yaml

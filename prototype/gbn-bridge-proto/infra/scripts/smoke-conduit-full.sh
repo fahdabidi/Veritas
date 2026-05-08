@@ -41,23 +41,26 @@ CLUSTER_NAME="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformatio
 AUTHORITY_SERVICE="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`AuthorityServiceName`].OutputValue' --output text)"
 RECEIVER_SERVICE="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`ReceiverServiceName`].OutputValue' --output text)"
 BRIDGE_SERVICE="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`BridgeServiceName`].OutputValue' --output text)"
+CREATOR_HOST_SERVICE="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`CreatorHostServiceName`].OutputValue' --output text)"
+CREATOR_NEW_SERVICE="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`CreatorNewServiceName`].OutputValue' --output text)"
 AUTHORITY_URL="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`AuthorityInternalUrl`].OutputValue' --output text)"
 RECEIVER_URL="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`ReceiverInternalUrl`].OutputValue' --output text)"
 CONTROL_URL="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`ControlUrl`].OutputValue' --output text)"
 AUTHORITY_LOG_GROUP="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`AuthorityLogGroup`].OutputValue' --output text)"
 RECEIVER_LOG_GROUP="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`ReceiverLogGroup`].OutputValue' --output text)"
 BRIDGE_LOG_GROUP="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`BridgeLogGroup`].OutputValue' --output text)"
+CREATOR_LOG_GROUP="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`CreatorLogGroup`].OutputValue' --output text)"
 
 SERVICE_STATUS_JSON="$(aws ecs describe-services \
   --region "$REGION" \
   --cluster "$CLUSTER_NAME" \
-  --services "$AUTHORITY_SERVICE" "$RECEIVER_SERVICE" "$BRIDGE_SERVICE" \
+  --services "$AUTHORITY_SERVICE" "$RECEIVER_SERVICE" "$BRIDGE_SERVICE" "$CREATOR_HOST_SERVICE" "$CREATOR_NEW_SERVICE" \
   --output json)"
 
 aws ecs describe-services \
   --region "$REGION" \
   --cluster "$CLUSTER_NAME" \
-  --services "$AUTHORITY_SERVICE" "$RECEIVER_SERVICE" "$BRIDGE_SERVICE" \
+  --services "$AUTHORITY_SERVICE" "$RECEIVER_SERVICE" "$BRIDGE_SERVICE" "$CREATOR_HOST_SERVICE" "$CREATOR_NEW_SERVICE" \
   --query 'services[].{serviceName:serviceName,desired:desiredCount,running:runningCount,status:status}' \
   --output table
 
@@ -80,4 +83,5 @@ ControlUrl=$CONTROL_URL
 AuthorityLogGroup=$AUTHORITY_LOG_GROUP
 ReceiverLogGroup=$RECEIVER_LOG_GROUP
 BridgeLogGroup=$BRIDGE_LOG_GROUP
+CreatorLogGroup=$CREATOR_LOG_GROUP
 OUTPUTS

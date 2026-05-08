@@ -70,7 +70,13 @@
       "Bash(where gh.exe)",
       "Bash(where gh *)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\fahd_\\\\OneDrive\\\\Documents\\\\Veritas\\\\docs\\\\prototyping\\\\Conduit\\\\Full-Implementation-Plan-Pass3\\\\\" -File | Select-Object Name, FullName | Format-Table -AutoSize)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\fahd_\\\\OneDrive\\\\Documents\\\\Veritas\\\\docs\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\fahd_\\\\OneDrive\\\\Documents\\\\Veritas\\\\\" -Directory | Select-Object Name)",
+      "PowerShell(head -20)",
+      "Bash(git restore *)"
     ]
   }
 }

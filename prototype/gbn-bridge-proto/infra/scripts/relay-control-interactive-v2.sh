@@ -238,6 +238,8 @@ discover_all_nodes() {
   _discover_v2_service AUTHORITY AuthorityServiceName "$CLUSTER_NAME"
   _discover_v2_service RECEIVER ReceiverServiceName "$CLUSTER_NAME"
   _discover_v2_service BRIDGE BridgeServiceName "$CLUSTER_NAME"
+  _discover_v2_service CREATOR CreatorHostServiceName "$CLUSTER_NAME"
+  _discover_v2_service CREATOR CreatorNewServiceName "$CLUSTER_NAME"
   echo "  Found ${#NODE_LABELS[@]} live node(s)." >&2
   if [[ "${#NODE_LABELS[@]}" -eq 0 ]]; then
     echo "ERROR: no nodes discovered." >&2
@@ -288,20 +290,23 @@ _pick_node() {
 }
 
 _pick_log_group() {
-  local auth_lg recv_lg bridge_lg choice
+  local auth_lg recv_lg bridge_lg creator_lg choice
   auth_lg="$(cf_output AuthorityLogGroup)"
   recv_lg="$(cf_output ReceiverLogGroup)"
   bridge_lg="$(cf_output BridgeLogGroup)"
+  creator_lg="$(cf_output CreatorLogGroup)"
   echo "Pick log group:" >&2
   printf "  [1] %s\n" "$auth_lg" >&2
   printf "  [2] %s\n" "$recv_lg" >&2
   printf "  [3] %s\n" "$bridge_lg" >&2
+  printf "  [4] %s\n" "$creator_lg" >&2
   while true; do
-    read -r -p "  Select [1-3]: " choice
+    read -r -p "  Select [1-4]: " choice
     case "$choice" in
       1) echo "$auth_lg"; return 0 ;;
       2) echo "$recv_lg"; return 0 ;;
       3) echo "$bridge_lg"; return 0 ;;
+      4) echo "$creator_lg"; return 0 ;;
       *) echo "  Invalid selection." >&2 ;;
     esac
   done
@@ -454,13 +459,15 @@ do_send_dummy() {
 
 _collect_chain_traces() {
   local chain_id="$1"
-  local auth_lg recv_lg bridge_lg lg now_ms start_ms
+  local auth_lg recv_lg bridge_lg creator_lg lg now_ms start_ms
   auth_lg="$(cf_output AuthorityLogGroup)"
   recv_lg="$(cf_output ReceiverLogGroup)"
   bridge_lg="$(cf_output BridgeLogGroup)"
+  creator_lg="$(cf_output CreatorLogGroup)"
   now_ms="$(_now_epoch_ms)"
   start_ms="$((now_ms - 300000))"
-  for lg in "$auth_lg" "$recv_lg" "$bridge_lg"; do
+  for lg in "$auth_lg" "$recv_lg" "$bridge_lg" "$creator_lg"; do
+    [[ -z "$lg" || "$lg" == "None" ]] && continue
     echo ""
     echo "=== $lg ==="
     aws logs filter-log-events \
@@ -570,6 +577,8 @@ do_teardown() {
   fi
 }
 
+source "$SCRIPT_DIR/_seed_actions.sh"
+
 main() {
   echo "Veritas Conduit V2 Operator Control Panel"
   echo "  Stack:  $STACK_NAME"
@@ -590,6 +599,7 @@ main() {
       "DumpFrames" \
       "AdminMetrics" \
       "LiveMetrics" \
+      "SeedHostCreator" \
       "SendDummy" \
       "TriggerCommand" \
       "CheckImages" \
@@ -607,6 +617,7 @@ main() {
         DumpFrames) do_dump_frames ;;
         AdminMetrics) do_admin_metrics ;;
         LiveMetrics) do_live_metrics ;;
+        SeedHostCreator) do_seed_host_creator ;;
         SendDummy) do_send_dummy ;;
         TriggerCommand) do_trigger_command ;;
         CheckImages) do_check_images ;;

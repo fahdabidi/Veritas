@@ -8,7 +8,17 @@ SERVERS="${VERITAS_K3D_SERVERS:-1}"
 AGENTS="${VERITAS_K3D_AGENTS:-2}"
 RUN_SMOKE="${VERITAS_K8S_RUN_SMOKE:-1}"
 RUN_CARGO_PERSISTENCE="${VERITAS_K8S_RUN_CARGO_PERSISTENCE:-1}"
-DOCKER_STABILITY_SECONDS="${VERITAS_K8S_DOCKER_STABILITY_SECONDS:-10}"
+DOCKER_STABILITY_SECONDS="${VERITAS_K8S_DOCKER_STABILITY_SECONDS:-3}"
+K3D_NODE_STABILITY_SECONDS="${VERITAS_K8S_K3D_NODE_STABILITY_SECONDS:-5}"
+POST_SMOKE_STABILITY_SECONDS="${VERITAS_K8S_POST_SMOKE_STABILITY_SECONDS:-45}"
+SMOKE_ATTEMPTS="${VERITAS_K8S_SMOKE_ATTEMPTS:-2}"
+KUBELET_PROXY_TIMEOUT_SECONDS="${VERITAS_K8S_KUBELET_PROXY_TIMEOUT_SECONDS:-180}"
+WORKLOAD_READY_TIMEOUT_SECONDS="${VERITAS_K8S_WORKLOAD_READY_TIMEOUT_SECONDS:-240}"
+WORKLOAD_STABILITY_SECONDS="${VERITAS_K8S_WORKLOAD_STABILITY_SECONDS:-30}"
+EXPECTED_CONDUIT_POD_COUNT="${VERITAS_K8S_EXPECTED_CONDUIT_POD_COUNT:-14}"
+POSTGRES_ROLLOUT_TIMEOUT="${VERITAS_K8S_POSTGRES_ROLLOUT_TIMEOUT:-240s}"
+DEPLOYMENT_ROLLOUT_TIMEOUT="${VERITAS_K8S_DEPLOYMENT_ROLLOUT_TIMEOUT:-240s}"
+EXIT_BRIDGE_ROLLOUT_TIMEOUT="${VERITAS_K8S_EXIT_BRIDGE_ROLLOUT_TIMEOUT:-900s}"
 PRUNE_OLD_IMAGES="${VERITAS_K8S_PRUNE_OLD_IMAGES:-1}"
 PRUNE_OLD_K3D_IMAGES="${VERITAS_K8S_PRUNE_OLD_K3D_IMAGES:-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,8 +91,10 @@ BUILD_LABEL="$(sanitize_k8s_label "$BUILD_VERSION")"
 AUTHORITY_IMAGE="veritas/publisher-authority:${BUILD_VERSION}"
 RECEIVER_IMAGE="veritas/publisher-receiver:${BUILD_VERSION}"
 BRIDGE_IMAGE="veritas/exit-bridge:${BUILD_VERSION}"
+CREATOR_IMAGE="veritas/creator-runner:${BUILD_VERSION}"
 BUILD_ARTIFACT_DIR="${VERITAS_K8S_BUILD_ARTIFACT_DIR:-$ROOT_DIR/target/k8s-builds/$BUILD_VERSION}"
 VERSIONED_OVERLAY_DIR="$BUILD_ARTIFACT_DIR/kustomize"
+DIAGNOSTIC_DIR="$BUILD_ARTIFACT_DIR/diagnostics"
 
 docker_restart_count() {
   if command -v systemctl >/dev/null 2>&1; then
@@ -117,6 +129,115 @@ wait_for_docker_stable() {
   fi
 }
 
+k3d_container_names() {
+  docker ps -a --format '{{.Names}}' |
+    grep -E "^k3d-${CLUSTER_NAME}-(server-[0-9]+|agent-[0-9]+|serverlb)$" |
+    sort || true
+}
+
+expected_k3d_container_count() {
+  echo $((SERVERS + AGENTS + 1))
+}
+
+k3d_container_fingerprint() {
+  local name
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    docker inspect "$name" \
+      --format '{{.Name}} {{.State.Status}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}'
+  done < <(k3d_container_names)
+}
+
+capture_k3d_diagnostics() {
+  local dir="$1"
+  mkdir -p "$dir"
+  date -u +"%Y-%m-%dT%H:%M:%SZ" >"$dir/captured-at.txt"
+  docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' \
+    >"$dir/docker-ps-k3d.txt" 2>&1 || true
+  k3d_container_fingerprint >"$dir/k3d-container-fingerprint.txt" 2>&1 || true
+  for name in $(k3d_container_names); do
+    docker logs --tail=250 "$name" >"$dir/${name}.log" 2>&1 || true
+    docker inspect "$name" >"$dir/${name}.inspect.json" 2>&1 || true
+  done
+  kubectl get nodes -o wide >"$dir/kubectl-nodes.txt" 2>&1 || true
+  kubectl -n "$NAMESPACE" get pods -o wide >"$dir/kubectl-pods.txt" 2>&1 || true
+  kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp \
+    >"$dir/kubectl-events.txt" 2>&1 || true
+  while read -r pod container; do
+    [[ -n "${pod:-}" && -n "${container:-}" ]] || continue
+    kubectl -n "$NAMESPACE" logs "$pod" -c "$container" --tail=250 \
+      >"$dir/pod-${pod}-${container}.log" 2>&1 || true
+    kubectl -n "$NAMESPACE" logs "$pod" -c "$container" --previous --tail=250 \
+      >"$dir/pod-${pod}-${container}.previous.log" 2>&1 || true
+  done < <(
+    kubectl -n "$NAMESPACE" get pods -o json 2>/dev/null |
+      python3 -c 'import json,sys; data=json.load(sys.stdin); [print(item["metadata"]["name"], container["name"]) for item in data.get("items", []) for container in item.get("spec", {}).get("containers", [])]' 2>/dev/null || true
+  )
+  dmesg -T 2>/dev/null |
+    grep -Ei 'oom|killed process|out of memory|docker|containerd|ext4|i/o error|unmounting filesystem|mounted filesystem' |
+    tail -200 >"$dir/dmesg-indicators.txt" 2>&1 || true
+}
+
+ensure_k3d_containers_running() {
+  if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local attempt running_count expected_count
+  expected_count="$(expected_k3d_container_count)"
+  for attempt in {1..60}; do
+    running_count="$(
+      docker ps --format '{{.Names}}' |
+        grep -E "^k3d-${CLUSTER_NAME}-(server-[0-9]+|agent-[0-9]+|serverlb)$" |
+        wc -l |
+        tr -d ' '
+    )"
+    if [[ "$running_count" == "$expected_count" ]]; then
+      return 0
+    fi
+    if ((attempt == 1 || attempt % 10 == 0)); then
+      echo "k3d backing containers are not all running ($running_count/$expected_count); starting cluster '$CLUSTER_NAME'..."
+      k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+    fi
+    sleep 2
+  done
+
+  echo "ERROR: k3d backing containers did not all reach Running." >&2
+  docker ps -a --filter "name=k3d-${CLUSTER_NAME}" >&2 || true
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/k3d-containers-not-running" || true
+  exit 1
+}
+
+wait_for_k3d_node_stability() {
+  local seconds="$1" label="${2:-k3d}" attempt before after
+  if [[ "$seconds" -le 0 ]]; then
+    return 0
+  fi
+
+  for attempt in {1..3}; do
+    wait_for_docker_stable
+    ensure_k3d_containers_running
+    before="$(k3d_container_fingerprint)"
+    echo "Validating k3d backing node stability for $label (${seconds}s, attempt $attempt/3)..."
+    sleep "$seconds"
+    wait_for_docker_stable
+    ensure_k3d_containers_running
+    after="$(k3d_container_fingerprint)"
+    if [[ "$before" == "$after" ]]; then
+      return 0
+    fi
+
+    echo "WARNING: k3d backing container state changed during '$label' stability window." >&2
+    capture_k3d_diagnostics "$DIAGNOSTIC_DIR/k3d-stability-${label//[^A-Za-z0-9_.-]/-}-attempt-$attempt" || true
+    k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+    sleep 10
+  done
+
+  echo "ERROR: k3d backing containers did not stay stable for '$label'." >&2
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/k3d-stability-${label//[^A-Za-z0-9_.-]/-}-failed" || true
+  exit 1
+}
+
 ensure_cluster_started() {
   if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
     return 0
@@ -129,15 +250,205 @@ ensure_cluster_started() {
 
 wait_for_cluster_api() {
   local attempt
-  for attempt in {1..90}; do
+  ensure_k3d_containers_running
+  for attempt in {1..120}; do
     if kubectl get nodes >/dev/null 2>&1; then
       kubectl wait --for=condition=Ready node --all --timeout=180s >/dev/null
       return 0
+    fi
+    if ((attempt == 1 || attempt % 15 == 0)); then
+      echo "Kubernetes API is not reachable yet; recovering k3d cluster '$CLUSTER_NAME'..."
+      k3d cluster start "$CLUSTER_NAME" >/dev/null || true
     fi
     sleep 2
   done
   echo "ERROR: Kubernetes API did not become reachable." >&2
   docker ps -a --filter "name=k3d-${CLUSTER_NAME}" >&2 || true
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/kubernetes-api-unreachable" || true
+  exit 1
+}
+
+wait_for_kubelet_proxy() {
+  local deadline node failed=0
+  deadline=$((SECONDS + KUBELET_PROXY_TIMEOUT_SECONDS))
+  echo "Validating API-server to kubelet proxy on every k3d node..."
+  while ((SECONDS < deadline)); do
+    failed=0
+    while IFS= read -r node; do
+      [[ -n "$node" ]] || continue
+      if ! kubectl get --raw "/api/v1/nodes/${node}/proxy/healthz" >/dev/null 2>&1; then
+        failed=1
+        break
+      fi
+    done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+    if [[ "$failed" == "0" ]]; then
+      return 0
+    fi
+    sleep 3
+  done
+
+  echo "ERROR: kubelet proxy did not become healthy on every node." >&2
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/kubelet-proxy-unhealthy" || true
+  exit 1
+}
+
+validate_cluster_gate() {
+  local label="$1"
+  echo "Validating cluster gate: $label"
+  wait_for_k3d_node_stability "$K3D_NODE_STABILITY_SECONDS" "$label"
+  wait_for_cluster_api
+  wait_for_kubelet_proxy
+}
+
+write_conduit_pod_fingerprint() {
+  local json_path="$1" fingerprint_path="$2"
+  if ! kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/part-of=veritas-conduit -o json \
+    >"$json_path"; then
+    return 1
+  fi
+  python3 - "$json_path" "$EXPECTED_CONDUIT_POD_COUNT" >"$fingerprint_path" <<'PY'
+import json
+import sys
+
+path, expected_count_raw = sys.argv[1:]
+expected_count = int(expected_count_raw)
+data = json.load(open(path))
+roles = {"authority", "receiver", "bridge", "creator"}
+rows = []
+blocking = []
+
+for item in sorted(data.get("items", []), key=lambda pod: pod["metadata"]["name"]):
+    meta = item.get("metadata", {})
+    labels = meta.get("labels", {})
+    role = labels.get("veritas-role", "")
+    if role not in roles:
+        continue
+
+    name = meta.get("name", "")
+    status = item.get("status", {})
+    phase = status.get("phase", "")
+    deleting = bool(meta.get("deletionTimestamp"))
+    pod_ready = any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in status.get("conditions", [])
+    )
+    container_bits = []
+    for container in status.get("containerStatuses", []):
+        state = container.get("state", {})
+        last_state = container.get("lastState", {})
+        state_name = next(iter(state.keys()), "unknown")
+        reason = state.get(state_name, {}).get("reason", "")
+        last_name = next(iter(last_state.keys()), "none")
+        last_reason = last_state.get(last_name, {}).get("reason", "")
+        container_bits.append(
+            "{name}:ready={ready}:restarts={restarts}:state={state}:reason={reason}:last={last}:last_reason={last_reason}:image_id={image_id}".format(
+                name=container.get("name", ""),
+                ready=container.get("ready", False),
+                restarts=container.get("restartCount", 0),
+                state=state_name,
+                reason=reason,
+                last=last_name,
+                last_reason=last_reason,
+                image_id=container.get("imageID", ""),
+            )
+        )
+        if not container.get("ready", False) or state_name != "running":
+            blocking.append(
+                f"{name}/{container.get('name', '')}: state={state_name} reason={reason} ready={container.get('ready', False)}"
+            )
+
+    if deleting or phase != "Running" or not pod_ready:
+        blocking.append(
+            f"{name}: phase={phase} ready={pod_ready} deleting={deleting}"
+        )
+
+    rows.append(
+        f"{name}|role={role}|phase={phase}|pod_ip={status.get('podIP', '')}|ready={pod_ready}|"
+        + "|".join(container_bits)
+    )
+
+if len(rows) != expected_count:
+    blocking.append(f"expected {expected_count} Conduit workload pods, found {len(rows)}")
+
+if blocking:
+    print("Conduit workload readiness blockers:", file=sys.stderr)
+    for item in blocking:
+        print(f"  - {item}", file=sys.stderr)
+    sys.exit(2)
+
+for row in rows:
+    print(row)
+PY
+}
+
+wait_for_conduit_workload_stability() {
+  local label="$1" attempt before_json before_fp after_json after_fp
+  if [[ "$WORKLOAD_STABILITY_SECONDS" -le 0 ]]; then
+    return 0
+  fi
+
+  for attempt in {1..3}; do
+    validate_cluster_gate "before workload stability $label"
+    echo "Waiting for Conduit workload pods to be Ready for $label..."
+    if ! kubectl -n "$NAMESPACE" wait \
+      --for=condition=Ready \
+      pod \
+      -l app.kubernetes.io/part-of=veritas-conduit \
+      --timeout="${WORKLOAD_READY_TIMEOUT_SECONDS}s" >/dev/null; then
+      echo "Conduit workload pods did not all become Ready for $label (attempt $attempt/3)." >&2
+      capture_k3d_diagnostics "$DIAGNOSTIC_DIR/workload-ready-${label//[^A-Za-z0-9_.-]/-}-attempt-$attempt" || true
+      k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+      sleep 15
+      continue
+    fi
+
+    before_json="$BUILD_ARTIFACT_DIR/workload-${label//[^A-Za-z0-9_.-]/-}-before-$attempt.json"
+    before_fp="$BUILD_ARTIFACT_DIR/workload-${label//[^A-Za-z0-9_.-]/-}-before-$attempt.txt"
+    after_json="$BUILD_ARTIFACT_DIR/workload-${label//[^A-Za-z0-9_.-]/-}-after-$attempt.json"
+    after_fp="$BUILD_ARTIFACT_DIR/workload-${label//[^A-Za-z0-9_.-]/-}-after-$attempt.txt"
+    if ! write_conduit_pod_fingerprint "$before_json" "$before_fp"; then
+      capture_k3d_diagnostics "$DIAGNOSTIC_DIR/workload-fingerprint-${label//[^A-Za-z0-9_.-]/-}-before-$attempt" || true
+      sleep 10
+      continue
+    fi
+
+    echo "Validating Conduit workload stability for $label (${WORKLOAD_STABILITY_SECONDS}s, attempt $attempt/3)..."
+    sleep "$WORKLOAD_STABILITY_SECONDS"
+    validate_cluster_gate "after workload stability window $label"
+
+    if ! kubectl -n "$NAMESPACE" wait \
+      --for=condition=Ready \
+      pod \
+      -l app.kubernetes.io/part-of=veritas-conduit \
+      --timeout="${WORKLOAD_READY_TIMEOUT_SECONDS}s" >/dev/null; then
+      echo "Conduit workload pods lost readiness during $label stability window." >&2
+      capture_k3d_diagnostics "$DIAGNOSTIC_DIR/workload-ready-${label//[^A-Za-z0-9_.-]/-}-after-$attempt" || true
+      k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+      sleep 15
+      continue
+    fi
+
+    if ! write_conduit_pod_fingerprint "$after_json" "$after_fp"; then
+      capture_k3d_diagnostics "$DIAGNOSTIC_DIR/workload-fingerprint-${label//[^A-Za-z0-9_.-]/-}-after-$attempt" || true
+      sleep 10
+      continue
+    fi
+
+    if cmp -s "$before_fp" "$after_fp"; then
+      return 0
+    fi
+
+    echo "Conduit workload state changed during $label stability window." >&2
+    echo "Before:" >&2
+    cat "$before_fp" >&2 || true
+    echo "After:" >&2
+    cat "$after_fp" >&2 || true
+    capture_k3d_diagnostics "$DIAGNOSTIC_DIR/workload-stability-${label//[^A-Za-z0-9_.-]/-}-attempt-$attempt" || true
+    sleep 15
+  done
+
+  echo "ERROR: Conduit workload pods did not stay stable for $label." >&2
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/workload-stability-${label//[^A-Za-z0-9_.-]/-}-failed" || true
   exit 1
 }
 
@@ -146,6 +457,7 @@ import_images() {
     "$AUTHORITY_IMAGE" \
     "$RECEIVER_IMAGE" \
     "$BRIDGE_IMAGE" \
+    "$CREATOR_IMAGE" \
     -c "$CLUSTER_NAME"
 }
 
@@ -171,15 +483,83 @@ import_images_with_retry() {
 kubectl_apply_with_retry() {
   local attempt
   for attempt in {1..3}; do
-    wait_for_cluster_api
+    validate_cluster_gate "before kubectl apply"
     if kubectl apply -k "$VERSIONED_OVERLAY_DIR"; then
+      validate_cluster_gate "after kubectl apply"
       return 0
     fi
     echo "kubectl apply failed (attempt $attempt/3); waiting for cluster API before retry..." >&2
+    capture_k3d_diagnostics "$DIAGNOSTIC_DIR/kubectl-apply-attempt-$attempt" || true
     sleep 10
   done
   echo "ERROR: kubectl apply failed after retries." >&2
   exit 1
+}
+
+rollout_status_with_retry() {
+  local resource="$1" timeout="$2" attempt
+  for attempt in {1..3}; do
+    validate_cluster_gate "before rollout ${resource//\//-}"
+    if kubectl -n "$NAMESPACE" rollout status "$resource" --timeout="$timeout"; then
+      validate_cluster_gate "after rollout ${resource//\//-}"
+      return 0
+    fi
+    echo "rollout status failed for $resource (attempt $attempt/3); recovering k3d before retry..." >&2
+    capture_k3d_diagnostics "$DIAGNOSTIC_DIR/rollout-${resource//\//-}-attempt-$attempt" || true
+    k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+    sleep 15
+  done
+
+  echo "ERROR: rollout did not complete for $resource." >&2
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/rollout-${resource//\//-}-failed" || true
+  exit 1
+}
+
+run_smoke_with_retry() {
+  local attempt
+  for attempt in $(seq 1 "$SMOKE_ATTEMPTS"); do
+    validate_cluster_gate "before smoke attempt $attempt"
+    if "$SCRIPT_DIR/k8s-smoke.sh" --send-dummy; then
+      validate_cluster_gate "after smoke attempt $attempt"
+      wait_for_conduit_workload_stability "after smoke attempt $attempt"
+      return 0
+    fi
+    echo "k8s smoke validation failed (attempt $attempt/$SMOKE_ATTEMPTS); recovering k3d before retry..." >&2
+    capture_k3d_diagnostics "$DIAGNOSTIC_DIR/k8s-smoke-attempt-$attempt" || true
+    k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+    sleep 20
+  done
+
+  echo "ERROR: k8s smoke validation failed after $SMOKE_ATTEMPTS attempt(s)." >&2
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/k8s-smoke-failed" || true
+  exit 1
+}
+
+run_postgres_validation_with_retry() {
+  local attempt
+  for attempt in {1..2}; do
+    validate_cluster_gate "before postgres validation attempt $attempt"
+    if "$SCRIPT_DIR/k8s-test-publisher-postgres.sh"; then
+      validate_cluster_gate "after postgres validation attempt $attempt"
+      wait_for_conduit_workload_stability "after postgres validation attempt $attempt"
+      return 0
+    fi
+    echo "Cargo Postgres validation failed (attempt $attempt/2); recovering k3d before retry..." >&2
+    capture_k3d_diagnostics "$DIAGNOSTIC_DIR/postgres-validation-attempt-$attempt" || true
+    k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+    sleep 20
+  done
+
+  echo "ERROR: Cargo Postgres validation failed after retries." >&2
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/postgres-validation-failed" || true
+  exit 1
+}
+
+delete_legacy_exit_bridge_deployment() {
+  if kubectl -n "$NAMESPACE" get deployment/exit-bridge >/dev/null 2>&1; then
+    echo "Removing legacy exit-bridge Deployment before applying the StatefulSet topology..."
+    kubectl -n "$NAMESPACE" delete deployment/exit-bridge --wait=true --timeout=120s
+  fi
 }
 
 prepare_versioned_overlay() {
@@ -211,7 +591,20 @@ PY
     exit-bridge \
     "$BRIDGE_IMAGE" \
     exit-bridge \
-    "$VERSIONED_OVERLAY_DIR/bridge-build-patch.yaml"
+    "$VERSIONED_OVERLAY_DIR/bridge-build-patch.yaml" \
+    StatefulSet
+  write_deployment_build_patch \
+    creator-host \
+    creator-runner \
+    "$CREATOR_IMAGE" \
+    creator-host \
+    "$VERSIONED_OVERLAY_DIR/creator-host-build-patch.yaml"
+  write_deployment_build_patch \
+    creator-new \
+    creator-runner \
+    "$CREATOR_IMAGE" \
+    creator-new \
+    "$VERSIONED_OVERLAY_DIR/creator-new-build-patch.yaml"
   cat >"$VERSIONED_OVERLAY_DIR/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -228,10 +621,15 @@ images:
   - name: veritas/exit-bridge
     newName: veritas/exit-bridge
     newTag: $BUILD_VERSION
+  - name: veritas/creator-runner
+    newName: veritas/creator-runner
+    newTag: $BUILD_VERSION
 patches:
   - path: authority-build-patch.yaml
   - path: receiver-build-patch.yaml
   - path: bridge-build-patch.yaml
+  - path: creator-host-build-patch.yaml
+  - path: creator-new-build-patch.yaml
 generatorOptions:
   disableNameSuffixHash: true
 secretGenerator:
@@ -249,10 +647,10 @@ EOF
 }
 
 write_deployment_build_patch() {
-  local deployment="$1" container="$2" image="$3" component="$4" output="$5"
+  local deployment="$1" container="$2" image="$3" component="$4" output="$5" kind="${6:-Deployment}"
   cat >"$output" <<EOF
 apiVersion: apps/v1
-kind: Deployment
+kind: $kind
 metadata:
   name: $deployment
   labels:
@@ -342,29 +740,31 @@ print(json.dumps({
 PY
 }
 
-set_deployment_build() {
-  local deployment="$1" container="$2" image="$3" component="$4"
-  kubectl -n "$NAMESPACE" patch "deployment/$deployment" \
+set_workload_build() {
+  local resource="$1" container="$2" image="$3" component="$4"
+  kubectl -n "$NAMESPACE" patch "$resource" \
     --type strategic \
     -p "$(build_metadata_patch "$container" "$image" "$component")"
 }
 
 set_versioned_deployments() {
   echo "Pinning deployments to build version $BUILD_VERSION..."
-  set_deployment_build publisher-authority publisher-authority "$AUTHORITY_IMAGE" publisher-authority
-  set_deployment_build publisher-receiver publisher-receiver "$RECEIVER_IMAGE" publisher-receiver
-  set_deployment_build exit-bridge exit-bridge "$BRIDGE_IMAGE" exit-bridge
+  set_workload_build deployment/publisher-authority publisher-authority "$AUTHORITY_IMAGE" publisher-authority
+  set_workload_build deployment/publisher-receiver publisher-receiver "$RECEIVER_IMAGE" publisher-receiver
+  set_workload_build statefulset/exit-bridge exit-bridge "$BRIDGE_IMAGE" exit-bridge
+  set_workload_build deployment/creator-host creator-runner "$CREATOR_IMAGE" creator-host
+  set_workload_build deployment/creator-new creator-runner "$CREATOR_IMAGE" creator-new
 }
 
 prune_old_local_images() {
   [[ "$PRUNE_OLD_IMAGES" == "1" ]] || return 0
   echo "Pruning older local Conduit image tags..."
   local repo image
-  for repo in veritas/publisher-authority veritas/publisher-receiver veritas/exit-bridge; do
+  for repo in veritas/publisher-authority veritas/publisher-receiver veritas/exit-bridge veritas/creator-runner; do
     while IFS= read -r image; do
       [[ -z "$image" || "$image" == *":<none>" ]] && continue
       case "$image" in
-        "$AUTHORITY_IMAGE"|"$RECEIVER_IMAGE"|"$BRIDGE_IMAGE") continue ;;
+        "$AUTHORITY_IMAGE"|"$RECEIVER_IMAGE"|"$BRIDGE_IMAGE"|"$CREATOR_IMAGE") continue ;;
       esac
       docker image rm "$image" >/dev/null 2>&1 || true
     done < <(docker images "$repo" --format '{{.Repository}}:{{.Tag}}')
@@ -380,7 +780,7 @@ prune_old_k3d_images() {
       set -eu
       command -v ctr >/dev/null 2>&1 || exit 0
       ctr -n k8s.io images ls -q |
-        grep -E '^docker.io/veritas/(publisher-authority|publisher-receiver|exit-bridge):' |
+        grep -E '^docker.io/veritas/(publisher-authority|publisher-receiver|exit-bridge|creator-runner):' |
         grep -v ':${BUILD_VERSION}$' |
         xargs -r ctr -n k8s.io images rm >/dev/null 2>&1 || true
     " >/dev/null 2>&1 || true
@@ -396,6 +796,7 @@ VERITAS_CONDUIT_BUILD_SOURCE=$BUILD_SOURCE
 VERITAS_AUTHORITY_IMAGE=$AUTHORITY_IMAGE
 VERITAS_RECEIVER_IMAGE=$RECEIVER_IMAGE
 VERITAS_BRIDGE_IMAGE=$BRIDGE_IMAGE
+VERITAS_CREATOR_IMAGE=$CREATOR_IMAGE
 VERITAS_VERSIONED_OVERLAY_DIR=$VERSIONED_OVERLAY_DIR
 EOF
 }
@@ -405,17 +806,23 @@ wait_for_current_image_set() {
   local attempt pod_json
   pod_json="$BUILD_ARTIFACT_DIR/pods-version-check.json"
   for attempt in {1..60}; do
-    kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/part-of=veritas-conduit -o json \
-      >"$pod_json"
-    if python3 - "$pod_json" "$AUTHORITY_IMAGE" "$RECEIVER_IMAGE" "$BRIDGE_IMAGE" "$BUILD_LABEL" "$BUILD_VERSION" <<'PY'
+    if ! kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/part-of=veritas-conduit -o json \
+      >"$pod_json"; then
+      echo "Pod image-set check could not reach Kubernetes API (attempt $attempt/60); recovering k3d..."
+      k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+      sleep 5
+      continue
+    fi
+    if python3 - "$pod_json" "$AUTHORITY_IMAGE" "$RECEIVER_IMAGE" "$BRIDGE_IMAGE" "$CREATOR_IMAGE" "$BUILD_LABEL" "$BUILD_VERSION" <<'PY'
 import json
 import sys
 
-path, authority_image, receiver_image, bridge_image, build_label, build_version = sys.argv[1:]
+path, authority_image, receiver_image, bridge_image, creator_image, build_label, build_version = sys.argv[1:]
 expected = {
     "authority": authority_image,
     "receiver": receiver_image,
     "bridge": bridge_image,
+    "creator": creator_image,
 }
 data = json.load(open(path))
 blocking = []
@@ -472,7 +879,7 @@ for item in sorted(data.get("items", []), key=lambda pod: pod["metadata"]["name"
     labels = meta.get("labels", {})
     annotations = meta.get("annotations", {})
     role = labels.get("veritas-role", "")
-    if role not in {"authority", "receiver", "bridge"}:
+    if role not in {"authority", "receiver", "bridge", "creator"}:
         continue
     if meta.get("deletionTimestamp") or item.get("status", {}).get("phase") != "Running":
         continue
@@ -494,12 +901,60 @@ for item in sorted(data.get("items", []), key=lambda pod: pod["metadata"]["name"
 PY
 }
 
+print_topology_summary() {
+  mkdir -p "$BUILD_ARTIFACT_DIR"
+  kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/part-of=veritas-conduit -o json \
+    >"$BUILD_ARTIFACT_DIR/topology-pods.json"
+  python3 - "$BUILD_ARTIFACT_DIR/topology-pods.json" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+roles = {
+    "creator-host": [],
+    "creator-new": [],
+    "exit-bridge": [],
+    "publisher-authority": [],
+    "publisher-receiver": [],
+}
+for item in data.get("items", []):
+    meta = item.get("metadata", {})
+    labels = meta.get("labels", {})
+    name = meta.get("name", "")
+    app = labels.get("app.kubernetes.io/name", "")
+    status = item.get("status", {})
+    ip = status.get("podIP", "")
+    ready = all(
+        condition.get("type") != "Ready" or condition.get("status") == "True"
+        for condition in status.get("conditions", [])
+    )
+    if app in roles:
+        roles[app].append((name, ip, ready))
+
+def ready_count(app):
+    return sum(1 for _, _, ready in roles[app] if ready)
+
+def first_ip(app):
+    return next((ip for _, ip, _ in roles[app] if ip), "pending")
+
+print("Conduit topology summary:")
+print(f"  creator-host  : {ready_count('creator-host')}/1 Ready  {first_ip('creator-host')}:9090")
+print(f"  creator-new   : {ready_count('creator-new')}/1 Ready   {first_ip('creator-new')}:9090")
+print(f"  exit-bridge   : {ready_count('exit-bridge')}/10 Ready")
+publisher_ready = ready_count("publisher-authority") + ready_count("publisher-receiver")
+print(f"  publisher     : {publisher_ready}/2 Ready   authority={first_ip('publisher-authority')}:9090 receiver={first_ip('publisher-receiver')}:9090")
+PY
+}
+
 for dep in docker k3d kubectl python3; do
   command -v "$dep" >/dev/null 2>&1 || {
     echo "ERROR: '$dep' is required. Run infra/scripts/bootstrap-k8s.sh inside WSL2 first." >&2
     exit 1
   }
 done
+
+mkdir -p "$DIAGNOSTIC_DIR"
+trap 'status=$?; if [[ "$status" -ne 0 ]]; then capture_k3d_diagnostics "$DIAGNOSTIC_DIR/final-failure" || true; fi' EXIT
 
 wait_for_docker_stable
 
@@ -526,7 +981,7 @@ else
   echo "Using existing k3d cluster '$CLUSTER_NAME'."
   ensure_cluster_started
 fi
-wait_for_cluster_api
+validate_cluster_gate "initial cluster start"
 
 echo "Conduit build version: $BUILD_VERSION"
 echo "Build source: $BUILD_SOURCE"
@@ -549,39 +1004,64 @@ docker build -f "$ROOT_DIR/Dockerfile.bridge" \
   --build-arg "VERITAS_BUILD_SOURCE=$BUILD_SOURCE" \
   --build-arg "VERITAS_BUILD_CREATED=$BUILD_CREATED" \
   -t "$BRIDGE_IMAGE" "$ROOT_DIR"
+docker build -f "$ROOT_DIR/Dockerfile.creator-runner" \
+  --build-arg "VERITAS_BUILD_VERSION=$BUILD_VERSION" \
+  --build-arg "VERITAS_BUILD_SOURCE=$BUILD_SOURCE" \
+  --build-arg "VERITAS_BUILD_CREATED=$BUILD_CREATED" \
+  -t "$CREATOR_IMAGE" "$ROOT_DIR"
+validate_cluster_gate "after local image builds"
 
 prune_old_local_images
 
 echo "Importing local images into k3d..."
 import_images_with_retry
+validate_cluster_gate "after image import"
 
 echo "Applying Conduit manifests..."
+delete_legacy_exit_bridge_deployment
 kubectl_apply_with_retry
 
+validate_cluster_gate "before image pinning"
 set_versioned_deployments
+validate_cluster_gate "after image pinning"
 
 echo "Waiting for Conduit pods..."
-kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=180s
-kubectl -n "$NAMESPACE" rollout status deployment/publisher-authority --timeout=180s
-kubectl -n "$NAMESPACE" rollout status deployment/publisher-receiver --timeout=180s
-kubectl -n "$NAMESPACE" rollout status deployment/exit-bridge --timeout=180s
+rollout_status_with_retry statefulset/postgres "$POSTGRES_ROLLOUT_TIMEOUT"
+rollout_status_with_retry deployment/publisher-authority "$DEPLOYMENT_ROLLOUT_TIMEOUT"
+rollout_status_with_retry deployment/publisher-receiver "$DEPLOYMENT_ROLLOUT_TIMEOUT"
+rollout_status_with_retry statefulset/exit-bridge "$EXIT_BRIDGE_ROLLOUT_TIMEOUT"
+rollout_status_with_retry deployment/creator-host "$DEPLOYMENT_ROLLOUT_TIMEOUT"
+rollout_status_with_retry deployment/creator-new "$DEPLOYMENT_ROLLOUT_TIMEOUT"
 wait_for_current_image_set
+validate_cluster_gate "after image-set verification"
+wait_for_conduit_workload_stability "post-rollout"
 
 kubectl -n "$NAMESPACE" get pods,svc,statefulset,deployment
 print_running_versions
+print_topology_summary
 prune_old_k3d_images
+validate_cluster_gate "after k3d image pruning"
+wait_for_conduit_workload_stability "after k3d image pruning"
 
 if [[ "$RUN_SMOKE" == "1" ]]; then
-  "$SCRIPT_DIR/k8s-smoke.sh" --send-dummy
+  run_smoke_with_retry
 else
   echo "Skipping k8s smoke validation because VERITAS_K8S_RUN_SMOKE=$RUN_SMOKE."
 fi
+wait_for_k3d_node_stability "$POST_SMOKE_STABILITY_SECONDS" "post-smoke settle"
+wait_for_cluster_api
+wait_for_kubelet_proxy
+wait_for_conduit_workload_stability "post-smoke settle"
 
 if [[ "$RUN_CARGO_PERSISTENCE" == "1" ]]; then
-  "$SCRIPT_DIR/k8s-test-publisher-postgres.sh"
+  run_postgres_validation_with_retry
 else
   echo "Skipping Cargo Postgres validation because VERITAS_K8S_RUN_CARGO_PERSISTENCE=$RUN_CARGO_PERSISTENCE."
 fi
+wait_for_k3d_node_stability "$POST_SMOKE_STABILITY_SECONDS" "final settle"
+wait_for_cluster_api
+wait_for_kubelet_proxy
+wait_for_conduit_workload_stability "final settle"
 
 echo "Conduit local Kubernetes topology is up."
 echo "Cluster:   $CLUSTER_NAME"
@@ -591,5 +1071,6 @@ echo "Images:"
 echo "  authority: $AUTHORITY_IMAGE"
 echo "  receiver:  $RECEIVER_IMAGE"
 echo "  bridge:    $BRIDGE_IMAGE"
+echo "  creator:   $CREATOR_IMAGE"
 echo "Build metadata: $BUILD_ARTIFACT_DIR/build.env"
 echo "Rendered overlay: $VERSIONED_OVERLAY_DIR"

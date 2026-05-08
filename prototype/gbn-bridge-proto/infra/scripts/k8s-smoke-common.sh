@@ -322,8 +322,12 @@ smoke_check_rollouts() {
     smoke_fail "publisher-authority rollout did not complete."
   smoke_retry 3 10 kubectl -n "$NAMESPACE" rollout status deployment/publisher-receiver --timeout=120s ||
     smoke_fail "publisher-receiver rollout did not complete."
-  smoke_retry 3 10 kubectl -n "$NAMESPACE" rollout status deployment/exit-bridge --timeout=120s ||
+  smoke_retry 3 10 kubectl -n "$NAMESPACE" rollout status statefulset/exit-bridge --timeout=180s ||
     smoke_fail "exit-bridge rollout did not complete."
+  smoke_retry 3 10 kubectl -n "$NAMESPACE" rollout status deployment/creator-host --timeout=120s ||
+    smoke_fail "creator-host rollout did not complete."
+  smoke_retry 3 10 kubectl -n "$NAMESPACE" rollout status deployment/creator-new --timeout=120s ||
+    smoke_fail "creator-new rollout did not complete."
 }
 
 smoke_ensure_cluster_api() {
@@ -362,6 +366,8 @@ smoke_discover_nodes() {
   for ((attempt = 1; attempt <= 36; attempt++)); do
     AUTHORITY_POD="$(smoke_pod_for_selector 'veritas-role=authority')"
     RECEIVER_POD="$(smoke_pod_for_selector 'veritas-role=receiver')"
+    CREATOR_HOST_POD="$(smoke_pod_for_selector 'app.kubernetes.io/name=creator-host')"
+    CREATOR_NEW_POD="$(smoke_pod_for_selector 'app.kubernetes.io/name=creator-new')"
     mapfile -t BRIDGE_PODS < <(
       kubectl -n "$NAMESPACE" get pods -l veritas-role=bridge -o json |
         python3 -c 'import json,sys
@@ -375,12 +381,12 @@ for item in data.get("items", []):
 print("\n".join(sorted(names)))'
     )
 
-    if [[ -n "$AUTHORITY_POD" && -n "$RECEIVER_POD" && "${#BRIDGE_PODS[@]}" -ge "$EXPECTED_BRIDGES" ]]; then
+    if [[ -n "$AUTHORITY_POD" && -n "$RECEIVER_POD" && -n "$CREATOR_HOST_POD" && -n "$CREATOR_NEW_POD" && "${#BRIDGE_PODS[@]}" -ge "$EXPECTED_BRIDGES" ]]; then
       break
     fi
 
     if ((attempt == 36)); then
-      smoke_log "Expected authority, receiver, and $EXPECTED_BRIDGES bridge pods."
+      smoke_log "Expected authority, receiver, creator-host, creator-new, and $EXPECTED_BRIDGES bridge pods."
       kubectl -n "$NAMESPACE" get pods -o wide >&2 || true
       smoke_fail "Conduit pod discovery did not stabilize."
     fi
@@ -390,6 +396,8 @@ print("\n".join(sorted(names)))'
   NODE_CHECKS=(
     "$AUTHORITY_POD:publisher-authority:authority"
     "$RECEIVER_POD:publisher-receiver:receiver"
+    "$CREATOR_HOST_POD:creator-runner:creator"
+    "$CREATOR_NEW_POD:creator-runner:creator"
   )
   local pod
   for pod in "${BRIDGE_PODS[@]}"; do

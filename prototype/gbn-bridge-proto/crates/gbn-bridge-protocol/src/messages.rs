@@ -10,6 +10,7 @@ use crate::punch::{
     BootstrapProgress, BridgeBatchAssign, BridgePunchAck, BridgePunchProbe, BridgePunchStart,
 };
 use crate::session::{BridgeAck, BridgeClose, BridgeData, BridgeOpen};
+use crate::signing::ensure_replay_window;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ProtocolVersion(pub u16);
@@ -44,22 +45,7 @@ pub struct ReplayProtection {
 
 impl ReplayProtection {
     pub fn validate(&self, now_ms: u64, max_age_ms: u64) -> Result<(), ProtocolError> {
-        if self.sent_at_ms > now_ms {
-            return Err(ProtocolError::ReplayTimestampInFuture {
-                sent_at_ms: self.sent_at_ms,
-                now_ms,
-            });
-        }
-
-        if now_ms.saturating_sub(self.sent_at_ms) > max_age_ms {
-            return Err(ProtocolError::ReplayWindowExpired {
-                sent_at_ms: self.sent_at_ms,
-                now_ms,
-                max_age_ms,
-            });
-        }
-
-        Ok(())
+        ensure_replay_window(self.sent_at_ms, now_ms, max_age_ms)
     }
 }
 

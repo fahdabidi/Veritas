@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod control;
 pub mod descriptor;
+pub mod dht;
 pub mod error;
 pub mod lease;
 pub mod messages;
@@ -31,6 +32,13 @@ pub use descriptor::{
     BridgeCapability, BridgeDescriptor, BridgeDescriptorUnsigned, BridgeIngressEndpoint,
     ReachabilityClass,
 };
+pub use dht::{
+    BootstrapSession, BridgeDhtEntry, BridgeDhtEntryUnsigned,
+    BridgeIngressEndpoint as DhtBridgeIngressEndpoint, BridgeIngressEndpointKind, CreatorDhtEntry,
+    CreatorDhtEntryUnsigned, HostCreatorSeedState, HostRoleState, LocalDiscoveryTable,
+    NewCreatorSeedState, PublisherDhtEntry, SelfOnboardingState, TunnelPeerRole, TunnelState,
+    LOCAL_DISCOVERY_TABLE_SCHEMA_VERSION,
+};
 pub use error::ProtocolError;
 pub use lease::{
     BridgeHeartbeat, BridgeLease, BridgeLeaseUnsigned, BridgeRegister, BridgeRevoke,
@@ -48,8 +56,8 @@ pub use session::{
     BridgeAck, BridgeAckStatus, BridgeClose, BridgeCloseReason, BridgeData, BridgeOpen,
 };
 pub use signing::{
-    canonical_json_bytes, ensure_not_expired, publisher_identity, sign_payload, verify_payload,
-    PublicKeyBytes, SignatureBytes,
+    canonical_json_bytes, ensure_not_expired, ensure_replay_window, publisher_identity,
+    sign_payload, verify_payload, PublicKeyBytes, SignatureBytes,
 };
 pub use trace::{validate_chain_id, ChainId, CHAIN_ID_FIELD_NAME};
 

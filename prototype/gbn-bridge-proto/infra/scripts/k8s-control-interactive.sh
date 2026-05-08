@@ -156,7 +156,7 @@ for item in data.get("items", []):
         continue
     labels = item.get("metadata", {}).get("labels", {})
     role = labels.get("veritas-role")
-    if role not in {"authority", "receiver", "bridge"}:
+    if role not in {"authority", "receiver", "bridge", "creator"}:
         continue
     containers = item.get("spec", {}).get("containers", [])
     if not containers:
@@ -435,7 +435,7 @@ do_check_images() {
     printf "  %-30s  %-10s  %s\n" "$pod" "${NODE_ROLES[$i]}" "${image:-unknown}"
   done
   echo ""
-  echo "  Local images should normally be ':dev' tags imported into k3d."
+  echo "  Local images should normally be versioned tags imported into k3d by k8s-up.sh."
   echo "  To rebuild and reload: bash $SCRIPT_DIR/k8s-up.sh"
 }
 
@@ -462,6 +462,8 @@ do_teardown() {
   fi
 }
 
+source "$SCRIPT_DIR/_seed_actions.sh"
+
 main() {
   echo "Veritas Conduit V2 Local Operator Control Panel (Kubernetes)"
   echo "  Context:       $(kubectl config current-context 2>/dev/null || echo unknown)"
@@ -484,6 +486,7 @@ main() {
       "DumpFrames" \
       "AdminMetrics" \
       "LiveMetrics" \
+      "SeedHostCreator" \
       "SendDummy" \
       "TriggerCommand" \
       "CheckImages" \
@@ -501,6 +504,7 @@ main() {
         DumpFrames) do_dump_frames ;;
         AdminMetrics) do_admin_metrics ;;
         LiveMetrics) do_live_metrics ;;
+        SeedHostCreator) do_seed_host_creator ;;
         SendDummy) do_send_dummy ;;
         TriggerCommand) do_trigger_command ;;
         CheckImages) do_check_images ;;

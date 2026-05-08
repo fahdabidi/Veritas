@@ -32,9 +32,12 @@ Parameters:
   BridgeImageUri:
     Type: String
     Description: ECR image URI for the exit-bridge image.
+  CreatorImageUri:
+    Type: String
+    Description: ECR image URI for the creator-runner image.
   DesiredBridgeCount:
     Type: Number
-    Default: 3
+    Default: 10
     MinValue: 1
     MaxValue: 25
     Description: Desired number of ExitBridge tasks.
@@ -152,6 +155,13 @@ Resources:
                 Condition:
                   StringEquals:
                     "cloudwatch:namespace": Veritas/Conduit
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
 
   DatabaseCredentialsSecret:
     Type: AWS::SecretsManager::Secret
@@ -181,6 +191,12 @@ Resources:
       LogGroupName: !Sub "/gbn/conduit/full/${EnvironmentName}/bridge"
       RetentionInDays: 14
 
+  CreatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/gbn/conduit/full/${EnvironmentName}/creator"
+      RetentionInDays: 14
+
   PrivateDnsNamespace:
     Type: AWS::ServiceDiscovery::PrivateDnsNamespace
     Properties:
@@ -203,6 +219,28 @@ Resources:
     Type: AWS::ServiceDiscovery::Service
     Properties:
       Name: publisher-receiver
+      NamespaceId: !Ref PrivateDnsNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+        RoutingPolicy: MULTIVALUE
+
+  CreatorHostDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: creator-host
+      NamespaceId: !Ref PrivateDnsNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+        RoutingPolicy: MULTIVALUE
+
+  CreatorNewDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: creator-new
       NamespaceId: !Ref PrivateDnsNamespace
       DnsConfig:
         DnsRecords:
@@ -256,6 +294,39 @@ Resources:
         - Key: Name
           Value: !Sub "gbn-conduit-full-${EnvironmentName}-bridge"
 
+  CreatorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Conduit full-stack creator task egress and internal admin
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "gbn-conduit-full-${EnvironmentName}-creator"
+
+  StateEfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Conduit full-stack EFS state ingress
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref BridgeSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref CreatorSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "gbn-conduit-full-${EnvironmentName}-state-efs"
+
   DatabaseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -286,6 +357,15 @@ Resources:
       ToPort: !Ref AuthorityPort
       SourceSecurityGroupId: !Ref ReceiverSecurityGroup
 
+  AuthorityFromCreatorIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AuthoritySecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref AuthorityPort
+      ToPort: !Ref AuthorityPort
+      SourceSecurityGroupId: !Ref CreatorSecurityGroup
+
   ReceiverFromBridgeIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -294,6 +374,15 @@ Resources:
       FromPort: !Ref ReceiverPort
       ToPort: !Ref ReceiverPort
       SourceSecurityGroupId: !Ref BridgeSecurityGroup
+
+  ReceiverFromCreatorIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ReceiverSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref ReceiverPort
+      ToPort: !Ref ReceiverPort
+      SourceSecurityGroupId: !Ref CreatorSecurityGroup
 
   DatabaseFromAuthorityIngress:
     Type: AWS::EC2::SecurityGroupIngress
@@ -330,6 +419,74 @@ Resources:
       MultiAZ: false
       StorageEncrypted: true
       DeletionProtection: false
+
+  ConduitStateFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      BackupPolicy:
+        Status: DISABLED
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "gbn-conduit-full-${EnvironmentName}-state"
+
+  ConduitStateMountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref ConduitStateFileSystem
+      SubnetId: !Select [0, !Ref ServiceSubnetIds]
+      SecurityGroups:
+        - !Ref StateEfsSecurityGroup
+
+  ConduitStateMountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref ConduitStateFileSystem
+      SubnetId: !Select [1, !Ref ServiceSubnetIds]
+      SecurityGroups:
+        - !Ref StateEfsSecurityGroup
+
+  BridgeStateAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref ConduitStateFileSystem
+      PosixUser:
+        Uid: "10001"
+        Gid: "10001"
+      RootDirectory:
+        Path: /bridge
+        CreationInfo:
+          OwnerUid: "10001"
+          OwnerGid: "10001"
+          Permissions: "0770"
+
+  CreatorHostStateAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref ConduitStateFileSystem
+      PosixUser:
+        Uid: "10001"
+        Gid: "10001"
+      RootDirectory:
+        Path: /creator-host
+        CreationInfo:
+          OwnerUid: "10001"
+          OwnerGid: "10001"
+          Permissions: "0770"
+
+  CreatorNewStateAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref ConduitStateFileSystem
+      PosixUser:
+        Uid: "10001"
+        Gid: "10001"
+      RootDirectory:
+        Path: /creator-new
+        CreationInfo:
+          OwnerUid: "10001"
+          OwnerGid: "10001"
+          Permissions: "0770"
 
   AuthorityTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -429,6 +586,14 @@ Resources:
         - FARGATE
       ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
       TaskRoleArn: !GetAtt ServiceTaskRole.Arn
+      Volumes:
+        - Name: state
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref ConduitStateFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref BridgeStateAccessPoint
+              IAM: DISABLED
       ContainerDefinitions:
         - Name: exit-bridge
           Image: !Ref BridgeImageUri
@@ -453,6 +618,8 @@ Resources:
               Value: direct
             - Name: GBN_BRIDGE_PUNCH_PORT
               Value: !Ref UdpPunchPort
+            - Name: GBN_BRIDGE_STATE_DIR
+              Value: /var/lib/gbn-conduit
             - Name: GBN_BRIDGE_CONTROL_KEEPALIVE_INTERVAL_MS
               Value: "5000"
             - Name: GBN_BRIDGE_POLL_INTERVAL_MS
@@ -462,12 +629,120 @@ Resources:
           Secrets:
             - Name: GBN_BRIDGE_BRIDGE_SIGNING_SEED_HEX
               ValueFrom: !Ref BridgeSigningSeedSecretArn
+          MountPoints:
+            - SourceVolume: state
+              ContainerPath: /var/lib/gbn-conduit
+              ReadOnly: false
           LogConfiguration:
             LogDriver: awslogs
             Options:
               awslogs-group: !Ref BridgeLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: bridge
+
+  CreatorHostTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "gbn-conduit-full-creator-host-${EnvironmentName}"
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ServiceTaskRole.Arn
+      Volumes:
+        - Name: state
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref ConduitStateFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref CreatorHostStateAccessPoint
+              IAM: DISABLED
+      ContainerDefinitions:
+        - Name: creator-runner
+          Image: !Ref CreatorImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 9090
+              Protocol: tcp
+          Environment:
+            - Name: GBN_BRIDGE_NODE_ID
+              Value: creator-host
+            - Name: GBN_CONDUIT_ACTOR
+              Value: host-creator
+            - Name: GBN_BRIDGE_ADMIN_BIND_ADDR
+              Value: 127.0.0.1:9090
+            - Name: GBN_BRIDGE_STATE_DIR
+              Value: /var/lib/gbn-conduit
+            - Name: GBN_BRIDGE_AUTHORITY_URL
+              Value: !Sub "http://publisher-authority.conduit-${EnvironmentName}.internal:${AuthorityPort}"
+            - Name: GBN_BRIDGE_PUBLISHER_PUBLIC_KEY_HEX
+              Value: !Ref PublisherPublicKeyHex
+            - Name: GBN_BRIDGE_STACK_ENV
+              Value: !Ref EnvironmentName
+          MountPoints:
+            - SourceVolume: state
+              ContainerPath: /var/lib/gbn-conduit
+              ReadOnly: false
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CreatorLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: creator-host
+
+  CreatorNewTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "gbn-conduit-full-creator-new-${EnvironmentName}"
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ServiceTaskRole.Arn
+      Volumes:
+        - Name: state
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref ConduitStateFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref CreatorNewStateAccessPoint
+              IAM: DISABLED
+      ContainerDefinitions:
+        - Name: creator-runner
+          Image: !Ref CreatorImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 9090
+              Protocol: tcp
+          Environment:
+            - Name: GBN_BRIDGE_NODE_ID
+              Value: creator-new
+            - Name: GBN_CONDUIT_ACTOR
+              Value: new-creator
+            - Name: GBN_BRIDGE_ADMIN_BIND_ADDR
+              Value: 127.0.0.1:9090
+            - Name: GBN_BRIDGE_STATE_DIR
+              Value: /var/lib/gbn-conduit
+            - Name: GBN_BRIDGE_AUTHORITY_URL
+              Value: !Sub "http://publisher-authority.conduit-${EnvironmentName}.internal:${AuthorityPort}"
+            - Name: GBN_BRIDGE_PUBLISHER_PUBLIC_KEY_HEX
+              Value: !Ref PublisherPublicKeyHex
+            - Name: GBN_BRIDGE_STACK_ENV
+              Value: !Ref EnvironmentName
+          MountPoints:
+            - SourceVolume: state
+              ContainerPath: /var/lib/gbn-conduit
+              ReadOnly: false
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CreatorLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: creator-new
 
   AuthorityService:
     Type: AWS::ECS::Service
@@ -507,6 +782,9 @@ Resources:
 
   BridgeService:
     Type: AWS::ECS::Service
+    DependsOn:
+      - ConduitStateMountTargetA
+      - ConduitStateMountTargetB
     Properties:
       ServiceName: !Sub "gbn-conduit-full-bridge-${EnvironmentName}"
       Cluster: !Ref ConduitCluster
@@ -521,6 +799,48 @@ Resources:
             - !Ref BridgeSecurityGroup
           Subnets: !Ref ServiceSubnetIds
 
+  CreatorHostService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ConduitStateMountTargetA
+      - ConduitStateMountTargetB
+    Properties:
+      ServiceName: !Sub "gbn-conduit-full-creator-host-${EnvironmentName}"
+      Cluster: !Ref ConduitCluster
+      DesiredCount: 1
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      TaskDefinition: !Ref CreatorHostTaskDefinition
+      ServiceRegistries:
+        - RegistryArn: !GetAtt CreatorHostDiscoveryService.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIp
+          SecurityGroups:
+            - !Ref CreatorSecurityGroup
+          Subnets: !Ref ServiceSubnetIds
+
+  CreatorNewService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ConduitStateMountTargetA
+      - ConduitStateMountTargetB
+    Properties:
+      ServiceName: !Sub "gbn-conduit-full-creator-new-${EnvironmentName}"
+      Cluster: !Ref ConduitCluster
+      DesiredCount: 1
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      TaskDefinition: !Ref CreatorNewTaskDefinition
+      ServiceRegistries:
+        - RegistryArn: !GetAtt CreatorNewDiscoveryService.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIp
+          SecurityGroups:
+            - !Ref CreatorSecurityGroup
+          Subnets: !Ref ServiceSubnetIds
+
 Outputs:
   ClusterName:
     Value: !Ref ConduitCluster
@@ -532,6 +852,10 @@ Outputs:
     Value: !Sub "gbn-conduit-full-receiver-${EnvironmentName}"
   BridgeServiceName:
     Value: !Sub "gbn-conduit-full-bridge-${EnvironmentName}"
+  CreatorHostServiceName:
+    Value: !Sub "gbn-conduit-full-creator-host-${EnvironmentName}"
+  CreatorNewServiceName:
+    Value: !Sub "gbn-conduit-full-creator-new-${EnvironmentName}"
   AuthorityInternalUrl:
     Value: !Sub "http://publisher-authority.conduit-${EnvironmentName}.internal:${AuthorityPort}"
   ReceiverInternalUrl:
@@ -546,3 +870,7 @@ Outputs:
     Value: !Ref ReceiverLogGroup
   BridgeLogGroup:
     Value: !Ref BridgeLogGroup
+  CreatorLogGroup:
+    Value: !Ref CreatorLogGroup
+  StateFileSystemId:
+    Value: !Ref ConduitStateFileSystem

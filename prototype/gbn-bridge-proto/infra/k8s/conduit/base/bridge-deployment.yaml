@@ -1,5 +1,5 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: exit-bridge
   labels:
@@ -7,7 +7,8 @@ metadata:
     app.kubernetes.io/part-of: veritas-conduit
     veritas-role: bridge
 spec:
-  replicas: 3
+  serviceName: exit-bridge
+  replicas: 10
   selector:
     matchLabels:
       app.kubernetes.io/name: exit-bridge
@@ -22,6 +23,8 @@ spec:
         prometheus.io/path: "/metrics"
         prometheus.io/port: "9100"
     spec:
+      securityContext:
+        fsGroup: 10001
       containers:
         - name: exit-bridge
           image: veritas/exit-bridge:dev
@@ -48,6 +51,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: GBN_BRIDGE_STATE_DIR
+              value: /var/lib/gbn-conduit
           readinessProbe:
             exec:
               command:
@@ -67,8 +72,25 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 50m
+              memory: 96Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: 200m
+              memory: 192Mi
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/gbn-conduit
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+        labels:
+          app.kubernetes.io/name: exit-bridge
+          app.kubernetes.io/part-of: veritas-conduit
+          veritas-role: bridge
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 64Mi

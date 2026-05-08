@@ -1,6 +1,7 @@
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 
+use crate::dht::{BridgeDhtEntry, CreatorDhtEntry};
 use crate::error::ProtocolError;
 use crate::punch::BridgePunchStart;
 use crate::signing::{
@@ -165,7 +166,11 @@ impl CreatorBootstrapResponse {
 pub struct BootstrapJoinReply {
     pub chain_id: String,
     pub creator_entry: BootstrapDhtEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_dht_entry: Option<CreatorDhtEntry>,
     pub response: CreatorBootstrapResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_set: Option<BridgeSetResponse>,
 }
 
 impl BootstrapJoinReply {
@@ -181,7 +186,14 @@ impl BootstrapJoinReply {
             ));
         }
         self.creator_entry.verify_authority(publisher_key, now_ms)?;
-        self.response.verify_authority(publisher_key, now_ms)
+        if let Some(entry) = &self.creator_dht_entry {
+            entry.verify_authority(publisher_key, now_ms)?;
+        }
+        self.response.verify_authority(publisher_key, now_ms)?;
+        if let Some(bridge_set) = &self.bridge_set {
+            bridge_set.verify_authority(publisher_key, now_ms)?;
+        }
+        Ok(())
     }
 }
 
@@ -198,6 +210,8 @@ pub struct BridgeSetResponseUnsigned {
     pub chain_id: String,
     pub bootstrap_session_id: String,
     pub bridge_entries: Vec<BootstrapDhtEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bridge_dht_entries: Vec<BridgeDhtEntry>,
     pub response_expiry_ms: u64,
 }
 
@@ -217,6 +231,8 @@ pub struct BridgeSetResponse {
     pub chain_id: String,
     pub bootstrap_session_id: String,
     pub bridge_entries: Vec<BootstrapDhtEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bridge_dht_entries: Vec<BridgeDhtEntry>,
     pub response_expiry_ms: u64,
     pub publisher_sig: SignatureBytes,
 }
@@ -233,6 +249,7 @@ impl BridgeSetResponse {
             chain_id: unsigned.chain_id,
             bootstrap_session_id: unsigned.bootstrap_session_id,
             bridge_entries: unsigned.bridge_entries,
+            bridge_dht_entries: unsigned.bridge_dht_entries,
             response_expiry_ms: unsigned.response_expiry_ms,
             publisher_sig,
         })
@@ -243,6 +260,7 @@ impl BridgeSetResponse {
             chain_id: self.chain_id.clone(),
             bootstrap_session_id: self.bootstrap_session_id.clone(),
             bridge_entries: self.bridge_entries.clone(),
+            bridge_dht_entries: self.bridge_dht_entries.clone(),
             response_expiry_ms: self.response_expiry_ms,
         }
     }
@@ -255,6 +273,9 @@ impl BridgeSetResponse {
         let unsigned = self.unsigned_payload();
         unsigned.validate_shape()?;
         for entry in &self.bridge_entries {
+            entry.verify_authority(publisher_key, now_ms)?;
+        }
+        for entry in &self.bridge_dht_entries {
             entry.verify_authority(publisher_key, now_ms)?;
         }
         verify_payload(&unsigned, publisher_key, &self.publisher_sig)?;

@@ -4,9 +4,11 @@ pub mod session;
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BootstrapJoinReply, BridgeSeedAssign,
+    BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BootstrapJoinReply, BridgeCapability,
+    BridgeDhtEntry, BridgeDhtEntryUnsigned, BridgeIngressEndpointKind, BridgeSeedAssign,
     BridgeSetResponse, BridgeSetResponseUnsigned, CreatorBootstrapResponse,
-    CreatorBootstrapResponseUnsigned, CreatorJoinRequest, PublicKeyBytes,
+    CreatorBootstrapResponseUnsigned, CreatorDhtEntry, CreatorDhtEntryUnsigned, CreatorJoinRequest,
+    DhtBridgeIngressEndpoint, PublicKeyBytes, ReachabilityClass,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +20,7 @@ use crate::{AuthorityConfig, AuthorityError, AuthorityPolicy, AuthorityResult};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityBootstrapPlan {
     pub creator_entry: BootstrapDhtEntry,
+    pub creator_dht_entry: CreatorDhtEntry,
     pub response: CreatorBootstrapResponse,
     pub bridge_set: BridgeSetResponse,
     pub seed_punch: gbn_bridge_protocol::BridgePunchStart,
@@ -29,7 +32,9 @@ impl AuthorityBootstrapPlan {
         distribution::join_reply(
             &self.response.chain_id,
             self.creator_entry.clone(),
+            self.creator_dht_entry.clone(),
             self.response.clone(),
+            self.bridge_set.clone(),
         )
     }
 }
@@ -57,6 +62,35 @@ pub fn creator_bootstrap_entry(
             entry_expiry_ms: now_ms + config.bootstrap_entry_ttl_ms,
         },
         signing_key,
+    )
+    .map_err(Into::into)
+}
+
+pub fn creator_dht_entry(
+    request: &CreatorJoinRequest,
+    signing_key: &SigningKey,
+    config: &AuthorityConfig,
+    now_ms: u64,
+    active: bool,
+) -> AuthorityResult<CreatorDhtEntry> {
+    request.creator.pub_key.to_verifying_key()?;
+
+    if request.creator.udp_punch_port == 0 {
+        return Err(AuthorityError::InvalidCreatorJoin {
+            reason: "creator udp punch port must be non-zero",
+        });
+    }
+
+    CreatorDhtEntry::sign(
+        CreatorDhtEntryUnsigned {
+            node_id: request.creator.node_id.clone(),
+            ip_addr: request.creator.ip_addr.clone(),
+            pub_key: request.creator.pub_key.clone(),
+            udp_punch_port: request.creator.udp_punch_port,
+            entry_expiry_ms: now_ms + config.bootstrap_entry_ttl_ms,
+        },
+        signing_key,
+        active,
     )
     .map_err(Into::into)
 }
@@ -92,6 +126,73 @@ pub fn bridge_bootstrap_entry(
     .map_err(Into::into)
 }
 
+fn bridge_capability_label(capability: &BridgeCapability) -> &'static str {
+    match capability {
+        BridgeCapability::BootstrapSeed => "bootstrap_seed",
+        BridgeCapability::CatalogRefresh => "catalog_refresh",
+        BridgeCapability::SessionRelay => "session_relay",
+        BridgeCapability::BatchAssignment => "batch_assignment",
+        BridgeCapability::ProgressReporting => "progress_reporting",
+    }
+}
+
+pub fn bridge_dht_entry(
+    record: &BridgeRecord,
+    signing_key: &SigningKey,
+    config: &AuthorityConfig,
+    now_ms: u64,
+    active: bool,
+) -> AuthorityResult<BridgeDhtEntry> {
+    if !record.is_active(now_ms) {
+        return Err(AuthorityError::LeaseExpired {
+            bridge_id: record.bridge_id.clone(),
+            lease_id: record.current_lease.lease_id.clone(),
+            lease_expiry_ms: record.current_lease.lease_expiry_ms,
+            heartbeat_at_ms: now_ms,
+        });
+    }
+
+    let endpoint_kind = match record.reachability_class {
+        ReachabilityClass::Direct => BridgeIngressEndpointKind::Direct,
+        ReachabilityClass::Brokered => BridgeIngressEndpointKind::Brokered,
+        ReachabilityClass::RelayOnly => BridgeIngressEndpointKind::RelayOnly,
+    };
+    let ingress_endpoints = record
+        .ingress_endpoints
+        .iter()
+        .map(|endpoint| DhtBridgeIngressEndpoint {
+            kind: endpoint_kind.clone(),
+            ip_addr: endpoint.host.clone(),
+            port: endpoint.port,
+            ttl_ms: None,
+        })
+        .collect::<Vec<_>>();
+
+    BridgeDhtEntry::sign(
+        BridgeDhtEntryUnsigned {
+            bridge_id: record.bridge_id.clone(),
+            identity_pub: record.identity_pub.clone(),
+            ingress_endpoints,
+            udp_punch_port: record.assigned_udp_punch_port,
+            reachability_class: record.reachability_class.clone(),
+            lease_expiry_ms: record.current_lease.lease_expiry_ms,
+            entry_expiry_ms: record
+                .current_lease
+                .lease_expiry_ms
+                .min(now_ms + config.bootstrap_entry_ttl_ms),
+            capabilities: record
+                .capabilities
+                .iter()
+                .map(bridge_capability_label)
+                .map(ToOwned::to_owned)
+                .collect(),
+        },
+        signing_key,
+        active,
+    )
+    .map_err(Into::into)
+}
+
 pub fn begin_bootstrap(
     storage: &mut InMemoryAuthorityStorage,
     signing_key: &SigningKey,
@@ -103,7 +204,8 @@ pub fn begin_bootstrap(
     now_ms: u64,
 ) -> AuthorityResult<AuthorityBootstrapPlan> {
     let creator_entry = creator_bootstrap_entry(&request, signing_key, config, now_ms)?;
-    let mut eligible = policy::bootstrap_candidates(storage, now_ms, policy);
+    let creator_dht_entry = creator_dht_entry(&request, signing_key, config, now_ms, true)?;
+    let eligible = policy::bootstrap_candidates(storage, now_ms, policy);
     if eligible.is_empty() {
         return Err(AuthorityError::NoEligibleBootstrapBridge);
     }
@@ -112,12 +214,35 @@ pub fn begin_bootstrap(
         .iter()
         .find(|record| record.bridge_id != request.relay_bridge_id)
         .cloned()
-        .unwrap_or_else(|| eligible[0].clone());
+        .ok_or_else(|| AuthorityError::InsufficientBootstrapBridges {
+            active_bridge_count: eligible.len(),
+            relay_bridge_id: request.relay_bridge_id.clone(),
+        })?;
 
-    let bridge_entries = eligible
-        .drain(..)
+    let selected_bridge_records = eligible
+        .into_iter()
+        .filter(|record| record.bridge_id != request.relay_bridge_id)
         .take(config.bootstrap_bridge_count)
-        .map(|record| bridge_bootstrap_entry(&record, signing_key, config, now_ms))
+        .collect::<Vec<_>>();
+
+    let bridge_entries = selected_bridge_records
+        .iter()
+        .map(|record| bridge_bootstrap_entry(record, signing_key, config, now_ms))
+        .collect::<AuthorityResult<Vec<_>>>()?;
+    let bridge_dht_entries = selected_bridge_records
+        .iter()
+        .map(|record| {
+            let mut entry = storage
+                .publisher_bridge_dht_entries
+                .get(&record.bridge_id)
+                .cloned()
+                .ok_or_else(|| AuthorityError::PublisherBridgeDhtEntryMissing {
+                    bridge_id: record.bridge_id.clone(),
+                })?;
+            entry.verify_authority(publisher_pub, now_ms)?;
+            entry.active = false;
+            Ok(entry)
+        })
         .collect::<AuthorityResult<Vec<_>>>()?;
 
     let bootstrap_session_id = storage.next_bootstrap_id();
@@ -138,6 +263,7 @@ pub fn begin_bootstrap(
             chain_id: chain_id.to_string(),
             bootstrap_session_id: bootstrap_session_id.clone(),
             bridge_entries: bridge_entries.clone(),
+            bridge_dht_entries: bridge_dht_entries.clone(),
             response_expiry_ms: now_ms + config.bootstrap_response_ttl_ms,
         },
         signing_key,
@@ -183,6 +309,7 @@ pub fn begin_bootstrap(
 
     Ok(AuthorityBootstrapPlan {
         creator_entry,
+        creator_dht_entry,
         response,
         bridge_set,
         seed_punch,

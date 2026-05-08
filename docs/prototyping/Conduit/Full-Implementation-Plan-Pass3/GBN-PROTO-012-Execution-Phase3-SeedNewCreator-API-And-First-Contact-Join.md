@@ -1,6 +1,6 @@
 # GBN-PROTO-012 - Execution Phase 3 - SeedNewCreator API And First-Contact Join
 
-**Status:** Pending
+**Status:** Completed
 **Last Updated:** 2026-05-08
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
 **Depends On:** Phase 0 (creator pods deployed), Phase 1 (state model), Phase 2
@@ -24,6 +24,14 @@ references "Publisher (authority surface)" wherever the join request must reach 
 authority half (lease validation, bootstrap orchestration, signing).
 
 Update the parent plan status tracker when this phase is complete.
+
+Implementation note: the final Publisher authority request is signed by the HostCreator,
+because the existing authority authentication contract requires
+`actor_id == host_creator_id` for `/v1/bootstrap/join`. The NewCreator still signs the
+private HostCreator relay envelope; HostCreator validates it, fills in its seeded
+ExitBridgeA id, signs the Publisher join envelope as HostCreator, and relays it to the
+Publisher authority surface. This preserves the observable actor chain and removes the
+Pass 2 `new_creator_id == host_creator_id == relay_bridge_id` shortcut.
 
 ---
 
@@ -264,3 +272,45 @@ cargo test -p gbn-bridge-creator --test join_path
   `force=true`.
 - V1 (`prototype/gbn-proto/**`) is unchanged.
 - Parent plan status tracker is updated.
+
+---
+
+## Completion Evidence
+
+Implemented:
+
+- `POST /v1/admin/seed-new-creator` on creator admin listeners.
+- Diagnostic `POST /v1/admin/start-bootstrap` on creator admin listeners.
+- Private `POST /v1/admin/host/join` on HostCreator admin listeners.
+- `POST /v1/admin/creator-dht-entry` on the Publisher authority admin listener to
+  return a Publisher-signed HostCreator DHT entry for operator seeding.
+- `NewCreatorSeedState.chain_id` and `start_bootstrap` persisted in local DHT state.
+- `creator-runner` now installs creator identity config into its admin state so it can
+  sign NewCreator relay envelopes and HostCreator authority envelopes.
+- `SeedNewCreator` shared operator action in
+  `prototype/gbn-bridge-proto/infra/scripts/_seed_actions.sh`, surfaced in both local
+  k8s and AWS operator menus.
+- Focused test suites:
+  `prototype/gbn-bridge-proto/crates/gbn-bridge-publisher/tests/admin_seed_new.rs`
+  and `prototype/gbn-bridge-proto/crates/gbn-bridge-creator/tests/join_path.rs`.
+
+Validated:
+
+```bash
+cd prototype/gbn-bridge-proto
+cargo fmt --all --check
+cargo check -p gbn-bridge-protocol -p gbn-bridge-publisher -p gbn-bridge-creator -p gbn-bridge-cli
+cargo test -p gbn-bridge-publisher --test admin_seed_new
+cargo test -p gbn-bridge-creator --test join_path
+cargo test -p gbn-bridge-publisher --test admin_seed_host
+cargo test -p gbn-bridge-publisher --test admin_local_dht
+cargo test -p gbn-bridge-publisher --test admin_routes
+cargo test -p gbn-bridge-publisher --test admin_send_dummy
+cargo test -p gbn-bridge-protocol --test dht_types
+bash -lc 'bash -n infra/scripts/_seed_actions.sh && bash -n infra/scripts/k8s-control-interactive.sh && bash -n infra/scripts/relay-control-interactive-v2.sh'
+```
+
+Deferred to Phase 4:
+
+- Bootstrap payload return through ExitBridgeB, bridge set delivery, local DHT bridge
+  population, and reachability ACK activation.

@@ -599,7 +599,9 @@ main() {
       "DumpFrames" \
       "AdminMetrics" \
       "LiveMetrics" \
+      "InitializePublisherDht" \
       "SeedHostCreator" \
+      "SeedNewCreator" \
       "SendDummy" \
       "TriggerCommand" \
       "CheckImages" \
@@ -617,7 +619,9 @@ main() {
         DumpFrames) do_dump_frames ;;
         AdminMetrics) do_admin_metrics ;;
         LiveMetrics) do_live_metrics ;;
+        InitializePublisherDht) do_initialize_publisher_dht ;;
         SeedHostCreator) do_seed_host_creator ;;
+        SeedNewCreator) do_seed_new_creator ;;
         SendDummy) do_send_dummy ;;
         TriggerCommand) do_trigger_command ;;
         CheckImages) do_check_images ;;

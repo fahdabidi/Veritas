@@ -2,12 +2,16 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_creator::LocalDhtStore;
 use gbn_bridge_protocol::{publisher_identity, PublicKeyBytes};
 use gbn_bridge_publisher::{
-    admin::{admin_bind_addr_from_env, AdminHttpServer, AdminNodeMetadata, AdminState},
+    admin::{
+        admin_bind_addr_from_env, AdminCreatorConfig, AdminHttpServer, AdminNodeMetadata,
+        AdminState,
+    },
     metrics_otlp,
 };
 use sha2::{Digest, Sha256};
@@ -90,9 +94,28 @@ fn run() -> Result<(), String> {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(443),
         );
+    let creator_config = AdminCreatorConfig {
+        actor_id: actor_id.clone(),
+        signing_key: creator_signing_key,
+        publisher_pub: publisher_public_key,
+        authority_url: env::var("GBN_BRIDGE_AUTHORITY_URL")
+            .or_else(|_| env::var("GBN_BRIDGE_PUBLISHER_URL"))
+            .unwrap_or_else(|_| "http://publisher-authority:8080".to_string()),
+        creator_ip_addr: metadata
+            .ip_addr
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
+        udp_punch_port: metadata.creator_udp_punch_port.unwrap_or(443),
+        timeout: Duration::from_secs(
+            env::var("GBN_BRIDGE_ADMIN_BOOTSTRAP_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(5),
+        ),
+    };
     let admin_server = AdminHttpServer::bind(
         admin_addr,
-        AdminState::creator(metadata, local_dht.clone()),
+        AdminState::creator_with_config(metadata, local_dht.clone(), creator_config),
         1_048_576,
     )
     .map_err(|error| error.to_string())?;

@@ -219,7 +219,8 @@ fn seed_bridge_establishes_acks_and_returns_bootstrap_payload() {
         bridge_set.bootstrap_session_id,
         plan.response.bootstrap_session_id
     );
-    assert_eq!(bridge_set.bridge_entries.len(), 2);
+    assert_eq!(bridge_set.bridge_entries.len(), 1);
+    assert_eq!(bridge_set.bridge_dht_entries.len(), 1);
 
     let progress = bridge.publisher_client().reported_progress();
     assert_eq!(progress.len(), 2);

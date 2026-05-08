@@ -26,9 +26,13 @@ pub fn reconcile_recovered_state(
         .collect::<Vec<_>>();
     for bridge_id in expired_bridge_ids {
         if storage.bridges.remove(&bridge_id).is_some() {
+            storage.publisher_bridge_dht_entries.remove(&bridge_id);
             summary.expired_bridges += 1;
         }
     }
+    storage
+        .publisher_bridge_dht_entries
+        .retain(|bridge_id, _| storage.bridges.contains_key(bridge_id));
 
     let expired_bootstrap_ids = storage
         .bootstrap_sessions

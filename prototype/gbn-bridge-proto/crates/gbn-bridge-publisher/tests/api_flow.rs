@@ -302,6 +302,7 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
     let (handle, publisher_pub) = authority_server();
     let base_now_ms = now_ms();
     let bridge_key = actor_signing_key(70);
+    let seed_key = actor_signing_key(73);
     let register_request = AuthorityApiRequest::sign(
         AuthorityApiRequestUnsigned {
             chain_id: "chain-progress".into(),
@@ -321,6 +322,27 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
         handle.local_addr(),
         "/v1/bridge/register",
         &register_request,
+    );
+    assert_eq!(status, 200);
+    let seed_register_request = AuthorityApiRequest::sign(
+        AuthorityApiRequestUnsigned {
+            chain_id: "chain-progress".into(),
+            request_id: "register-progress-seed".into(),
+            sent_at_ms: base_now_ms,
+            actor_id: "bridge-progress-seed".into(),
+            body: BridgeRegisterBody {
+                register: bridge_register("bridge-progress-seed", 73, "198.51.100.31", 443),
+                reachability_class: ReachabilityClass::Direct,
+                now_ms: base_now_ms,
+            },
+        },
+        &seed_key,
+    )
+    .unwrap();
+    let (status, _): (u16, AuthorityApiResponse<gbn_bridge_protocol::BridgeLease>) = post_json(
+        handle.local_addr(),
+        "/v1/bridge/register",
+        &seed_register_request,
     );
     assert_eq!(status, 200);
 
@@ -360,19 +382,19 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
             chain_id: "chain-progress".into(),
             request_id: "progress-01".into(),
             sent_at_ms: base_now_ms,
-            actor_id: "bridge-progress".into(),
+            actor_id: "bridge-progress-seed".into(),
             body: BootstrapProgressBody {
                 progress: BootstrapProgress {
                     chain_id: "chain-progress".into(),
                     bootstrap_session_id: bootstrap_session_id.clone(),
-                    reporter_id: "bridge-progress".into(),
+                    reporter_id: "bridge-progress-seed".into(),
                     stage: BootstrapProgressStage::SeedTunnelEstablished,
                     active_bridge_count: 1,
                     reported_at_ms: base_now_ms,
                 },
             },
         },
-        &bridge_key,
+        &seed_key,
     )
     .unwrap();
     let (status, response): (u16, AuthorityApiResponse<BootstrapProgressReceipt>) = post_json(
@@ -382,7 +404,7 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
     );
     assert_eq!(status, 200);
     response.verify_authority(&publisher_pub).unwrap();
-    assert_eq!(response.body.as_ref().unwrap().stored_event_count, 1);
+    assert_eq!(response.body.as_ref().unwrap().stored_event_count, 5);
 
     let mut tampered = progress_request.clone();
     tampered.chain_id = "chain-progress-tampered".into();

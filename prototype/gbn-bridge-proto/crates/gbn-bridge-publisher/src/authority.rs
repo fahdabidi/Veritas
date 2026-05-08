@@ -1,11 +1,11 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
     publisher_identity, BootstrapJoinReply, BootstrapProgress, BootstrapProgressStage, BridgeAck,
-    BridgeCapability, BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCommandAck,
-    BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeDhtEntry,
-    BridgeDhtEntryUnsigned, BridgeHeartbeat, BridgeIngressEndpointKind, BridgeLease, BridgeOpen,
-    BridgeRegister, BridgeRevoke, CreatorJoinRequest, DhtBridgeIngressEndpoint, PublicKeyBytes,
-    ReachabilityClass, RevocationReason,
+    BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCommandAck,
+    BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeDhtEntry, BridgeHeartbeat,
+    BridgeLease, BridgeOpen, BridgeRegister, BridgeRevoke, CreatorDhtEntry,
+    CreatorDhtEntryUnsigned, CreatorJoinRequest, PublicKeyBytes, ReachabilityClass,
+    RevocationReason,
 };
 use serde::Serialize;
 
@@ -43,14 +43,12 @@ pub struct BootstrapProgressUpdate {
     pub activated_bridge_ids: Vec<String>,
 }
 
-fn bridge_capability_label(capability: &BridgeCapability) -> &'static str {
-    match capability {
-        BridgeCapability::BootstrapSeed => "bootstrap_seed",
-        BridgeCapability::CatalogRefresh => "catalog_refresh",
-        BridgeCapability::SessionRelay => "session_relay",
-        BridgeCapability::BatchAssignment => "batch_assignment",
-        BridgeCapability::ProgressReporting => "progress_reporting",
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublisherBridgeDhtInitSummary {
+    pub active_bridge_count: usize,
+    pub initialized_bridge_count: usize,
+    pub stale_entry_count: usize,
+    pub bridge_ids: Vec<String>,
 }
 
 impl PublisherAuthority {
@@ -90,7 +88,7 @@ impl PublisherAuthority {
         let publisher_pub = publisher_identity(&signing_key);
         let mut durable_storage = PostgresAuthorityStorage::connect(&postgres_config)?;
         let (storage, last_recovery_summary) = durable_storage.load_state(now_ms)?;
-        Ok(Self {
+        let mut authority = Self {
             signing_key,
             publisher_pub,
             config,
@@ -99,7 +97,9 @@ impl PublisherAuthority {
             durable_storage: Some(durable_storage),
             last_recovery_summary,
             metrics: AuthorityMetrics::default(),
-        })
+        };
+        authority.initialize_publisher_bridge_dht(now_ms)?;
+        Ok(authority)
     }
 
     pub fn publisher_public_key(&self) -> &PublicKeyBytes {
@@ -143,6 +143,66 @@ impl PublisherAuthority {
         crate::registry::active_bridge_records(&self.storage, now_ms, false).len()
     }
 
+    pub fn publisher_bridge_dht_entry_count(&self) -> usize {
+        self.storage.publisher_bridge_dht_entries.len()
+    }
+
+    pub fn publisher_bridge_dht_entries(&self) -> Vec<BridgeDhtEntry> {
+        let mut entries = self
+            .storage
+            .publisher_bridge_dht_entries
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.bridge_id.cmp(&right.bridge_id));
+        entries
+    }
+
+    pub fn initialize_publisher_bridge_dht(
+        &mut self,
+        now_ms: u64,
+    ) -> AuthorityResult<PublisherBridgeDhtInitSummary> {
+        let active_records = crate::registry::active_bridge_records(&self.storage, now_ms, false);
+        let active_ids = active_records
+            .iter()
+            .map(|record| record.bridge_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let stale_entry_count = self
+            .storage
+            .publisher_bridge_dht_entries
+            .keys()
+            .filter(|bridge_id| !active_ids.contains(*bridge_id))
+            .count();
+
+        self.storage.publisher_bridge_dht_entries.clear();
+        for record in active_records {
+            let entry = crate::bootstrap::bridge_dht_entry(
+                &record,
+                &self.signing_key,
+                &self.config,
+                now_ms,
+                true,
+            )?;
+            self.storage
+                .publisher_bridge_dht_entries
+                .insert(record.bridge_id.clone(), entry);
+        }
+        let bridge_ids = self
+            .storage
+            .publisher_bridge_dht_entries
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let initialized_bridge_count = bridge_ids.len();
+        self.persist_state()?;
+        Ok(PublisherBridgeDhtInitSummary {
+            active_bridge_count: active_ids.len(),
+            initialized_bridge_count,
+            stale_entry_count,
+            bridge_ids,
+        })
+    }
+
     pub fn bridge_identity_pub(&self, bridge_id: &str) -> Option<PublicKeyBytes> {
         self.storage
             .bridges
@@ -180,46 +240,24 @@ impl PublisherAuthority {
                 heartbeat_at_ms: now_ms,
             });
         }
+        let entry = self
+            .storage
+            .publisher_bridge_dht_entries
+            .get(bridge_id)
+            .cloned()
+            .ok_or_else(|| AuthorityError::PublisherBridgeDhtEntryMissing {
+                bridge_id: bridge_id.to_string(),
+            })?;
+        entry.verify_authority(&self.publisher_pub, now_ms)?;
+        Ok(entry)
+    }
 
-        let endpoint_kind = match record.reachability_class {
-            ReachabilityClass::Direct => BridgeIngressEndpointKind::Direct,
-            ReachabilityClass::Brokered => BridgeIngressEndpointKind::Brokered,
-            ReachabilityClass::RelayOnly => BridgeIngressEndpointKind::RelayOnly,
-        };
-        let ingress_endpoints = record
-            .ingress_endpoints
-            .iter()
-            .map(|endpoint| DhtBridgeIngressEndpoint {
-                kind: endpoint_kind.clone(),
-                ip_addr: endpoint.host.clone(),
-                port: endpoint.port,
-                ttl_ms: None,
-            })
-            .collect::<Vec<_>>();
-
-        BridgeDhtEntry::sign(
-            BridgeDhtEntryUnsigned {
-                bridge_id: record.bridge_id.clone(),
-                identity_pub: record.identity_pub.clone(),
-                ingress_endpoints,
-                udp_punch_port: record.assigned_udp_punch_port,
-                reachability_class: record.reachability_class.clone(),
-                lease_expiry_ms: record.current_lease.lease_expiry_ms,
-                entry_expiry_ms: record
-                    .current_lease
-                    .lease_expiry_ms
-                    .min(now_ms + self.config.bootstrap_entry_ttl_ms),
-                capabilities: record
-                    .capabilities
-                    .iter()
-                    .map(bridge_capability_label)
-                    .map(ToOwned::to_owned)
-                    .collect(),
-            },
-            &self.signing_key,
-            true,
-        )
-        .map_err(Into::into)
+    pub fn creator_dht_entry(
+        &self,
+        unsigned: CreatorDhtEntryUnsigned,
+        active: bool,
+    ) -> AuthorityResult<CreatorDhtEntry> {
+        CreatorDhtEntry::sign(unsigned, &self.signing_key, active).map_err(Into::into)
     }
 
     pub fn list_frames(&self, chain_id: Option<&str>, limit: usize) -> Vec<IngestedFrameRecord> {

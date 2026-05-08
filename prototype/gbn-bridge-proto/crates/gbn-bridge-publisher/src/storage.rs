@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use gbn_bridge_protocol::{
     BootstrapDhtEntry, BootstrapProgress, BridgeCapability, BridgeCatalogResponse,
-    BridgeCloseReason, BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeHeartbeat,
-    BridgeIngressEndpoint, BridgeLease, BridgeOpen, BridgeSetResponse, CreatorBootstrapResponse,
-    CreatorJoinRequest, PublicKeyBytes, ReachabilityClass, RevocationReason, UnixTimestampMs,
+    BridgeCloseReason, BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeDhtEntry,
+    BridgeHeartbeat, BridgeIngressEndpoint, BridgeLease, BridgeOpen, BridgeSetResponse,
+    CreatorBootstrapResponse, CreatorJoinRequest, PublicKeyBytes, ReachabilityClass,
+    RevocationReason, UnixTimestampMs,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -193,6 +194,8 @@ pub struct SequenceState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct InMemoryAuthorityStorage {
     pub bridges: BTreeMap<String, BridgeRecord>,
+    #[serde(default)]
+    pub publisher_bridge_dht_entries: BTreeMap<String, BridgeDhtEntry>,
     pub catalog_issuance: BTreeMap<String, CatalogIssuanceRecord>,
     pub bootstrap_sessions: BTreeMap<String, BootstrapSessionRecord>,
     pub bridge_commands: BTreeMap<String, BridgeCommandRecord>,

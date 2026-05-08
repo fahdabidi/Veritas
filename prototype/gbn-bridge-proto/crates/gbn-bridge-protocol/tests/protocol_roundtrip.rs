@@ -143,6 +143,7 @@ fn sample_bridge_set_response() -> BridgeSetResponse {
             chain_id: "chain-bootstrap-001".into(),
             bootstrap_session_id: "bootstrap-001".into(),
             bridge_entries: vec![sample_seed_bridge_entry(), sample_creator_entry()],
+            bridge_dht_entries: Vec::new(),
             response_expiry_ms: 45_000,
         },
         &signing_key(),

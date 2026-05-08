@@ -85,6 +85,9 @@ pub enum AuthorityError {
     #[error("bridge `{bridge_id}` is revoked")]
     BridgeRevoked { bridge_id: String },
 
+    #[error("publisher DHT entry for bridge `{bridge_id}` is not initialized")]
+    PublisherBridgeDhtEntryMissing { bridge_id: String },
+
     #[error(
         "heartbeat lease mismatch for bridge `{bridge_id}`: expected `{expected}`, got `{actual}`"
     )]
@@ -106,6 +109,14 @@ pub enum AuthorityError {
 
     #[error("no eligible direct bridge is available for bootstrap")]
     NoEligibleBootstrapBridge,
+
+    #[error(
+        "bootstrap payload insufficient bridges: relay bridge `{relay_bridge_id}` cannot also be the seed bridge with only `{active_bridge_count}` eligible direct bridge(s)"
+    )]
+    InsufficientBootstrapBridges {
+        active_bridge_count: usize,
+        relay_bridge_id: String,
+    },
 
     #[error("no eligible direct bridge is available for batch assignment")]
     NoEligibleBatchBridge,

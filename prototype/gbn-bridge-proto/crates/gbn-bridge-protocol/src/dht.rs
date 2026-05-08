@@ -247,8 +247,12 @@ pub struct HostCreatorSeedState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewCreatorSeedState {
     pub new_creator_actor_id: String,
+    #[serde(default)]
+    pub chain_id: String,
     pub host_creator_entry: CreatorDhtEntry,
     pub seeded_at_ms: u64,
+    #[serde(default)]
+    pub start_bootstrap: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

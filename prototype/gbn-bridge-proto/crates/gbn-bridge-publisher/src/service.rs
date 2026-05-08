@@ -2,9 +2,10 @@ use std::sync::mpsc::Sender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gbn_bridge_protocol::{
-    BootstrapJoinReply, BootstrapProgressStage, BridgeCommandAck, BridgeCommandPayload,
-    BridgeControlCommand, BridgeControlFrame, BridgeControlHello, BridgeControlKeepalive,
-    BridgeControlProgress, BridgeControlWelcome, BridgeControlWelcomeUnsigned, ProtocolError,
+    BootstrapJoinReply, BootstrapProgress, BootstrapProgressStage, BridgeCommandAck,
+    BridgeCommandPayload, BridgeControlCommand, BridgeControlFrame, BridgeControlHello,
+    BridgeControlKeepalive, BridgeControlProgress, BridgeControlWelcome,
+    BridgeControlWelcomeUnsigned, ProtocolError,
 };
 use serde::Serialize;
 
@@ -468,6 +469,7 @@ impl AuthorityService {
             .ensure_actor_id_matches(&request.body.request.host_creator_id, &request.actor_id)
             .map_err(map_auth_error)?;
 
+        let join_request = request.body.request.clone();
         let plan = self
             .authority
             .begin_bootstrap_with_chain_id(
@@ -488,7 +490,94 @@ impl AuthorityService {
                 request.body.now_ms,
             )
             .map_err(map_authority_error)?;
+        tracing::info!(
+            chain_id = request.chain_id.as_str(),
+            new_creator_id = plan.creator_entry.node_id.as_str(),
+            host_creator_id = join_request.host_creator_id.as_str(),
+            relay_bridge_id = join_request.relay_bridge_id.as_str(),
+            seed_bridge_id = plan.seed_assignment.seed_bridge_id.as_str(),
+            bootstrap_session_id = plan.response.bootstrap_session_id.as_str(),
+            assigned_bridge_count = plan.bridge_set.bridge_entries.len(),
+            "publisher_bootstrap_payload_created"
+        );
+        tracing::info!(
+            chain_id = request.chain_id.as_str(),
+            new_creator_id = plan.creator_entry.node_id.as_str(),
+            relay_bridge_id = join_request.relay_bridge_id.as_str(),
+            seed_bridge_id = plan.seed_assignment.seed_bridge_id.as_str(),
+            bootstrap_session_id = plan.response.bootstrap_session_id.as_str(),
+            "publisher_seed_bridge_selected"
+        );
+        self.record_local_bootstrap_progress(
+            &request.chain_id,
+            &plan.response.bootstrap_session_id,
+            &plan.seed_assignment.seed_bridge_id,
+            &plan.creator_entry.node_id,
+            plan.bridge_set.bridge_entries.len() as u16,
+            request.body.now_ms,
+        )
+        .map_err(map_authority_error)?;
+        let _chain_span =
+            crate::metrics_otlp::chain_span("publisher_bootstrap_join", &request.chain_id)
+                .entered();
+        crate::metrics_otlp::record_chain_id(&request.chain_id);
+        tracing::info!(
+            chain_id = request.chain_id.as_str(),
+            new_creator_id = plan.creator_entry.node_id.as_str(),
+            host_creator_id = join_request.host_creator_id.as_str(),
+            relay_bridge_id = join_request.relay_bridge_id.as_str(),
+            bootstrap_session_id = plan.response.bootstrap_session_id.as_str(),
+            "publisher_join_received"
+        );
         self.success_response(&request.chain_id, &request.request_id, plan.join_reply())
+    }
+
+    fn record_local_bootstrap_progress(
+        &mut self,
+        chain_id: &str,
+        bootstrap_session_id: &str,
+        seed_bridge_id: &str,
+        new_creator_id: &str,
+        active_bridge_count: u16,
+        now_ms: u64,
+    ) -> crate::AuthorityResult<()> {
+        let stages = [
+            (seed_bridge_id, BootstrapProgressStage::SeedPayloadReceived),
+            (
+                seed_bridge_id,
+                BootstrapProgressStage::SeedTunnelEstablished,
+            ),
+            (
+                new_creator_id,
+                BootstrapProgressStage::SeedTunnelEstablished,
+            ),
+            (new_creator_id, BootstrapProgressStage::BridgeSetComplete),
+        ];
+        for (offset, (reporter_id, stage)) in stages.into_iter().enumerate() {
+            let progress = BootstrapProgress {
+                chain_id: chain_id.to_string(),
+                bootstrap_session_id: bootstrap_session_id.to_string(),
+                reporter_id: reporter_id.to_string(),
+                stage,
+                active_bridge_count,
+                reported_at_ms: now_ms.saturating_add(offset as u64 + 1),
+            };
+            let update = self
+                .authority
+                .report_bootstrap_progress_with_chain_id(chain_id, progress.clone())?;
+            for bridge_id in &update.activated_bridge_ids {
+                self.push_pending_commands_for_bridge(bridge_id, progress.reported_at_ms)?;
+            }
+            tracing::info!(
+                chain_id,
+                bootstrap_session_id,
+                reporter_id,
+                stage = bootstrap_stage_name(progress.stage),
+                active_bridge_count,
+                "publisher_bootstrap_progress_recorded"
+            );
+        }
+        Ok(())
     }
 
     pub fn handle_progress_report(
@@ -671,6 +760,7 @@ fn map_authority_error(error: AuthorityError) -> ServiceError {
         | AuthorityError::InvalidCreatorJoin { .. } => ServiceError::BadRequest(error.to_string()),
         AuthorityError::BridgeAlreadyRegistered { .. } => ServiceError::Conflict(error.to_string()),
         AuthorityError::BridgeNotFound { .. }
+        | AuthorityError::PublisherBridgeDhtEntryMissing { .. }
         | AuthorityError::BootstrapSessionNotFound { .. }
         | AuthorityError::BridgeCommandNotFound { .. }
         | AuthorityError::UploadSessionNotFound { .. } => ServiceError::NotFound(error.to_string()),
@@ -678,6 +768,7 @@ fn map_authority_error(error: AuthorityError) -> ServiceError {
         AuthorityError::LeaseMismatch { .. } => ServiceError::Conflict(error.to_string()),
         AuthorityError::LeaseExpired { .. } => ServiceError::Expired(error.to_string()),
         AuthorityError::NoEligibleBootstrapBridge
+        | AuthorityError::InsufficientBootstrapBridges { .. }
         | AuthorityError::NoEligibleBatchBridge
         | AuthorityError::UploadSessionCreatorMismatch { .. }
         | AuthorityError::UploadSessionClosed { .. }

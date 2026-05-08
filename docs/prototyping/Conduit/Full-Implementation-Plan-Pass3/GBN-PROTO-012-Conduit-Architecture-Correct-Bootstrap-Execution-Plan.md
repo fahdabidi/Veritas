@@ -63,8 +63,8 @@ Pass 3 replaces the synthetic shortcut with the documented flow:
 | 0 | Creator Pod Deployment And Cluster Topology | `[x]` |
 | 1 | Creator Local State And DHT Metadata Model | `[x]` |
 | 2 | SeedHostCreator Admin API And Operator Command | `[x]` |
-| 3 | SeedNewCreator API And First-Contact Join Path | `[ ]` |
-| 4 | Bootstrap Payload Delivery, Local DHT Population, And Punch Fanout | `[ ]` |
+| 3 | SeedNewCreator API And First-Contact Join Path | `[x]` |
+| 4 | Bootstrap Payload Delivery, Local DHT Population, And Punch Fanout | `[x]` |
 | 5 | Onboarded-Creator SendDummy And Local-DHT Single-Lane Envelope Demo | `[ ]` |
 | 6 | Operator Scripts And Acceptance Gate | `[ ]` |
 | 7 | Smoke 1 — Tracing Suite Implementation | `[ ]` |
@@ -367,6 +367,14 @@ HostCreator -> ExitBridgeA -> Publisher join path.
 
 Complete the Publisher -> ExitBridgeB -> NewCreator seed payload path, bridge set
 request/response, local DHT population, and reachability ACK activation.
+
+Completed 2026-05-08. The Publisher now maintains its own signed bridge DHT view for
+all 10 active ExitBridges, exposes an `InitializePublisherDht` operator command to
+seed/rebuild that view before `SeedNewCreator`, and uses that Publisher DHT view when
+building bootstrap payloads. The bootstrap reply carries signed V2 creator and bridge
+DHT entries, selects ExitBridgeB distinct from ExitBridgeA, records local bootstrap
+progress, and the NewCreator stores the bridge set as active local discovery state after
+the simulated smoke-test ACK path.
 
 ### Phase 5 - Onboarded-Creator SendDummy And Local-DHT Route Construction
 

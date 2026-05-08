@@ -60,14 +60,17 @@ fn bridge_register(bridge_id: &str, key_seed: u8, ingress: SocketAddr) -> Bridge
 struct TestTopology {
     authority: gbn_bridge_publisher::AuthorityServerHandle,
     admin: gbn_bridge_publisher::admin::AdminHttpServerHandle,
-    fake_bridge: FakeBridgeHandle,
+    fake_bridges: Vec<FakeBridgeHandle>,
+    dummy_bridge_addr: SocketAddr,
 }
 
 impl TestTopology {
     fn shutdown(self) {
         self.admin.join().unwrap();
         self.authority.join().unwrap();
-        self.fake_bridge.join();
+        for bridge in self.fake_bridges {
+            bridge.join();
+        }
     }
 }
 
@@ -200,6 +203,8 @@ fn start_topology(state_kind: AdminStateKind) -> TestTopology {
     let server = AuthorityServer::new(authority, config);
     let service = server.service_handle();
     let fake_bridge = start_fake_bridge("bridge-dummy", service.clone());
+    let fake_bridge_extra = start_fake_bridge("bridge-extra", service.clone());
+    let registered_at_ms = now_ms();
     service
         .lock()
         .unwrap()
@@ -207,7 +212,17 @@ fn start_topology(state_kind: AdminStateKind) -> TestTopology {
         .register_bridge(
             bridge_register("bridge-dummy", 54, fake_bridge.addr()),
             ReachabilityClass::Direct,
-            now_ms(),
+            registered_at_ms,
+        )
+        .unwrap();
+    service
+        .lock()
+        .unwrap()
+        .publisher_authority_mut()
+        .register_bridge(
+            bridge_register("bridge-extra", 55, fake_bridge_extra.addr()),
+            ReachabilityClass::Direct,
+            registered_at_ms,
         )
         .unwrap();
     let bound = server.bind().unwrap();
@@ -241,7 +256,8 @@ fn start_topology(state_kind: AdminStateKind) -> TestTopology {
     TestTopology {
         authority: authority_handle,
         admin,
-        fake_bridge,
+        dummy_bridge_addr: fake_bridge.addr(),
+        fake_bridges: vec![fake_bridge, fake_bridge_extra],
     }
 }
 
@@ -362,11 +378,14 @@ fn discovery_probe_from_authority_returns_catalog_without_persisting_frames() {
     assert!(result.chain_id.starts_with("discovery-probe-"));
     assert_eq!(result.actor_id, "publisher-authority");
     assert_eq!(result.assigned_bridge_id, "bridge-dummy");
-    assert_eq!(result.known_bridge_count, 1);
-    assert_eq!(result.known_bridge_ids, vec!["bridge-dummy".to_string()]);
+    assert_eq!(result.known_bridge_count, 2);
+    assert_eq!(
+        result.known_bridge_ids,
+        vec!["bridge-dummy".to_string(), "bridge-extra".to_string()]
+    );
     assert!(result
         .bridge_address
-        .ends_with(&format!(":{}", topology.fake_bridge.addr().port())));
+        .ends_with(&format!(":{}", topology.dummy_bridge_addr.port())));
 
     let path = format!("/v1/admin/frames?chain_id={}&limit=10", result.chain_id);
     let (status, frames): (u16, FramesResponse) = get_json(topology.admin.local_addr(), &path);
@@ -390,7 +409,10 @@ fn discovery_probe_from_receiver_returns_catalog() {
     assert!(result.chain_id.starts_with("discovery-probe-"));
     assert_eq!(result.actor_id, "publisher-receiver");
     assert_eq!(result.assigned_bridge_id, "bridge-dummy");
-    assert_eq!(result.known_bridge_ids, vec!["bridge-dummy".to_string()]);
+    assert_eq!(
+        result.known_bridge_ids,
+        vec!["bridge-dummy".to_string(), "bridge-extra".to_string()]
+    );
 
     topology.shutdown();
 }
@@ -416,7 +438,7 @@ fn send_dummy_from_receiver_returns_chain_id() {
 }
 
 #[test]
-fn send_dummy_from_bridge_returns_chain_id_even_when_assigned_to_self() {
+fn send_dummy_from_bridge_uses_distinct_seed_bridge() {
     let topology = start_topology(AdminStateKind::Bridge);
 
     let (status, result): (u16, SendDummyResult) = post_json(
@@ -427,7 +449,7 @@ fn send_dummy_from_bridge_returns_chain_id_even_when_assigned_to_self() {
 
     assert_eq!(status, 200);
     assert!(!result.chain_id.is_empty());
-    assert_eq!(result.assigned_bridge_id, "bridge-dummy");
+    assert_eq!(result.assigned_bridge_id, "bridge-extra");
     let (status, metrics): (u16, MetricsResponse) = get_json(
         topology.admin.local_addr(),
         AuthorityRoute::AdminMetrics.path(),

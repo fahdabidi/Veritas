@@ -1,6 +1,6 @@
 # GBN-PROTO-012 - Execution Phase 4 - Bootstrap Payload Delivery, Local DHT, And Fanout
 
-**Status:** Pending
+**Status:** Completed
 **Last Updated:** 2026-05-08
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
 **Depends On:** Phase 0–3 complete
@@ -10,8 +10,9 @@
 Complete `GBN-ARCH-001-V2` section 3.3 steps 3 through 12 after the join request reaches
 the Publisher (authority surface):
 
-1. Publisher (authority surface) creates the NewCreator entry and 9 bridge bootstrap
-   entries.
+1. Publisher (authority surface) initializes and maintains its Publisher-side signed
+   DHT view for all 10 active ExitBridge nodes, then creates the NewCreator entry and
+   selects 9 bridge bootstrap entries from that Publisher DHT view.
 2. Publisher selects `ExitBridgeB`, distinct from `ExitBridgeA` where possible.
 3. Publisher sends the bootstrap payload to ExitBridgeB.
 4. ExitBridgeB ACKs and starts punching toward NewCreator.
@@ -31,6 +32,11 @@ Per Master plan §3.5, `Publisher` is one role with two surfaces. All Phase 4 re
 to "Publisher" refer to the authority surface for orchestration and the receiver
 surface for payload sink. Operator scripts treat them as one role.
 
+Before any Phase 4 bootstrap succeeds, the Publisher node must already hold signed DHT
+entries for the 10 initialized ExitBridges. The bootstrap flow may refresh that view,
+but it must build the NewCreator payload from the Publisher's stored bridge DHT entries,
+not from shell-side pod inference or transient response construction.
+
 Update the parent plan status tracker when this phase is complete.
 
 ---
@@ -40,11 +46,39 @@ Update the parent plan status tracker when this phase is complete.
 Add or complete runtime surfaces. Each documented sub-step maps to a specific message
 from `GBN-ARCH-001-V2` §5.2 / §5.3 — no overloading, no `send-dummy` reuse.
 
+### Publisher-Side ExitBridge DHT Initialization
+
+The Publisher has full visibility over active ExitBridges and must maintain its own
+signed ExitBridge DHT view before issuing a NewCreator bootstrap payload. This is the
+Publisher-side counterpart to the NewCreator's local DHT population.
+
+Required changes:
+
+- Add Publisher authority storage for `publisher_bridge_dht_entries`, keyed by
+  `bridge_id`.
+- Register, heartbeat, and reclassify operations refresh the stored Publisher DHT
+  entry for each active initialized ExitBridge; revoke and expiry paths remove stale
+  entries.
+- Add `POST /v1/admin/publisher-dht/initialize` to rebuild the Publisher DHT view from
+  the current active initialized ExitBridge registry and return the initialized count
+  plus bridge ids.
+- Add `InitializePublisherDht` to `relay-control-interactive-v2.sh` so the operator can
+  explicitly seed the Publisher DHT with all 10 initialized ExitBridges before
+  `SeedNewCreator`.
+- Bootstrap payload creation reads bridge DHT entries from this Publisher-side DHT
+  view. It must not synthesize bridge DHT entries only at response construction time.
+- In the Pass 3 topology, `InitializePublisherDht` must materialize 10 signed bridge
+  entries. Bootstrap then excludes ExitBridgeA and returns exactly 9 Publisher-signed
+  bridge entries to the NewCreator.
+- Missing, stale, unsigned, or below-threshold Publisher DHT state fails fast before
+  payload issue with an operator-visible error such as
+  `PublisherBridgeDhtEntryMissing` or `InsufficientBootstrapBridges`.
+
 ### Protocol Message Mapping (T0.7)
 
 | Sub-step | Direction | Message |
 |---|---|---|
-| Publisher creates bootstrap payload | (internal) | `CreatorBootstrapResponse` body; assembled in Publisher authority service |
+| Publisher creates bootstrap payload | (internal) | `CreatorBootstrapResponse` body; assembled in Publisher authority service from stored Publisher DHT entries |
 | Publisher → ExitBridgeB seed payload delivery | Publisher → Bridge | `BridgePunchStart` carrying `CreatorBootstrapResponse` payload |
 | ExitBridgeB seed-payload ACK | Bridge → Publisher | `BootstrapProgress` with `phase=seed_payload_acked` |
 | ExitBridgeB → NewCreator punch probes | Bridge → Creator | `BridgePunchProbe` |
@@ -260,6 +294,8 @@ Add tests in
 
 - Publisher selects a seed bridge distinct from relay bridge when at least 2 bridges
   exist;
+- `InitializePublisherDht` materializes exactly 10 registered active ExitBridges into
+  the Publisher's signed bridge DHT view before bootstrap begins;
 - bootstrap payload includes the NewCreator entry and exactly 9 bridge entries when
   10 bridges are registered (1 ExitBridgeA excluded);
 - ExitBridgeB records and ACKs the bootstrap payload via `BootstrapProgress`;
@@ -287,10 +323,39 @@ cargo test -p gbn-bridge-creator --test bootstrap_workflow
 
 ---
 
+## Implementation Notes
+
+Completed 2026-05-08.
+
+- `BootstrapJoinReply` now includes optional signed V2 `creator_dht_entry` and
+  `bridge_set` payloads while preserving the legacy `BootstrapDhtEntry` fields used by
+  existing runtime callers.
+- `BridgeSetResponse` now carries `bridge_dht_entries` in addition to legacy bootstrap
+  hints so NewCreator local DHT state can verify Publisher signatures after onboarding.
+- Publisher maintains a signed bridge DHT view (`publisher_bridge_dht_entries`) for
+  active ExitBridges. Bridge registration, heartbeat renewal, and reclassification
+  refresh it; revoke/expiry remove stale entries.
+- `relay-control-interactive-v2.sh` now exposes `InitializePublisherDht`, which calls
+  `POST /v1/admin/publisher-dht/initialize` to rebuild Publisher DHT entries from all
+  active initialized ExitBridges before running bootstrap smoke tests.
+- Publisher bootstrap selection consumes stored Publisher DHT entries and rejects a
+  relay-only candidate set with
+  `InsufficientBootstrapBridges`; with enough direct bridges it excludes ExitBridgeA
+  from the seeded bridge set and selects ExitBridgeB separately.
+- The local admin bootstrap path consumes the returned payload into
+  `LocalDiscoveryTable`, stores the NewCreator's own signed entry, marks received
+  bridge entries active after the simulated ACK path, and records active tunnels.
+- Publisher authority sessions record seed-payload, seed-tunnel, NewCreator progress,
+  and completion events for local smoke validation.
+
+---
+
 ## Acceptance Criteria
 
 - A NewCreator (`creator-new`) reaches `self_onboarding_state=onboarded` after
   `SeedNewCreator` against a 10-bridge cluster.
+- Publisher DHT contains signed entries for all 10 active ExitBridges before the
+  bootstrap payload is built.
 - Local DHT includes the NewCreator's own Publisher-signed creator entry plus 9 bridge
   entries with valid signatures and unexpired lease/entry windows.
 - The seed bridge entry is active after seed tunnel ACK.

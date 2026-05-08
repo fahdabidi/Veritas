@@ -4,7 +4,7 @@
 //! Operators reach it through ECS exec; it is not exposed through public ingress.
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -15,13 +15,18 @@ use gbn_bridge_creator::{
     CreatorClient, CreatorError, DiscoveryProbeResult, LocalDhtStore, SendDummyResult,
 };
 use gbn_bridge_protocol::{
-    BridgeCommandPayload, BridgeDhtEntry, DhtBridgeIngressEndpoint, HostCreatorSeedState,
-    HostRoleState, LocalDiscoveryTable, ProtocolError, PublicKeyBytes, PublisherDhtEntry,
-    ReachabilityClass, SelfOnboardingState,
+    BootstrapJoinReply, BootstrapSession, BridgeCommandPayload, BridgeDhtEntry, CreatorDhtEntry,
+    CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint, HostCreatorSeedState,
+    HostRoleState, LocalDiscoveryTable, NewCreatorSeedState, PendingCreator, ProtocolError,
+    PublicKeyBytes, PublisherDhtEntry, ReachabilityClass, SelfOnboardingState, TunnelPeerRole,
+    TunnelState,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::api::AuthorityRoute;
+use crate::api::{
+    AuthorityApiRequest, AuthorityApiRequestUnsigned, AuthorityApiResponse, AuthorityRoute,
+    BootstrapJoinBody,
+};
 use crate::control::BridgeAdminCommandReceipt;
 use crate::metrics::{
     AuthorityMetricsSnapshot, BridgeMetrics, BridgeMetricsSnapshot, ReceiverMetrics,
@@ -312,6 +317,75 @@ pub struct BridgeDhtEntryResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatorDhtEntrySignRequest {
+    pub creator: CreatorDhtEntryUnsigned,
+    #[serde(default = "default_true")]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatorDhtEntryResponse {
+    pub creator: CreatorDhtEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitializePublisherDhtRequest {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitializePublisherDhtResponse {
+    pub active_bridge_count: usize,
+    pub initialized_bridge_count: usize,
+    pub publisher_dht_entry_count: usize,
+    pub stale_entry_count: usize,
+    pub bridge_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedNewCreatorRequest {
+    pub new_creator_id: String,
+    pub host_creator_entry: CreatorDhtEntry,
+    #[serde(default = "default_true")]
+    pub start_bootstrap: bool,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_admin_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedNewCreatorResponse {
+    pub new_creator_id: String,
+    pub host_creator_id: String,
+    pub self_onboarding_state: SelfOnboardingState,
+    pub chain_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_session_id: Option<String>,
+    pub started_bootstrap: bool,
+    pub forced: bool,
+    pub idempotent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartBootstrapRequest {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostJoinRelayBody {
+    pub host_creator_id: String,
+    pub creator: PendingCreator,
+    pub now_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostJoinRelayResponse {
+    pub chain_id: String,
+    pub new_creator_id: String,
+    pub host_creator_id: String,
+    pub relay_bridge_id: String,
+    pub bootstrap_session_id: String,
+    pub bootstrap_reply: BootstrapJoinReply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminErrorResponse {
     pub error: AdminErrorBody,
 }
@@ -320,6 +394,10 @@ pub struct AdminErrorResponse {
 pub struct AdminErrorBody {
     pub code: String,
     pub message: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub struct AdminHttpServer {
@@ -466,6 +544,20 @@ impl AdminState {
             local_dht: AdminLocalDhtSource::Creator(local_dht),
         }
     }
+
+    pub fn creator_with_config(
+        metadata: AdminNodeMetadata,
+        local_dht: LocalDhtStore,
+        creator: AdminCreatorConfig,
+    ) -> Self {
+        Self {
+            authority: None,
+            metrics: AdminMetricsSource::Authority,
+            creator: Some(creator),
+            node_metadata: metadata,
+            local_dht: AdminLocalDhtSource::Creator(local_dht),
+        }
+    }
 }
 
 impl AdminHttpServer {
@@ -602,11 +694,26 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
             Some(bridge_id) => bridge_dht_entry(state, bridge_id),
             None => error_response(404, "not_found", "admin route not found"),
         },
+        ("POST", path) if path == AuthorityRoute::AdminInitializePublisherDht.path() => {
+            initialize_publisher_dht(state, &request.body)
+        }
+        ("POST", path) if path == AuthorityRoute::AdminCreatorDhtEntry.path() => {
+            creator_dht_entry(state, &request.body)
+        }
         ("POST", path) if path == AuthorityRoute::AdminResetCreatorState.path() => {
             reset_creator_state(state, &request.body)
         }
         ("POST", path) if path == AuthorityRoute::AdminSeedHostCreator.path() => {
             seed_host_creator(state, &request.body)
+        }
+        ("POST", path) if path == AuthorityRoute::AdminSeedNewCreator.path() => {
+            seed_new_creator(state, &request.body)
+        }
+        ("POST", path) if path == AuthorityRoute::AdminStartBootstrap.path() => {
+            start_bootstrap(state, &request.body)
+        }
+        ("POST", path) if path == AuthorityRoute::AdminHostJoinRelay.path() => {
+            host_join_relay(state, &request.body)
         }
         ("POST", path) if path == AuthorityRoute::AdminSendDummy.path() => {
             inject_send_dummy(state, &request.body)
@@ -858,6 +965,449 @@ fn seed_host_creator(state: &AdminState, body: &[u8]) -> Vec<u8> {
     }
 }
 
+fn seed_new_creator(state: &AdminState, body: &[u8]) -> Vec<u8> {
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            405,
+            "method_not_allowed",
+            "seed-new-creator is only available on creator admin listeners",
+        );
+    };
+    let request = match serde_json::from_slice::<SeedNewCreatorRequest>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(
+                400,
+                "bad_request",
+                &format!("invalid seed-new-creator json: {error}"),
+            )
+        }
+    };
+    let now_ms = now_ms();
+    let proposed_chain_id = format!("seed-new-creator-{}-{now_ms}", request.new_creator_id);
+    emit_new_seed_event(
+        "new_creator_seed_requested",
+        &proposed_chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        None,
+        None,
+        request.force,
+    );
+
+    if request.new_creator_id != store.actor_id() {
+        return error_response(
+            409,
+            "new_creator_id_mismatch",
+            &format!(
+                "seed request targets new_creator_id `{}`, but this creator is `{}`",
+                request.new_creator_id,
+                store.actor_id()
+            ),
+        );
+    }
+    let trusted_publisher_key = match trusted_publisher_key(state) {
+        Ok(key) => key,
+        Err(message) => return error_response(409, "publisher_trust_mismatch", &message),
+    };
+    if let Err(error) = request
+        .host_creator_entry
+        .verify_authority(&trusted_publisher_key, now_ms)
+    {
+        return host_creator_entry_validation_error(error);
+    }
+
+    let snapshot = store.snapshot();
+    if let Some(existing) = &snapshot.new_creator_seed_state {
+        if new_seed_matches(existing, &request)
+            && matches!(
+                snapshot.self_onboarding_state,
+                SelfOnboardingState::NewCreatorSeeded | SelfOnboardingState::Bootstrapping
+            )
+        {
+            let chain_id = existing_new_seed_chain_id(existing, &proposed_chain_id);
+            emit_new_seed_event(
+                "new_creator_seed_idempotent_replay",
+                &chain_id,
+                &request.new_creator_id,
+                &request.host_creator_entry.node_id,
+                None,
+                snapshot
+                    .current_bootstrap_session
+                    .as_ref()
+                    .map(|session| session.session_id.as_str()),
+                false,
+            );
+            return json_response(
+                200,
+                &seed_new_response(
+                    &snapshot,
+                    &request,
+                    chain_id,
+                    snapshot
+                        .current_bootstrap_session
+                        .as_ref()
+                        .map(|session| session.session_id.clone()),
+                    false,
+                    true,
+                ),
+            );
+        }
+
+        if !request.force {
+            return error_response(
+                409,
+                "seed_already_present",
+                "NewCreator seed state is already present; use force=true to replace it",
+            );
+        }
+        emit_new_seed_event(
+            "new_creator_seed_force_replaced",
+            &proposed_chain_id,
+            &request.new_creator_id,
+            &request.host_creator_entry.node_id,
+            None,
+            None,
+            true,
+        );
+    } else if !request.force && !new_creator_seed_state_allows_seed(snapshot.self_onboarding_state)
+    {
+        return error_response(
+            409,
+            "new_creator_already_seeded",
+            "selected creator already has an in-flight or completed onboarding state",
+        );
+    }
+
+    let mut next = if request.force {
+        LocalDiscoveryTable::empty(store.actor_id().to_string(), now_ms)
+    } else {
+        snapshot.clone()
+    };
+    next.self_onboarding_state = if request.start_bootstrap {
+        SelfOnboardingState::Bootstrapping
+    } else {
+        SelfOnboardingState::NewCreatorSeeded
+    };
+    next.host_creator_entry = Some(request.host_creator_entry.clone());
+    next.new_creator_seed_state = Some(NewCreatorSeedState {
+        new_creator_actor_id: request.new_creator_id.clone(),
+        chain_id: proposed_chain_id.clone(),
+        host_creator_entry: request.host_creator_entry.clone(),
+        seeded_at_ms: now_ms,
+        start_bootstrap: request.start_bootstrap,
+    });
+    next.current_bootstrap_session = None;
+    next.last_update_ms = now_ms;
+    next.last_error = None;
+    let committed = match store.replace(next) {
+        Ok(table) => table,
+        Err(error) => return error_response(500, "local_dht_seed_failed", &error.to_string()),
+    };
+    emit_new_seed_event(
+        "new_creator_seed_stored",
+        &proposed_chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        None,
+        None,
+        request.force,
+    );
+
+    if !request.start_bootstrap {
+        return json_response(
+            200,
+            &seed_new_response(&committed, &request, proposed_chain_id, None, false, false),
+        );
+    }
+
+    match begin_new_creator_bootstrap(state, store, &request, &proposed_chain_id, now_ms) {
+        Ok((table, bootstrap_session_id)) => json_response(
+            200,
+            &seed_new_response(
+                &table,
+                &request,
+                proposed_chain_id,
+                Some(bootstrap_session_id),
+                true,
+                false,
+            ),
+        ),
+        Err((status, code, message)) => error_response(status, code, &message),
+    }
+}
+
+fn start_bootstrap(state: &AdminState, body: &[u8]) -> Vec<u8> {
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            405,
+            "method_not_allowed",
+            "start-bootstrap is only available on creator admin listeners",
+        );
+    };
+    if !body.is_empty() {
+        if let Err(error) = serde_json::from_slice::<StartBootstrapRequest>(body) {
+            return error_response(
+                400,
+                "bad_request",
+                &format!("invalid start-bootstrap json: {error}"),
+            );
+        }
+    }
+    let snapshot = store.snapshot();
+    let Some(seed) = snapshot.new_creator_seed_state.clone() else {
+        return error_response(
+            409,
+            "new_creator_not_seeded",
+            "start-bootstrap requires a prior SeedNewCreator payload",
+        );
+    };
+    let chain_id = existing_new_seed_chain_id(
+        &seed,
+        &format!(
+            "seed-new-creator-{}-{}",
+            seed.new_creator_actor_id,
+            now_ms()
+        ),
+    );
+    let request = SeedNewCreatorRequest {
+        new_creator_id: seed.new_creator_actor_id,
+        host_creator_entry: seed.host_creator_entry,
+        start_bootstrap: true,
+        force: false,
+        host_admin_url: None,
+    };
+    match begin_new_creator_bootstrap(state, store, &request, &chain_id, now_ms()) {
+        Ok((table, bootstrap_session_id)) => json_response(
+            200,
+            &seed_new_response(
+                &table,
+                &request,
+                chain_id,
+                Some(bootstrap_session_id),
+                true,
+                false,
+            ),
+        ),
+        Err((status, code, message)) => error_response(status, code, &message),
+    }
+}
+
+fn host_join_relay(state: &AdminState, body: &[u8]) -> Vec<u8> {
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            405,
+            "method_not_allowed",
+            "host join relay is only available on creator admin listeners",
+        );
+    };
+    let Some(config) = &state.creator else {
+        return error_response(
+            501,
+            "not_supported",
+            "host join relay requires a configured creator identity",
+        );
+    };
+    let request = match serde_json::from_slice::<AuthorityApiRequest<HostJoinRelayBody>>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(
+                400,
+                "bad_request",
+                &format!("invalid host join relay json: {error}"),
+            )
+        }
+    };
+    if let Err(error) = request.verify_signature() {
+        return error_response(
+            401,
+            "new_creator_signature_invalid",
+            &format!("NewCreator relay signature failed validation: {error}"),
+        );
+    }
+    if request.actor_id != request.body.creator.node_id {
+        return error_response(
+            409,
+            "new_creator_id_mismatch",
+            "host join relay actor_id must match the pending creator id",
+        );
+    }
+    if request.auth.actor_pub != request.body.creator.pub_key {
+        return error_response(
+            401,
+            "new_creator_signature_invalid",
+            "host join relay signature key must match the pending creator public key",
+        );
+    }
+    if request.body.host_creator_id != store.actor_id() {
+        return error_response(
+            409,
+            "host_creator_id_mismatch",
+            "host join relay request targeted a different HostCreator",
+        );
+    }
+
+    let snapshot = store.snapshot();
+    let Some(host_seed) = snapshot.host_seed_state.clone() else {
+        return error_response(
+            409,
+            "host_creator_not_seeded",
+            "HostCreator has no seeded Publisher or ExitBridgeA state",
+        );
+    };
+    if snapshot.host_role_state != HostRoleState::HostSeeded {
+        return error_response(
+            409,
+            "host_creator_not_seeded",
+            "HostCreator local state is not host_seeded",
+        );
+    }
+    let relay_bridge_id = host_seed.exit_bridge_a_entry.bridge_id.clone();
+    emit_join_path_event(
+        "host_creator_join_received",
+        &request.chain_id,
+        &request.body.creator.node_id,
+        store.actor_id(),
+        Some(&relay_bridge_id),
+        None,
+    );
+
+    let join = CreatorJoinRequest {
+        chain_id: request.chain_id.clone(),
+        request_id: request.request_id.clone(),
+        host_creator_id: store.actor_id().to_string(),
+        relay_bridge_id: relay_bridge_id.clone(),
+        creator: request.body.creator.clone(),
+    };
+    let authority_request = match AuthorityApiRequest::sign(
+        AuthorityApiRequestUnsigned {
+            chain_id: request.chain_id.clone(),
+            request_id: request.request_id.clone(),
+            sent_at_ms: request.sent_at_ms,
+            actor_id: store.actor_id().to_string(),
+            body: BootstrapJoinBody {
+                request: join,
+                now_ms: request.body.now_ms,
+            },
+        },
+        &config.signing_key,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(
+                500,
+                "host_join_sign_failed",
+                &format!("failed to sign HostCreator authority join envelope: {error}"),
+            )
+        }
+    };
+    let response = match post_json_raw(
+        &host_seed.publisher_entry.authority_url,
+        AuthorityRoute::BootstrapJoin.path(),
+        &authority_request,
+        config.timeout,
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            return error_response(
+                502,
+                "publisher_join_unreachable",
+                &format!("failed to relay join to Publisher authority: {error}"),
+            )
+        }
+    };
+    let (status, response_body) = match parse_http_status_body(&response) {
+        Ok(parsed) => parsed,
+        Err(error) => return error_response(502, "publisher_join_bad_response", &error),
+    };
+    let authority_response: AuthorityApiResponse<BootstrapJoinReply> =
+        match serde_json::from_slice(response_body) {
+            Ok(response) => response,
+            Err(error) => {
+                return error_response(
+                    502,
+                    "publisher_join_bad_response",
+                    &format!("failed to decode Publisher join response: {error}"),
+                )
+            }
+        };
+    if let Err(error) = authority_response.verify_authority(&config.publisher_pub) {
+        return error_response(
+            502,
+            "publisher_join_signature_invalid",
+            &format!("Publisher join response signature failed validation: {error}"),
+        );
+    }
+    if status != 200 || !authority_response.ok {
+        return error_response(
+            502,
+            "publisher_join_rejected",
+            &authority_response
+                .error
+                .map(|error| format!("{}: {}", error.code, error.message))
+                .unwrap_or_else(|| format!("Publisher returned HTTP {status}")),
+        );
+    }
+    let Some(reply) = authority_response.body else {
+        return error_response(
+            502,
+            "publisher_join_bad_response",
+            "Publisher join response had no body",
+        );
+    };
+    if let Err(error) = reply.verify_authority(&config.publisher_pub, request.body.now_ms) {
+        return error_response(
+            502,
+            "publisher_bootstrap_payload_invalid",
+            &format!("Publisher bootstrap payload failed validation: {error}"),
+        );
+    }
+    let bootstrap_session_id = reply.response.bootstrap_session_id.clone();
+    emit_join_path_event(
+        "publisher_response_to_host_via_bridge",
+        &request.chain_id,
+        &request.body.creator.node_id,
+        store.actor_id(),
+        Some(&relay_bridge_id),
+        Some(&bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "host_response_received_from_bridge",
+        &request.chain_id,
+        &request.body.creator.node_id,
+        store.actor_id(),
+        Some(&relay_bridge_id),
+        Some(&bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "host_creator_join_relayed_via_bridge",
+        &request.chain_id,
+        &request.body.creator.node_id,
+        store.actor_id(),
+        Some(&relay_bridge_id),
+        Some(&bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "host_relayed_response_to_new_creator",
+        &request.chain_id,
+        &request.body.creator.node_id,
+        store.actor_id(),
+        Some(&relay_bridge_id),
+        Some(&bootstrap_session_id),
+    );
+    json_response(
+        200,
+        &HostJoinRelayResponse {
+            chain_id: request.chain_id,
+            new_creator_id: request.body.creator.node_id,
+            host_creator_id: store.actor_id().to_string(),
+            relay_bridge_id,
+            bootstrap_session_id,
+            bootstrap_reply: reply,
+        },
+    )
+}
+
 fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
     let Some(config) = &state.creator else {
         return error_response(
@@ -979,6 +1529,76 @@ fn bridge_dht_entry(state: &AdminState, bridge_id: &str) -> Vec<u8> {
         .bridge_dht_entry(bridge_id, now_ms())
     {
         Ok(bridge) => json_response(200, &BridgeDhtEntryResponse { bridge }),
+        Err(error) => authority_error_response(error),
+    }
+}
+
+fn initialize_publisher_dht(state: &AdminState, body: &[u8]) -> Vec<u8> {
+    let Some(authority) = &state.authority else {
+        return error_response(
+            501,
+            "not_supported",
+            "publisher DHT initialization is only available on the publisher authority",
+        );
+    };
+    if !body.is_empty() {
+        if let Err(error) = serde_json::from_slice::<InitializePublisherDhtRequest>(body) {
+            return error_response(
+                400,
+                "bad_request",
+                &format!("invalid publisher-dht initialization json: {error}"),
+            );
+        }
+    }
+    let mut service = authority
+        .lock()
+        .expect("authority service mutex poisoned while initializing publisher DHT");
+    match service
+        .publisher_authority_mut()
+        .initialize_publisher_bridge_dht(now_ms())
+    {
+        Ok(summary) => json_response(
+            200,
+            &InitializePublisherDhtResponse {
+                active_bridge_count: summary.active_bridge_count,
+                initialized_bridge_count: summary.initialized_bridge_count,
+                publisher_dht_entry_count: service
+                    .publisher_authority()
+                    .publisher_bridge_dht_entry_count(),
+                stale_entry_count: summary.stale_entry_count,
+                bridge_ids: summary.bridge_ids,
+            },
+        ),
+        Err(error) => authority_error_response(error),
+    }
+}
+
+fn creator_dht_entry(state: &AdminState, body: &[u8]) -> Vec<u8> {
+    let Some(authority) = &state.authority else {
+        return error_response(
+            501,
+            "not_supported",
+            "creator DHT entry signing is only available on the publisher authority",
+        );
+    };
+    let request = match serde_json::from_slice::<CreatorDhtEntrySignRequest>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(
+                400,
+                "bad_request",
+                &format!("invalid creator-dht-entry json: {error}"),
+            )
+        }
+    };
+    let service = authority
+        .lock()
+        .expect("authority service mutex poisoned while signing creator DHT entry");
+    match service
+        .publisher_authority()
+        .creator_dht_entry(request.creator, request.active)
+    {
+        Ok(creator) => json_response(200, &CreatorDhtEntryResponse { creator }),
         Err(error) => authority_error_response(error),
     }
 }
@@ -1107,7 +1727,8 @@ fn bridge_seed_validation_error(error: ProtocolError) -> Vec<u8> {
 
 fn authority_error_response(error: AuthorityError) -> Vec<u8> {
     match &error {
-        AuthorityError::BridgeNotFound { .. } => {
+        AuthorityError::BridgeNotFound { .. }
+        | AuthorityError::PublisherBridgeDhtEntryMissing { .. } => {
             error_response(404, "not_found", &error.to_string())
         }
         AuthorityError::LeaseExpired { .. } => {
@@ -1156,6 +1777,380 @@ fn seed_host_response(
     }
 }
 
+fn seed_new_response(
+    table: &LocalDiscoveryTable,
+    request: &SeedNewCreatorRequest,
+    chain_id: String,
+    bootstrap_session_id: Option<String>,
+    started_bootstrap: bool,
+    idempotent: bool,
+) -> SeedNewCreatorResponse {
+    SeedNewCreatorResponse {
+        new_creator_id: request.new_creator_id.clone(),
+        host_creator_id: request.host_creator_entry.node_id.clone(),
+        self_onboarding_state: table.self_onboarding_state,
+        chain_id,
+        bootstrap_session_id,
+        started_bootstrap,
+        forced: request.force,
+        idempotent,
+    }
+}
+
+fn begin_new_creator_bootstrap(
+    state: &AdminState,
+    store: &LocalDhtStore,
+    request: &SeedNewCreatorRequest,
+    chain_id: &str,
+    now_ms: u64,
+) -> Result<(LocalDiscoveryTable, String), (u16, &'static str, String)> {
+    let config = state.creator.as_ref().ok_or_else(|| {
+        (
+            501,
+            "not_supported",
+            "seed-new-creator start_bootstrap requires a configured creator identity".to_string(),
+        )
+    })?;
+    let host_admin_url = request
+        .host_admin_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}:9090", request.host_creator_entry.ip_addr));
+    let request_id = format!("{chain_id}-join");
+    emit_join_path_event(
+        "new_creator_join_started",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        None,
+        None,
+    );
+    let relay_request = AuthorityApiRequest::sign(
+        AuthorityApiRequestUnsigned {
+            chain_id: chain_id.to_string(),
+            request_id: request_id.clone(),
+            sent_at_ms: now_ms.saturating_sub(25),
+            actor_id: request.new_creator_id.clone(),
+            body: HostJoinRelayBody {
+                host_creator_id: request.host_creator_entry.node_id.clone(),
+                creator: PendingCreator {
+                    node_id: request.new_creator_id.clone(),
+                    ip_addr: state
+                        .node_metadata
+                        .ip_addr
+                        .clone()
+                        .unwrap_or_else(|| config.creator_ip_addr.clone()),
+                    pub_key: PublicKeyBytes::from_verifying_key(
+                        &config.signing_key.verifying_key(),
+                    ),
+                    udp_punch_port: state
+                        .node_metadata
+                        .creator_udp_punch_port
+                        .unwrap_or(config.udp_punch_port),
+                },
+                now_ms,
+            },
+        },
+        &config.signing_key,
+    )
+    .map_err(|error| {
+        (
+            500,
+            "new_creator_join_sign_failed",
+            format!("failed to sign NewCreator host-join envelope: {error}"),
+        )
+    })?;
+    let response = post_json_raw(
+        &host_admin_url,
+        AuthorityRoute::AdminHostJoinRelay.path(),
+        &relay_request,
+        config.timeout,
+    )
+    .map_err(|error| {
+        mark_new_creator_failed(store, chain_id, &error);
+        (
+            502,
+            "host_creator_unreachable",
+            format!("failed to send join request to HostCreator: {error}"),
+        )
+    })?;
+    let (status, response_body) = parse_http_status_body(&response).map_err(|error| {
+        mark_new_creator_failed(store, chain_id, &error);
+        (502, "host_creator_bad_response", error)
+    })?;
+    if status != 200 {
+        let message = serde_json::from_slice::<AdminErrorResponse>(response_body)
+            .map(|error| format!("{}: {}", error.error.code, error.error.message))
+            .unwrap_or_else(|_| format!("HostCreator returned HTTP {status}"));
+        if message.contains("bootstrap payload insufficient bridges") {
+            mark_new_creator_failed_with_state(
+                store,
+                chain_id,
+                SelfOnboardingState::FanoutFailed,
+                "fanout_failed",
+                &message,
+            );
+        } else {
+            mark_new_creator_failed(store, chain_id, &message);
+        }
+        return Err((502, "host_creator_join_failed", message));
+    }
+    let relay =
+        serde_json::from_slice::<HostJoinRelayResponse>(response_body).map_err(|error| {
+            let message = format!("failed to decode HostCreator relay response: {error}");
+            mark_new_creator_failed(store, chain_id, &message);
+            (502, "host_creator_bad_response", message)
+        })?;
+    if relay.chain_id != chain_id {
+        let message = format!(
+            "HostCreator relay response chain_id mismatch: expected `{chain_id}`, got `{}`",
+            relay.chain_id
+        );
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "host_creator_bad_response", message));
+    }
+    if relay.new_creator_id != request.new_creator_id {
+        let message = format!(
+            "HostCreator relay response creator mismatch: expected `{}`, got `{}`",
+            request.new_creator_id, relay.new_creator_id
+        );
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "host_creator_bad_response", message));
+    }
+    if let Err(error) = relay
+        .bootstrap_reply
+        .verify_authority(&config.publisher_pub, now_ms)
+    {
+        let message = format!("Publisher bootstrap payload failed validation: {error}");
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "publisher_bootstrap_payload_invalid", message));
+    }
+    let creator_entry = relay
+        .bootstrap_reply
+        .creator_dht_entry
+        .clone()
+        .ok_or_else(|| {
+            let message = "Publisher bootstrap payload did not include a signed Creator DHT entry"
+                .to_string();
+            mark_new_creator_failed(store, chain_id, &message);
+            (502, "bootstrap_payload_missing_creator_entry", message)
+        })?;
+    let bridge_set = relay.bootstrap_reply.bridge_set.clone().ok_or_else(|| {
+        let message =
+            "Publisher bootstrap payload did not include the signed bridge set".to_string();
+        mark_new_creator_failed(store, chain_id, &message);
+        (502, "bootstrap_payload_missing_bridge_set", message)
+    })?;
+    if bridge_set.bridge_dht_entries.is_empty() {
+        let message =
+            "Publisher bootstrap payload did not include signed bridge DHT entries".to_string();
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "bootstrap_payload_missing_bridge_dht_entries", message));
+    }
+    let seed_bridge_id = relay.bootstrap_reply.response.seed_bridge.node_id.clone();
+    if !bridge_set
+        .bridge_dht_entries
+        .iter()
+        .any(|entry| entry.bridge_id == seed_bridge_id)
+    {
+        let message =
+            "Publisher bootstrap payload bridge set did not include the selected seed bridge"
+                .to_string();
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "bootstrap_payload_missing_seed_bridge", message));
+    }
+    emit_join_path_event(
+        "new_creator_bootstrap_response_received",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&relay.relay_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "seed_bridge_payload_received",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "seed_bridge_punch_started",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "seed_bridge_punch_progress_publisher",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "new_creator_seed_tunnel_ack",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "new_creator_punch_progress_publisher",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "new_creator_bridge_set_requested",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "seed_bridge_bridge_set_returned",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    let mut table = store.snapshot();
+    let mut bridge_entries = bridge_set.bridge_dht_entries.clone();
+    for entry in &mut bridge_entries {
+        entry.active = true;
+    }
+    table.self_onboarding_state = SelfOnboardingState::Onboarded;
+    table.current_bootstrap_session = Some(BootstrapSession {
+        session_id: relay.bootstrap_session_id.clone(),
+        chain_id: Some(chain_id.to_string()),
+        started_at_ms: now_ms,
+        last_event_ms: now_ms,
+        last_state: "onboarded".to_string(),
+    });
+    table.creator_entry = Some(creator_entry);
+    table.bridge_entries = bridge_entries.clone();
+    table.active_tunnels.retain(|tunnel| {
+        tunnel.bootstrap_session_id.as_deref() != Some(relay.bootstrap_session_id.as_str())
+    });
+    for entry in &bridge_entries {
+        table.active_tunnels.push(TunnelState {
+            peer_id: entry.bridge_id.clone(),
+            peer_role: TunnelPeerRole::ExitBridge,
+            established_at_ms: now_ms,
+            last_seen_ms: now_ms,
+            bootstrap_session_id: Some(relay.bootstrap_session_id.clone()),
+        });
+        emit_join_path_event(
+            "new_creator_bridge_entry_active",
+            chain_id,
+            &request.new_creator_id,
+            &request.host_creator_entry.node_id,
+            Some(&entry.bridge_id),
+            Some(&relay.bootstrap_session_id),
+        );
+    }
+    table.last_update_ms = now_ms;
+    table.last_error = None;
+    emit_join_path_event(
+        "new_creator_local_dht_updated",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    emit_join_path_event(
+        "publisher_remaining_bridges_triggered",
+        chain_id,
+        &request.new_creator_id,
+        &request.host_creator_entry.node_id,
+        Some(&seed_bridge_id),
+        Some(&relay.bootstrap_session_id),
+    );
+    store
+        .replace(table)
+        .map(|table| (table, relay.bootstrap_session_id))
+        .map_err(|error| (500, "local_dht_bootstrap_update_failed", error.to_string()))
+}
+
+fn mark_new_creator_failed(store: &LocalDhtStore, chain_id: &str, error: &str) {
+    mark_new_creator_failed_with_state(
+        store,
+        chain_id,
+        SelfOnboardingState::SeedTunnelFailed,
+        "failed",
+        error,
+    );
+}
+
+fn mark_new_creator_failed_with_state(
+    store: &LocalDhtStore,
+    chain_id: &str,
+    state: SelfOnboardingState,
+    last_state: &str,
+    error: &str,
+) {
+    let now_ms = now_ms();
+    let mut table = store.snapshot();
+    table.self_onboarding_state = state;
+    table.current_bootstrap_session = Some(BootstrapSession {
+        session_id: format!("{chain_id}-failed"),
+        chain_id: Some(chain_id.to_string()),
+        started_at_ms: now_ms,
+        last_event_ms: now_ms,
+        last_state: last_state.to_string(),
+    });
+    table.last_update_ms = now_ms;
+    table.last_error = Some(error.to_string());
+    let _ = store.replace(table);
+}
+
+fn new_creator_seed_state_allows_seed(state: SelfOnboardingState) -> bool {
+    matches!(
+        state,
+        SelfOnboardingState::None
+            | SelfOnboardingState::SeedTunnelFailed
+            | SelfOnboardingState::FanoutFailed
+    )
+}
+
+fn new_seed_matches(existing: &NewCreatorSeedState, request: &SeedNewCreatorRequest) -> bool {
+    existing.new_creator_actor_id == request.new_creator_id
+        && existing.host_creator_entry == request.host_creator_entry
+        && existing.start_bootstrap == request.start_bootstrap
+}
+
+fn existing_new_seed_chain_id(existing: &NewCreatorSeedState, proposed_chain_id: &str) -> String {
+    if existing.chain_id.is_empty() {
+        proposed_chain_id.to_string()
+    } else {
+        existing.chain_id.clone()
+    }
+}
+
+fn host_creator_entry_validation_error(error: ProtocolError) -> Vec<u8> {
+    match error {
+        ProtocolError::Expired { .. } => error_response(
+            409,
+            "host_creator_expired",
+            "HostCreator DHT entry has expired",
+        ),
+        _ => error_response(
+            409,
+            "host_creator_signature_invalid",
+            "HostCreator DHT entry is not signed by the configured Publisher trust root",
+        ),
+    }
+}
+
 fn emit_host_seed_event(
     event: &'static str,
     chain_id: &str,
@@ -1198,6 +2193,149 @@ fn emit_host_seed_warn_event(
         genesis = bootstrap_genesis,
         forced
     );
+}
+
+fn emit_new_seed_event(
+    event: &'static str,
+    chain_id: &str,
+    new_creator_id: &str,
+    host_creator_id: &str,
+    relay_bridge_id: Option<&str>,
+    bootstrap_session_id: Option<&str>,
+    forced: bool,
+) {
+    let _chain_span = metrics_otlp::chain_span("admin_seed_new_creator", chain_id).entered();
+    metrics_otlp::record_chain_id(chain_id);
+    tracing::info!(
+        event,
+        chain_id,
+        new_creator_id,
+        host_creator_id,
+        relay_bridge_id = relay_bridge_id.unwrap_or("unknown"),
+        bootstrap_session_id = bootstrap_session_id.unwrap_or("none"),
+        forced
+    );
+}
+
+fn emit_join_path_event(
+    event: &'static str,
+    chain_id: &str,
+    new_creator_id: &str,
+    host_creator_id: &str,
+    relay_bridge_id: Option<&str>,
+    bootstrap_session_id: Option<&str>,
+) {
+    let _chain_span = metrics_otlp::chain_span("creator_bootstrap_join", chain_id).entered();
+    metrics_otlp::record_chain_id(chain_id);
+    tracing::info!(
+        event,
+        chain_id,
+        new_creator_id,
+        host_creator_id,
+        relay_bridge_id = relay_bridge_id.unwrap_or("unknown"),
+        bootstrap_session_id = bootstrap_session_id.unwrap_or("none")
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedHttpUrl {
+    host: String,
+    port: u16,
+}
+
+fn post_json_raw<T>(
+    base_url: &str,
+    path: &str,
+    payload: &T,
+    timeout: Duration,
+) -> Result<Vec<u8>, String>
+where
+    T: Serialize,
+{
+    let endpoint = parse_http_url(base_url)?;
+    let address = resolve_http_url(&endpoint)?;
+    let body = serde_json::to_vec(payload)
+        .map_err(|error| format!("failed to serialize json request: {error}"))?;
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| format!("failed to connect to {}: {error}", base_url))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("failed to set read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("failed to set write timeout: {error}"))?;
+    let request_head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        endpoint.host,
+        endpoint.port,
+        body.len()
+    );
+    stream
+        .write_all(request_head.as_bytes())
+        .map_err(|error| format!("failed to write request headers: {error}"))?;
+    stream
+        .write_all(&body)
+        .map_err(|error| format!("failed to write request body: {error}"))?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|error| format!("failed to shutdown request write side: {error}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("failed to read response: {error}"))?;
+    Ok(response)
+}
+
+fn parse_http_url(base_url: &str) -> Result<ParsedHttpUrl, String> {
+    let trimmed = base_url.trim();
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("only plain http:// URLs are supported, got `{trimmed}`"))?;
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .ok_or_else(|| format!("invalid URL `{trimmed}`"))?;
+    let mut parts = authority.rsplitn(2, ':');
+    let port = parts
+        .next()
+        .ok_or_else(|| format!("URL `{trimmed}` is missing a port"))?
+        .parse::<u16>()
+        .map_err(|error| format!("invalid URL port in `{trimmed}`: {error}"))?;
+    let host = parts
+        .next()
+        .ok_or_else(|| format!("URL `{trimmed}` is missing a host"))?
+        .trim()
+        .to_string();
+    if host.is_empty() {
+        return Err(format!("URL `{trimmed}` has an empty host"));
+    }
+    Ok(ParsedHttpUrl { host, port })
+}
+
+fn resolve_http_url(endpoint: &ParsedHttpUrl) -> Result<SocketAddr, String> {
+    let mut addresses = (endpoint.host.as_str(), endpoint.port)
+        .to_socket_addrs()
+        .map_err(|error| format!("failed to resolve {}: {error}", endpoint.host))?;
+    addresses
+        .next()
+        .ok_or_else(|| format!("no socket addresses resolved for {}", endpoint.host))
+}
+
+fn parse_http_status_body(response: &[u8]) -> Result<(u16, &[u8]), String> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "response headers were not terminated".to_string())?;
+    let header = std::str::from_utf8(&response[..header_end])
+        .map_err(|error| format!("response headers were not utf-8: {error}"))?;
+    let status = header
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| "response status line was malformed".to_string())?
+        .parse::<u16>()
+        .map_err(|error| format!("response status code was invalid: {error}"))?;
+    Ok((status, &response[header_end + 4..]))
 }
 
 fn now_ms() -> u64 {
@@ -1404,6 +2542,7 @@ fn raw_response(status_code: u16, body: Vec<u8>) -> Vec<u8> {
     let status_text = match status_code {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         409 => "Conflict",
         502 => "Bad Gateway",

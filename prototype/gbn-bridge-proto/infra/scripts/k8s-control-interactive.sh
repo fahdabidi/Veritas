@@ -487,6 +487,7 @@ main() {
       "AdminMetrics" \
       "LiveMetrics" \
       "SeedHostCreator" \
+      "SeedNewCreator" \
       "SendDummy" \
       "TriggerCommand" \
       "CheckImages" \
@@ -505,6 +506,7 @@ main() {
         AdminMetrics) do_admin_metrics ;;
         LiveMetrics) do_live_metrics ;;
         SeedHostCreator) do_seed_host_creator ;;
+        SeedNewCreator) do_seed_new_creator ;;
         SendDummy) do_send_dummy ;;
         TriggerCommand) do_trigger_command ;;
         CheckImages) do_check_images ;;

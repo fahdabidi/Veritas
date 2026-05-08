@@ -62,21 +62,23 @@ pub fn register_bridge(
         observed_ingress: None,
     };
 
-    storage.bridges.insert(
-        bridge_id.clone(),
-        BridgeRecord {
-            bridge_id,
-            identity_pub: request.identity_pub,
-            ingress_endpoints: request.ingress_endpoints,
-            assigned_udp_punch_port,
-            reachability_class,
-            capabilities: request.capabilities,
-            current_lease: lease.clone(),
-            last_heartbeat: heartbeat,
-            revoked_reason: None,
-            revoked_at_ms: None,
-        },
-    );
+    let record = BridgeRecord {
+        bridge_id,
+        identity_pub: request.identity_pub,
+        ingress_endpoints: request.ingress_endpoints,
+        assigned_udp_punch_port,
+        reachability_class,
+        capabilities: request.capabilities,
+        current_lease: lease.clone(),
+        last_heartbeat: heartbeat,
+        revoked_reason: None,
+        revoked_at_ms: None,
+    };
+    let dht_entry = crate::bootstrap::bridge_dht_entry(&record, signing_key, config, now_ms, true)?;
+    storage
+        .publisher_bridge_dht_entries
+        .insert(record.bridge_id.clone(), dht_entry);
+    storage.bridges.insert(record.bridge_id.clone(), record);
 
     Ok(lease)
 }
@@ -87,49 +89,62 @@ pub fn renew_lease_from_heartbeat(
     config: &AuthorityConfig,
     heartbeat: BridgeHeartbeat,
 ) -> AuthorityResult<BridgeLease> {
-    let record = storage
-        .bridges
-        .get_mut(&heartbeat.bridge_id)
-        .ok_or_else(|| AuthorityError::BridgeNotFound {
-            bridge_id: heartbeat.bridge_id.clone(),
-        })?;
+    let (bridge_id, renewed, dht_entry) = {
+        let record = storage
+            .bridges
+            .get_mut(&heartbeat.bridge_id)
+            .ok_or_else(|| AuthorityError::BridgeNotFound {
+                bridge_id: heartbeat.bridge_id.clone(),
+            })?;
 
-    if record.revoked_reason.is_some() {
-        return Err(AuthorityError::BridgeRevoked {
-            bridge_id: heartbeat.bridge_id,
-        });
-    }
+        if record.revoked_reason.is_some() {
+            return Err(AuthorityError::BridgeRevoked {
+                bridge_id: heartbeat.bridge_id,
+            });
+        }
 
-    if heartbeat.lease_id != record.current_lease.lease_id {
-        return Err(AuthorityError::LeaseMismatch {
-            bridge_id: heartbeat.bridge_id,
-            expected: record.current_lease.lease_id.clone(),
-            actual: heartbeat.lease_id,
-        });
-    }
+        if heartbeat.lease_id != record.current_lease.lease_id {
+            return Err(AuthorityError::LeaseMismatch {
+                bridge_id: heartbeat.bridge_id,
+                expected: record.current_lease.lease_id.clone(),
+                actual: heartbeat.lease_id,
+            });
+        }
 
-    if heartbeat.heartbeat_at_ms > record.current_lease.lease_expiry_ms {
-        return Err(AuthorityError::LeaseExpired {
-            bridge_id: record.bridge_id.clone(),
+        if heartbeat.heartbeat_at_ms > record.current_lease.lease_expiry_ms {
+            return Err(AuthorityError::LeaseExpired {
+                bridge_id: record.bridge_id.clone(),
+                lease_id: record.current_lease.lease_id.clone(),
+                lease_expiry_ms: record.current_lease.lease_expiry_ms,
+                heartbeat_at_ms: heartbeat.heartbeat_at_ms,
+            });
+        }
+
+        record.last_heartbeat = heartbeat.clone();
+        let lease_unsigned = BridgeLeaseUnsigned {
             lease_id: record.current_lease.lease_id.clone(),
-            lease_expiry_ms: record.current_lease.lease_expiry_ms,
-            heartbeat_at_ms: heartbeat.heartbeat_at_ms,
-        });
-    }
-
-    record.last_heartbeat = heartbeat.clone();
-    let lease_unsigned = BridgeLeaseUnsigned {
-        lease_id: record.current_lease.lease_id.clone(),
-        bridge_id: record.bridge_id.clone(),
-        udp_punch_port: record.assigned_udp_punch_port,
-        reachability_class: record.reachability_class.clone(),
-        lease_expiry_ms: heartbeat.heartbeat_at_ms + config.lease_ttl_ms,
-        issued_at_ms: heartbeat.heartbeat_at_ms,
-        heartbeat_interval_ms: config.heartbeat_interval_ms,
-        capabilities: record.capabilities.clone(),
+            bridge_id: record.bridge_id.clone(),
+            udp_punch_port: record.assigned_udp_punch_port,
+            reachability_class: record.reachability_class.clone(),
+            lease_expiry_ms: heartbeat.heartbeat_at_ms + config.lease_ttl_ms,
+            issued_at_ms: heartbeat.heartbeat_at_ms,
+            heartbeat_interval_ms: config.heartbeat_interval_ms,
+            capabilities: record.capabilities.clone(),
+        };
+        let renewed = BridgeLease::sign(lease_unsigned, signing_key)?;
+        record.current_lease = renewed.clone();
+        let dht_entry = crate::bootstrap::bridge_dht_entry(
+            record,
+            signing_key,
+            config,
+            heartbeat.heartbeat_at_ms,
+            true,
+        )?;
+        (record.bridge_id.clone(), renewed, dht_entry)
     };
-    let renewed = BridgeLease::sign(lease_unsigned, signing_key)?;
-    record.current_lease = renewed.clone();
+    storage
+        .publisher_bridge_dht_entries
+        .insert(bridge_id, dht_entry);
 
     Ok(renewed)
 }
@@ -143,42 +158,49 @@ pub fn reclassify_bridge(
     udp_punch_port: Option<u16>,
     now_ms: u64,
 ) -> AuthorityResult<BridgeLease> {
-    let record =
-        storage
-            .bridges
-            .get_mut(bridge_id)
-            .ok_or_else(|| AuthorityError::BridgeNotFound {
-                bridge_id: bridge_id.to_string(),
+    let (bridge_id, lease, dht_entry) =
+        {
+            let record = storage.bridges.get_mut(bridge_id).ok_or_else(|| {
+                AuthorityError::BridgeNotFound {
+                    bridge_id: bridge_id.to_string(),
+                }
             })?;
 
-    if record.revoked_reason.is_some() {
-        return Err(AuthorityError::BridgeRevoked {
-            bridge_id: bridge_id.to_string(),
-        });
-    }
+            if record.revoked_reason.is_some() {
+                return Err(AuthorityError::BridgeRevoked {
+                    bridge_id: bridge_id.to_string(),
+                });
+            }
 
-    let assigned_udp_punch_port = udp_punch_port.unwrap_or(record.assigned_udp_punch_port);
-    if assigned_udp_punch_port == 0 {
-        return Err(AuthorityError::InvalidBridgeRegistration {
-            reason: "bridge udp punch port must be non-zero",
-        });
-    }
+            let assigned_udp_punch_port = udp_punch_port.unwrap_or(record.assigned_udp_punch_port);
+            if assigned_udp_punch_port == 0 {
+                return Err(AuthorityError::InvalidBridgeRegistration {
+                    reason: "bridge udp punch port must be non-zero",
+                });
+            }
 
-    record.assigned_udp_punch_port = assigned_udp_punch_port;
-    record.reachability_class = reachability_class.clone();
-    let lease_unsigned = BridgeLeaseUnsigned {
-        lease_id: record.current_lease.lease_id.clone(),
-        bridge_id: record.bridge_id.clone(),
-        udp_punch_port: assigned_udp_punch_port,
-        reachability_class,
-        lease_expiry_ms: now_ms + config.lease_ttl_ms,
-        issued_at_ms: now_ms,
-        heartbeat_interval_ms: config.heartbeat_interval_ms,
-        capabilities: record.capabilities.clone(),
-    };
-    let lease = BridgeLease::sign(lease_unsigned, signing_key)?;
-    record.current_lease = lease.clone();
-    record.last_heartbeat.heartbeat_at_ms = now_ms;
+            record.assigned_udp_punch_port = assigned_udp_punch_port;
+            record.reachability_class = reachability_class.clone();
+            let lease_unsigned = BridgeLeaseUnsigned {
+                lease_id: record.current_lease.lease_id.clone(),
+                bridge_id: record.bridge_id.clone(),
+                udp_punch_port: assigned_udp_punch_port,
+                reachability_class,
+                lease_expiry_ms: now_ms + config.lease_ttl_ms,
+                issued_at_ms: now_ms,
+                heartbeat_interval_ms: config.heartbeat_interval_ms,
+                capabilities: record.capabilities.clone(),
+            };
+            let lease = BridgeLease::sign(lease_unsigned, signing_key)?;
+            record.current_lease = lease.clone();
+            record.last_heartbeat.heartbeat_at_ms = now_ms;
+            let dht_entry =
+                crate::bootstrap::bridge_dht_entry(record, signing_key, config, now_ms, true)?;
+            (record.bridge_id.clone(), lease, dht_entry)
+        };
+    storage
+        .publisher_bridge_dht_entries
+        .insert(bridge_id, dht_entry);
 
     Ok(lease)
 }
@@ -209,6 +231,7 @@ pub fn revoke_bridge(
         },
         signing_key,
     )?;
+    storage.publisher_bridge_dht_entries.remove(bridge_id);
 
     Ok(revoke)
 }

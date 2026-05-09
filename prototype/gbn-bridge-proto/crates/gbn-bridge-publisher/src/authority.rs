@@ -1,7 +1,7 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
     publisher_identity, BootstrapJoinReply, BootstrapProgress, BootstrapProgressStage, BridgeAck,
-    BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCommandAck,
+    BridgeAckStatus, BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCommandAck,
     BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeDhtEntry, BridgeHeartbeat,
     BridgeLease, BridgeOpen, BridgeRegister, BridgeRevoke, CreatorDhtEntry,
     CreatorDhtEntryUnsigned, CreatorJoinRequest, PublicKeyBytes, ReachabilityClass,
@@ -24,6 +24,21 @@ use crate::storage::{
     InMemoryAuthorityStorage, IngestedFrameRecord, UploadSessionRecord,
 };
 use crate::{AuthorityConfig, AuthorityError, AuthorityPolicy, AuthorityResult};
+
+const UPLOAD_PERSISTENCE_MODE_ENV: &str = "GBN_BRIDGE_UPLOAD_PERSISTENCE_MODE";
+const HEARTBEAT_PERSISTENCE_MODE_ENV: &str = "GBN_BRIDGE_HEARTBEAT_PERSISTENCE_MODE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadPersistenceMode {
+    Eager,
+    CompleteOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatPersistenceMode {
+    Eager,
+    Deferred,
+}
 
 #[derive(Debug)]
 pub struct PublisherAuthority {
@@ -381,7 +396,9 @@ impl PublisherAuthority {
         );
         if result.is_ok() {
             self.metrics.record_heartbeat();
-            self.persist_state()?;
+            if heartbeat_persistence_mode() == HeartbeatPersistenceMode::Eager {
+                self.persist_state()?;
+            }
         }
         result
     }
@@ -579,7 +596,7 @@ impl PublisherAuthority {
         open: BridgeOpen,
     ) -> AuthorityResult<()> {
         let result = ingest::open_session_with_chain_id(&mut self.storage, chain_id, open);
-        if result.is_ok() {
+        if result.is_ok() && upload_persistence_mode() == UploadPersistenceMode::Eager {
             self.persist_state()?;
         }
         result
@@ -608,7 +625,11 @@ impl PublisherAuthority {
             frame,
             received_at_ms,
         )?;
-        self.persist_state()?;
+        if upload_persistence_mode() == UploadPersistenceMode::Eager
+            || matches!(ack.status, BridgeAckStatus::Complete)
+        {
+            self.persist_state()?;
+        }
         Ok(ack)
     }
 
@@ -622,7 +643,7 @@ impl PublisherAuthority {
         close: BridgeClose,
     ) -> AuthorityResult<()> {
         let result = ingest::close_session_with_chain_id(&mut self.storage, chain_id, close);
-        if result.is_ok() {
+        if result.is_ok() && upload_persistence_mode() == UploadPersistenceMode::Eager {
             self.persist_state()?;
         }
         result
@@ -1044,5 +1065,28 @@ impl PublisherAuthority {
             storage.persist_state(&self.storage)?;
         }
         Ok(())
+    }
+}
+
+fn upload_persistence_mode() -> UploadPersistenceMode {
+    match std::env::var(UPLOAD_PERSISTENCE_MODE_ENV)
+        .unwrap_or_else(|_| "eager".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "complete_only" | "complete-only" | "completion" => UploadPersistenceMode::CompleteOnly,
+        _ => UploadPersistenceMode::Eager,
+    }
+}
+
+fn heartbeat_persistence_mode() -> HeartbeatPersistenceMode {
+    match std::env::var(HEARTBEAT_PERSISTENCE_MODE_ENV)
+        .unwrap_or_else(|_| "eager".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "deferred" | "memory" | "in-memory" => HeartbeatPersistenceMode::Deferred,
+        _ => HeartbeatPersistenceMode::Eager,
     }
 }

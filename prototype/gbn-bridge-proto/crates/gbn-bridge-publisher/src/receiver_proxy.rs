@@ -20,6 +20,9 @@ pub struct ReceiverProxyConfig {
     pub bind_addr: String,
     pub authority_url: String,
     pub request_max_bytes: usize,
+    pub upstream_connect_timeout_ms: u64,
+    pub upstream_read_timeout_ms: u64,
+    pub upstream_write_timeout_ms: u64,
 }
 
 impl Default for ReceiverProxyConfig {
@@ -28,6 +31,9 @@ impl Default for ReceiverProxyConfig {
             bind_addr: DEFAULT_BIND_ADDR.to_string(),
             authority_url: DEFAULT_AUTHORITY_URL.to_string(),
             request_max_bytes: DEFAULT_REQUEST_MAX_BYTES,
+            upstream_connect_timeout_ms: 5_000,
+            upstream_read_timeout_ms: 5_000,
+            upstream_write_timeout_ms: 5_000,
         }
     }
 }
@@ -44,6 +50,9 @@ impl ReceiverProxyConfig {
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(DEFAULT_REQUEST_MAX_BYTES),
+            upstream_connect_timeout_ms: parse_timeout_env("GBN_BRIDGE_HTTP_CONNECT_TIMEOUT_MS"),
+            upstream_read_timeout_ms: parse_timeout_env("GBN_BRIDGE_HTTP_READ_TIMEOUT_MS"),
+            upstream_write_timeout_ms: parse_timeout_env("GBN_BRIDGE_HTTP_WRITE_TIMEOUT_MS"),
         })
     }
 
@@ -192,6 +201,11 @@ fn handle_connection(
         return Ok(());
     }
 
+    if let Some(response) = local_probe_response(&request) {
+        stream.write_all(&response)?;
+        return Ok(());
+    }
+
     if !allowed_path(&request.path) {
         stream.write_all(&json_response(404, "not_found", "receiver route not found"))?;
         return Ok(());
@@ -273,12 +287,29 @@ fn allowed_path(path: &str) -> bool {
     )
 }
 
+fn local_probe_response(request: &HttpRequest) -> Option<Vec<u8>> {
+    if request.method == "GET" && matches!(request.path.as_str(), "/healthz" | "/readyz") {
+        return Some(text_response(
+            200,
+            "OK",
+            "text/plain; charset=utf-8",
+            "ok\n",
+        ));
+    }
+    None
+}
+
 fn forward_request(config: &ReceiverProxyConfig, request: &HttpRequest) -> io::Result<Vec<u8>> {
     let endpoint = parse_base_url(&config.authority_url)?;
     let address = resolve_endpoint(&endpoint)?;
-    let mut upstream = TcpStream::connect_timeout(&address, Duration::from_secs(5))?;
-    upstream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    upstream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut upstream = TcpStream::connect_timeout(
+        &address,
+        Duration::from_millis(config.upstream_connect_timeout_ms),
+    )?;
+    upstream.set_read_timeout(Some(Duration::from_millis(config.upstream_read_timeout_ms)))?;
+    upstream.set_write_timeout(Some(Duration::from_millis(
+        config.upstream_write_timeout_ms,
+    )))?;
 
     let request_bytes = match request.method.as_str() {
         "GET" => format!(
@@ -430,6 +461,13 @@ fn resolve_endpoint(endpoint: &ParsedEndpoint) -> io::Result<SocketAddr> {
     })
 }
 
+fn parse_timeout_env(key: &str) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5_000)
+}
+
 fn extract_chain_id(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     value
@@ -454,6 +492,35 @@ fn response_status(response: &[u8]) -> Option<u16> {
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_and_ready_are_local_probe_responses() {
+        for path in ["/healthz", "/readyz"] {
+            let request = HttpRequest {
+                method: "GET".to_string(),
+                path: path.to_string(),
+                body: Vec::new(),
+            };
+            let response = local_probe_response(&request).expect("probe response should be local");
+            assert_eq!(response_status(&response), Some(200));
+            assert!(String::from_utf8_lossy(&response).ends_with("\r\n\r\nok\n"));
+        }
+    }
+
+    #[test]
+    fn non_probe_paths_are_not_local_probe_responses() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            path: "/v1/receiver/frame".to_string(),
+            body: Vec::new(),
+        };
+        assert!(local_probe_response(&request).is_none());
+    }
 }
 
 fn json_response(status_code: u16, code: &str, message: &str) -> Vec<u8> {

@@ -63,6 +63,7 @@ spec:
                 - curl -fsS http://127.0.0.1:9090/v1/admin/node-metadata >/dev/null
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 18
           livenessProbe:
             exec:
@@ -72,6 +73,8 @@ spec:
                 - curl -fsS http://127.0.0.1:9090/v1/admin/node-metadata >/dev/null
             initialDelaySeconds: 20
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
           resources:
             requests:
               cpu: 75m

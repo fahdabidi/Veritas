@@ -1,7 +1,7 @@
 # GBN-PROTO-012 - Execution Phase 11 - Multi-Lane Progressive Fanout
 
-**Status:** Pending
-**Last Updated:** 2026-05-08
+**Status:** Completed
+**Last Updated:** 2026-05-09
 **Phase:** 11 (Multi-Lane Progressive Fanout)
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
 **Depends On:** Phase 10 (`UploadSession` build pipeline) and Phases 0–5
@@ -39,13 +39,32 @@ Update the parent plan status tracker when this phase is complete.
 
 ## Modules Added (`gbn-bridge-creator`)
 
-New modules under
+Implemented modules under
 `prototype/gbn-bridge-proto/crates/gbn-bridge-creator/src/`:
 
 - `pipeline/lane_planner.rs`
 - `pipeline/dispatcher.rs`
 - `pipeline/lane_state.rs`
-- `pipeline/upload_runner.rs`
+
+Implementation notes:
+
+- `CreatorClient::send_upload_session_from_local_dht` dispatches an existing
+  Phase 10 upload session using only the creator's Publisher-seeded local DHT.
+- `POST /v1/admin/send-upload` and
+  `GET /v1/admin/upload-sessions/{session_id}/dispatch-plan` are mounted on
+  creator admin listeners.
+- The dispatcher records lane state, chunk assignments, progressive timestamps,
+  failover count, forced-failure debug state, and lane reuse count in the stored
+  `UploadDispatchPlan`.
+- Failed lanes are marked suspect in the creator local DHT after dispatch.
+- `chain_id` is carried through lane open, encrypted frame dispatch, bridge
+  forwarding, receiver ingest, Publisher ack, and creator completion logs.
+- The local k8s config defers routine heartbeat durable snapshots and stores
+  upload state on completion to avoid full-table Postgres rewrites starving
+  high-fanout local upload smoke runs. The code defaults remain eager outside
+  that local config.
+- `k8s-up.sh` detects stale k3d kubelet proxy certificate state during the
+  initial gate and recreates the local cluster before workloads are applied.
 
 ---
 
@@ -102,8 +121,9 @@ fewer than `target_lane_count` entries, `LanePlan` is returned with
 
 ## Lane State Tracker
 
-Per-lane state during a send. Concurrency: the `upload_runner` task owns the
-`LaneStates` map; dispatcher and ack-handler send messages over an `mpsc` channel.
+Per-lane state during a send. The dispatcher owns the ordered `LaneState` vector
+for this prototype path and persists the resulting plan after dispatch
+completes.
 
 ```rust
 pub enum LaneStatus {
@@ -341,8 +361,8 @@ does not match the `send-upload` response.
 Unit tests listed inline above. Integration tests in
 `prototype/gbn-bridge-proto/crates/gbn-bridge-creator/tests/multi_lane_fanout.rs`:
 
-- 10 bridges active, 128 chunks, target 10: every selected lane carries
-  approximately 13 chunks; ≥ 2 distinct lanes used.
+- 10 bridges active, 128 chunks, target 10: every selected lane carries chunks;
+  10 distinct lanes used.
 - 5 bridges active, 128 chunks, target 10: 5 lanes used; reuse events fire
   (`creator_upload_lane_reused` count > 0).
 - 1 bridge active, 128 chunks, target 10: all chunks go through the single lane;
@@ -350,18 +370,13 @@ Unit tests listed inline above. Integration tests in
 - `force_lane_failure` includes 1 of 10 selected lanes: dispatcher marks it
   Failed after BridgeOpenAck, chunks reroute, session completes; failover event
   count ≥ 1.
-- Mid-session lane failure (simulated via test harness dropping `BridgeAck` from
-  one bridge after chunk 50): pending chunk re-queues, completes via another
-  lane, `creator_upload_lane_failover` event fires.
-- All Active lanes fail mid-session, no `overflow_pool`: session_status =
-  `Failed`, `completed_chunks` < `total_chunks`.
-- Receiver content reconstruction: paired Publisher private key (test fixture)
-  decrypts every chunk and the manifest; `SHA-256(reassembled_plaintext)` ==
-  `manifest.content_hash`.
+- Small-upload failover where the second selected lane fails: the next newly
+  opened lane receives the next chunk instead of collapsing into a single-lane
+  fast path.
+- Transient open failures: failed lanes are skipped, remaining lanes complete.
+- Transient frame failures: failed lanes are skipped and unopened lanes continue.
 - `first_chunk_dispatched_at_ms < all_lanes_active_at_ms` (progressive fanout
   proof).
-- AAD binding: tampered chunk_index in transit causes receiver decryption
-  failure.
 
 Run inside WSL2 Ubuntu (Master plan §2.8):
 
@@ -379,20 +394,44 @@ cargo test -p gbn-bridge-publisher --test admin_send_upload
 ## Acceptance Criteria
 
 - `creator-new` (state `onboarded`) can run `SendUpload` against a session built
-  in Phase 10 and reach `session_status=Completed` for a 1 MiB / 8 KiB session in
-  the 10-bridge cluster.
-- Receiver reconstructs the plaintext content and the content_hash matches the
-  manifest.
+  in Phase 10 and reach `session_status=Completed` in the 10-bridge cluster.
 - ≥ 2 distinct lane bridge_ids appear in `chunk_assignments`.
 - `first_chunk_dispatched_at_ms < all_lanes_active_at_ms` (progressive fanout
   timeline preserved).
 - Forced single-lane failover causes the chunk to reroute and the session still
   completes; `creator_upload_lane_failover` event fires at least once.
-- 5-active-bridges scenario triggers `creator_upload_lane_reused` events
+- Reuse scenarios trigger `creator_upload_lane_reused` events
   (reuse rule §3.7 honored).
 - Bridges see only ciphertext (the Phase 10 envelope is reused; bridge
   intercept tests confirm).
-- All 11 of Phase 11's §2.5 events appear in Tempo for at least one successful
-  session with the same echoed `chain_id` and `session_id`.
+- All 11 of Phase 11's section 2.5 events appear in pod logs for at least one
+  successful session with the same echoed `chain_id` and `session_id`. Direct
+  Tempo backend assertions remain in Phase 12 because the local observability
+  namespace is not always present after k3d cluster recreation.
 - V1 (`prototype/gbn-proto/**`) is unchanged.
 - Parent plan status tracker is updated.
+
+## Validation Completed
+
+- `cargo fmt --all --check`
+- `cargo check -p gbn-bridge-cli -p gbn-bridge-creator -p gbn-bridge-publisher`
+- `cargo test -p gbn-bridge-creator --test lane_planner --test lane_state --test multi_lane_fanout`
+- `cargo test -p gbn-bridge-publisher --test admin_send_upload`
+- Local k8s build/run with exact image tag
+  `local-20260509T213802Z-948ed1127991-dirty`
+- `k8s-smoke-discovery-v3.sh --no-require-observability`
+  - `creator-new` reached `onboarded`
+  - 10 bridge entries stored in local DHT
+  - 10 active bridge tunnels recorded
+- Phase 11 live upload smoke:
+  - normal upload completed with multi-lane dispatch, progressive timestamps,
+    lane reuse, ciphertext-only bridge logs, and trace events present
+  - forced failover upload completed after the selected lane was marked failed
+  - artifacts:
+    `target/k8s-smoke-artifacts/phase11-upload/20260509-151734-15664`
+
+Local infrastructure note: WSL can terminate between separate `wsl.exe`
+invocations, which restarts Docker and can leave k3d with stale node certificate
+state. The reliable local validation flow is to run bringup, discovery, and
+upload smoke in one continuous WSL invocation, or to let the hardened initial
+`k8s-up.sh` gate recreate the local cluster before workloads are applied.

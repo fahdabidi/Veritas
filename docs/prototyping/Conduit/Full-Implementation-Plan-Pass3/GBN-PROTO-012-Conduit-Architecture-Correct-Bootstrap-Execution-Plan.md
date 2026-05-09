@@ -70,7 +70,7 @@ Pass 3 replaces the synthetic shortcut with the documented flow:
 | 8 | Smoke 2 — Discovery / Bootup Suite Implementation | `[x]` |
 | 9 | Smoke 3 — Route And Encryption Boundary Suite Implementation | `[x]` |
 | 10 | Upload Session Build And Per-Chunk Encryption Pipeline (§3.4 + §3.5) | `[x]` |
-| 11 | Multi-Lane Progressive Fanout (§3.6 + §3.7) | `[ ]` |
+| 11 | Multi-Lane Progressive Fanout (§3.6 + §3.7) | `[x]` |
 | 12 | Smoke 4 — Full Upload Pipeline Suite Implementation | `[ ]` |
 
 Each phase must update this status tracker when completed.
@@ -484,6 +484,12 @@ progressive fanout: chunks dispatched across multiple active bridges, lanes star
 as bridges become reachable, lane reuse when fewer than 10 lanes active before
 timeout, lane failover on mid-session bridge loss. New admin endpoint
 `POST /v1/admin/send-upload`.
+
+Status: completed 2026-05-09. The local k8s validation completed normal
+multi-lane upload and forced-failover upload against an onboarded creator using
+the exact image tag `local-20260509T213802Z-948ed1127991-dirty`. Direct Tempo
+backend assertions remain in Phase 12 because the observability namespace can be
+absent after local k3d cluster recreation.
 
 ### Phase 12 - Smoke 4 - Full Upload Pipeline Suite Implementation
 

@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -139,6 +139,34 @@ fn handle_connection(
 }
 
 fn route_request(service: &Arc<Mutex<AuthorityService>>, request: HttpRequest) -> Vec<u8> {
+    if request.method == "GET" && request.path == "/healthz" {
+        return match service.try_lock() {
+            Ok(service) => match service.healthz() {
+                Ok(response) => ok_json_response(&response),
+                Err(error) => error_json_response(&service, "system-healthz", "healthz", error),
+            },
+            Err(TryLockError::WouldBlock) => health_probe_busy_response(),
+            Err(TryLockError::Poisoned(_)) => raw_http_response(
+                500,
+                br#"{"status":"error","code":"service_mutex_poisoned"}"#.to_vec(),
+            ),
+        };
+    }
+
+    if request.method == "GET" && request.path == "/readyz" {
+        return match service.try_lock() {
+            Ok(mut service) => match service.readyz() {
+                Ok(response) => ok_json_response(&response),
+                Err(error) => error_json_response(&service, "system-readyz", "readyz", error),
+            },
+            Err(TryLockError::WouldBlock) => readiness_probe_busy_response(),
+            Err(TryLockError::Poisoned(_)) => raw_http_response(
+                500,
+                br#"{"status":"error","code":"service_mutex_poisoned"}"#.to_vec(),
+            ),
+        };
+    }
+
     let mut service = service.lock().expect("authority service mutex poisoned");
 
     let route_result = match (request.method.as_str(), request.path.as_str()) {
@@ -147,14 +175,6 @@ fn route_request(service: &Arc<Mutex<AuthorityService>>, request: HttpRequest) -
             let body = authority_metrics_text(&snapshot, "authority", &stack_from_env());
             raw_http_response_with_content_type(200, PROMETHEUS_CONTENT_TYPE, body.into_bytes())
         }
-        ("GET", "/healthz") => match service.healthz() {
-            Ok(response) => ok_json_response(&response),
-            Err(error) => error_json_response(&service, "system-healthz", "healthz", error),
-        },
-        ("GET", "/readyz") => match service.readyz() {
-            Ok(response) => ok_json_response(&response),
-            Err(error) => error_json_response(&service, "system-readyz", "readyz", error),
-        },
         ("POST", path) if path == AuthorityRoute::BridgeRegister.path() => {
             match deserialize_and_handle::<BridgeRegisterBody, _, _>(&request.body, |payload| {
                 service.handle_bridge_register(payload)
@@ -166,9 +186,11 @@ fn route_request(service: &Arc<Mutex<AuthorityService>>, request: HttpRequest) -
             }
         }
         ("POST", path) if path == AuthorityRoute::BridgeHeartbeat.path() => {
-            match deserialize_and_handle::<BridgeHeartbeatBody, _, _>(&request.body, |payload| {
-                service.handle_bridge_heartbeat(payload)
-            }) {
+            match deserialize_and_handle_with_trace::<BridgeHeartbeatBody, _, _>(
+                &request.body,
+                heartbeat_trace_operation(),
+                |payload| service.handle_bridge_heartbeat(payload),
+            ) {
                 Ok(response) => ok_json_response(&response),
                 Err((chain_id, request_id, error)) => {
                     error_json_response(&service, &chain_id, &request_id, error)
@@ -263,14 +285,28 @@ where
     F: FnOnce(AuthorityApiRequest<T>) -> Result<R, ServiceError>,
     T: for<'de> serde::Deserialize<'de>,
 {
+    deserialize_and_handle_with_trace(body, Some("authority_http_request"), handler)
+}
+
+fn deserialize_and_handle_with_trace<T, R, F>(
+    body: &[u8],
+    trace_operation: Option<&'static str>,
+    handler: F,
+) -> Result<R, (String, String, ServiceError)>
+where
+    F: FnOnce(AuthorityApiRequest<T>) -> Result<R, ServiceError>,
+    T: for<'de> serde::Deserialize<'de>,
+{
     let parsed: Result<AuthorityApiRequest<T>, _> = serde_json::from_slice(body);
     match parsed {
         Ok(request) => {
             let chain_id = request.chain_id.clone();
             let request_id = request.request_id.clone();
-            let _chain_span =
-                metrics_otlp::chain_span("authority_http_request", &chain_id).entered();
-            metrics_otlp::record_chain_id(&chain_id);
+            let _chain_span = trace_operation
+                .map(|operation| metrics_otlp::chain_span(operation, &chain_id).entered());
+            if trace_operation.is_some() {
+                metrics_otlp::record_chain_id(&chain_id);
+            }
             handler(request).map_err(|error| (chain_id, request_id, error))
         }
         Err(error) => Err((
@@ -279,6 +315,21 @@ where
             ServiceError::BadRequest(format!("invalid request json: {error}")),
         )),
     }
+}
+
+fn heartbeat_trace_operation() -> Option<&'static str> {
+    matches_env_true("GBN_BRIDGE_TRACE_HEARTBEATS").then_some("authority_heartbeat")
+}
+
+fn matches_env_true(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn ok_json_response<T>(response: &T) -> Vec<u8>
@@ -324,6 +375,20 @@ where
     raw_http_response(status_code, body)
 }
 
+fn health_probe_busy_response() -> Vec<u8> {
+    raw_http_response(
+        200,
+        br#"{"status":"ok","degraded":"authority_service_busy"}"#.to_vec(),
+    )
+}
+
+fn readiness_probe_busy_response() -> Vec<u8> {
+    raw_http_response(
+        200,
+        br#"{"status":"ready","degraded":"authority_service_busy"}"#.to_vec(),
+    )
+}
+
 fn raw_http_response(status_code: u16, body: Vec<u8>) -> Vec<u8> {
     raw_http_response_with_content_type(status_code, "application/json", body)
 }
@@ -341,6 +406,7 @@ fn raw_http_response_with_content_type(
         404 => "Not Found",
         409 => "Conflict",
         410 => "Gone",
+        503 => "Service Unavailable",
         500 => "Internal Server Error",
         _ => "OK",
     };
@@ -443,4 +509,64 @@ fn read_http_request(stream: &mut TcpStream, request_max_bytes: usize) -> io::Re
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ed25519_dalek::SigningKey;
+
+    use crate::{PublisherAuthority, PublisherServiceConfig};
+
+    fn authority_service() -> Arc<Mutex<AuthorityService>> {
+        let authority = PublisherAuthority::new(SigningKey::from_bytes(&[77_u8; 32]));
+        Arc::new(Mutex::new(AuthorityService::new(
+            authority,
+            &PublisherServiceConfig::default(),
+        )))
+    }
+
+    fn request(method: &str, path: &str) -> HttpRequest {
+        HttpRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            body: Vec::new(),
+        }
+    }
+
+    fn response_status(response: &[u8]) -> u16 {
+        std::str::from_utf8(response)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn healthz_returns_ok_while_authority_service_is_busy() {
+        let service = authority_service();
+        let _guard = service.lock().unwrap();
+
+        let response = route_request(&service, request("GET", "/healthz"));
+
+        assert_eq!(response_status(&response), 200);
+        assert!(String::from_utf8_lossy(&response).contains("authority_service_busy"));
+    }
+
+    #[test]
+    fn readyz_returns_degraded_ready_while_authority_service_is_busy() {
+        let service = authority_service();
+        let _guard = service.lock().unwrap();
+
+        let response = route_request(&service, request("GET", "/readyz"));
+
+        assert_eq!(response_status(&response), 200);
+        assert!(String::from_utf8_lossy(&response).contains("authority_service_busy"));
+    }
 }

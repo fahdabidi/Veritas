@@ -17,10 +17,13 @@ pub use local_dht::{
 };
 pub use pipeline::{
     build_upload_session, build_upload_session_to_disk, chunk, delete_upload_session,
-    get_upload_session, list_upload_sessions, sanitize, BuildUploadSessionOptions,
-    BuildUploadSessionResult, Chunk, ChunkedContent, EncryptedUploadSession, SanitizationReport,
-    SanitizedBytes, SanitizerFormatHint, SessionBuildError, UploadManifest, UploadSessionStatus,
-    UploadSessionSummary, MANIFEST_CHUNK_INDEX,
+    dispatch_upload_session, get_upload_dispatch_plan, get_upload_session, list_upload_sessions,
+    load_upload_session, plan_lanes, sanitize, save_upload_session, BuildUploadSessionOptions,
+    BuildUploadSessionResult, Chunk, ChunkAssignment, ChunkedContent, DispatchUploadOptions,
+    EncryptedUploadSession, LanePlan, LanePlanError, LaneState, LaneStatus, SanitizationReport,
+    SanitizedBytes, SanitizerFormatHint, SendUploadSessionResult, SessionBuildError,
+    UploadDispatchPlan, UploadManifest, UploadSessionStatus, UploadSessionSummary,
+    MANIFEST_CHUNK_INDEX,
 };
 pub use session::CreatorSession;
-pub use upload::{CreatorBridgeRequest, CreatorBridgeResponse};
+pub use upload::{CreatorBridgeFrameFragment, CreatorBridgeRequest, CreatorBridgeResponse};

@@ -650,6 +650,9 @@ impl AuthorityService {
                 .map_err(map_auth_error)?;
         }
 
+        let frame_session_id = request.body.frame.session_id.clone();
+        let frame_sequence = request.body.frame.sequence;
+        let frame_payload_bytes = request.body.frame.ciphertext.len();
         let ack = ack_service::ingest_frame(
             &mut self.authority,
             &request.chain_id,
@@ -668,6 +671,30 @@ impl AuthorityService {
             bridge_id = request.body.via_bridge_id.as_str(),
             session_id = ack.session_id.as_str(),
             acked_sequence = ack.acked_sequence,
+            status = ?ack.status,
+        );
+        tracing::info!(
+            event = "receiver_upload_chunk_ingested",
+            chain_id = request.chain_id.as_str(),
+            bridge_id = request.body.via_bridge_id.as_str(),
+            session_id = frame_session_id.as_str(),
+            chunk_index = frame_sequence,
+            payload_bytes = frame_payload_bytes,
+        );
+        if frame_sequence == u32::MAX {
+            tracing::info!(
+                event = "receiver_upload_manifest_received",
+                chain_id = request.chain_id.as_str(),
+                bridge_id = request.body.via_bridge_id.as_str(),
+                session_id = frame_session_id.as_str(),
+            );
+        }
+        tracing::info!(
+            event = "publisher_upload_chunk_ack_returned",
+            chain_id = request.chain_id.as_str(),
+            bridge_id = request.body.via_bridge_id.as_str(),
+            session_id = ack.session_id.as_str(),
+            chunk_index = ack.acked_sequence,
             status = ?ack.status,
         );
         self.success_response(&request.chain_id, &request.request_id, ack)

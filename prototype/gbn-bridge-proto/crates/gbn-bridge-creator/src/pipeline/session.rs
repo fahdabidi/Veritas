@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use super::chunker::{chunk, ChunkError};
 use super::envelope::{session_id_bytes, session_id_hex, upload_ephemeral_private};
+use super::lane_state::{ChunkAssignment, LaneState};
 use super::manifest::UploadManifest;
 use super::sanitizer::{sanitize, SanitizationReport, SanitizerFormatHint};
 
@@ -69,9 +70,69 @@ pub enum UploadSessionStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadDispatchPlan {
-    pub lanes: Vec<String>,
+    #[serde(default)]
+    pub plan_started_at_ms: u64,
+    #[serde(default)]
+    pub target_lane_count: u32,
+    #[serde(default)]
+    pub lanes: Vec<LaneState>,
+    #[serde(default)]
+    pub overflow_pool: Vec<String>,
+    #[serde(default)]
+    pub chunk_assignments: Vec<ChunkAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_lane: Option<String>,
+    #[serde(default)]
+    pub completed_chunks: u32,
+    #[serde(default)]
+    pub failed_chunks: Vec<u32>,
+    #[serde(default = "UploadSessionStatus::built")]
+    pub session_status: UploadSessionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_chunk_dispatched_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_lanes_active_at_ms: Option<u64>,
+    #[serde(default)]
+    pub lane_count_at_first_dispatch: u32,
+    #[serde(default)]
+    pub lane_count_at_completion: u32,
+    #[serde(default)]
+    pub force_lane_failure_used: Vec<String>,
+    #[serde(default)]
+    pub reused_lane_events: u32,
+    #[serde(default)]
+    pub failover_events: u32,
+}
+
+impl Default for UploadDispatchPlan {
+    fn default() -> Self {
+        Self {
+            plan_started_at_ms: 0,
+            target_lane_count: 0,
+            lanes: Vec::new(),
+            overflow_pool: Vec::new(),
+            chunk_assignments: Vec::new(),
+            manifest_lane: None,
+            completed_chunks: 0,
+            failed_chunks: Vec::new(),
+            session_status: UploadSessionStatus::Built,
+            first_chunk_dispatched_at_ms: None,
+            all_lanes_active_at_ms: None,
+            lane_count_at_first_dispatch: 0,
+            lane_count_at_completion: 0,
+            force_lane_failure_used: Vec::new(),
+            reused_lane_events: 0,
+            failover_events: 0,
+        }
+    }
+}
+
+impl UploadSessionStatus {
+    pub fn built() -> Self {
+        Self::Built
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +317,33 @@ pub fn get_upload_session(
         });
     }
     Ok(load_session_file(&session_dir)?.summary())
+}
+
+pub fn load_upload_session(
+    base_state_dir: &Path,
+    session_id: &str,
+) -> Result<EncryptedUploadSession, SessionBuildError> {
+    let session_dir = upload_sessions_root(base_state_dir).join(session_id);
+    if !session_dir.exists() {
+        return Err(SessionBuildError::NotFound {
+            session_id: session_id.to_string(),
+        });
+    }
+    load_session_file(&session_dir)
+}
+
+pub fn save_upload_session(
+    base_state_dir: &Path,
+    session: &EncryptedUploadSession,
+) -> Result<(), SessionBuildError> {
+    persist_upload_session(base_state_dir, session)
+}
+
+pub fn get_upload_dispatch_plan(
+    base_state_dir: &Path,
+    session_id: &str,
+) -> Result<UploadDispatchPlan, SessionBuildError> {
+    Ok(load_upload_session(base_state_dir, session_id)?.plan)
 }
 
 pub fn delete_upload_session(

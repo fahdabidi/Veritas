@@ -13,6 +13,7 @@ K3D_NODE_STABILITY_SECONDS="${VERITAS_K8S_K3D_NODE_STABILITY_SECONDS:-5}"
 POST_SMOKE_STABILITY_SECONDS="${VERITAS_K8S_POST_SMOKE_STABILITY_SECONDS:-45}"
 SMOKE_ATTEMPTS="${VERITAS_K8S_SMOKE_ATTEMPTS:-2}"
 KUBELET_PROXY_TIMEOUT_SECONDS="${VERITAS_K8S_KUBELET_PROXY_TIMEOUT_SECONDS:-180}"
+ALLOW_KUBELET_PROXY_CLUSTER_RECREATE="${VERITAS_K8S_ALLOW_KUBELET_PROXY_CLUSTER_RECREATE:-1}"
 WORKLOAD_READY_TIMEOUT_SECONDS="${VERITAS_K8S_WORKLOAD_READY_TIMEOUT_SECONDS:-240}"
 WORKLOAD_STABILITY_SECONDS="${VERITAS_K8S_WORKLOAD_STABILITY_SECONDS:-30}"
 EXPECTED_CONDUIT_POD_COUNT="${VERITAS_K8S_EXPECTED_CONDUIT_POD_COUNT:-14}"
@@ -95,6 +96,7 @@ CREATOR_IMAGE="veritas/creator-runner:${BUILD_VERSION}"
 BUILD_ARTIFACT_DIR="${VERITAS_K8S_BUILD_ARTIFACT_DIR:-$ROOT_DIR/target/k8s-builds/$BUILD_VERSION}"
 VERSIONED_OVERLAY_DIR="$BUILD_ARTIFACT_DIR/kustomize"
 DIAGNOSTIC_DIR="$BUILD_ARTIFACT_DIR/diagnostics"
+KUBELET_PROXY_CLUSTER_RECREATE_USED=0
 
 docker_restart_count() {
   if command -v systemctl >/dev/null 2>&1; then
@@ -208,6 +210,24 @@ ensure_k3d_containers_running() {
   exit 1
 }
 
+create_k3d_cluster() {
+  echo "Creating k3d cluster '$CLUSTER_NAME' (${SERVERS} server, ${AGENTS} agents)..."
+  k3d cluster create "$CLUSTER_NAME" \
+    --servers "$SERVERS" \
+    --agents "$AGENTS" \
+    --port "30030:30030@loadbalancer" \
+    --wait
+}
+
+recreate_k3d_cluster_for_kubelet_proxy() {
+  local reason="$1"
+  echo "WARNING: kubelet proxy is failing with stale node certificate state: $reason" >&2
+  echo "Recreating local k3d cluster '$CLUSTER_NAME' before workload apply." >&2
+  capture_k3d_diagnostics "$DIAGNOSTIC_DIR/kubelet-proxy-stale-cert-before-recreate" || true
+  k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
+  create_k3d_cluster
+}
+
 wait_for_k3d_node_stability() {
   local seconds="$1" label="${2:-k3d}" attempt before after
   if [[ "$seconds" -le 0 ]]; then
@@ -269,22 +289,40 @@ wait_for_cluster_api() {
 }
 
 wait_for_kubelet_proxy() {
-  local deadline node failed=0
-  deadline=$((SECONDS + KUBELET_PROXY_TIMEOUT_SECONDS))
+  local deadline node failed output cert_mismatch last_error pass
   echo "Validating API-server to kubelet proxy on every k3d node..."
-  while ((SECONDS < deadline)); do
-    failed=0
-    while IFS= read -r node; do
-      [[ -n "$node" ]] || continue
-      if ! kubectl get --raw "/api/v1/nodes/${node}/proxy/healthz" >/dev/null 2>&1; then
-        failed=1
-        break
+  for pass in 1 2; do
+    deadline=$((SECONDS + KUBELET_PROXY_TIMEOUT_SECONDS))
+    cert_mismatch=0
+    last_error=""
+    while ((SECONDS < deadline)); do
+      failed=0
+      while IFS= read -r node; do
+        [[ -n "$node" ]] || continue
+        if ! output="$(kubectl get --raw "/api/v1/nodes/${node}/proxy/healthz" 2>&1)"; then
+          failed=1
+          last_error="${node}: ${output}"
+          if grep -Fq "certificate is valid for" <<<"$output"; then
+            cert_mismatch=1
+          fi
+          break
+        fi
+      done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+      if [[ "$failed" == "0" ]]; then
+        return 0
       fi
-    done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
-    if [[ "$failed" == "0" ]]; then
-      return 0
+      sleep 3
+    done
+
+    if [[ "$cert_mismatch" == "1" &&
+      "$ALLOW_KUBELET_PROXY_CLUSTER_RECREATE" == "1" &&
+      "$KUBELET_PROXY_CLUSTER_RECREATE_USED" == "0" ]]; then
+      KUBELET_PROXY_CLUSTER_RECREATE_USED=1
+      recreate_k3d_cluster_for_kubelet_proxy "$last_error"
+      wait_for_cluster_api
+      continue
     fi
-    sleep 3
+    break
   done
 
   echo "ERROR: kubelet proxy did not become healthy on every node." >&2
@@ -461,13 +499,35 @@ import_images() {
     -c "$CLUSTER_NAME"
 }
 
+verify_images_imported_to_k3d() {
+  local nodes node image repo tag missing=0
+  nodes="$(docker ps --format '{{.Names}}' | grep -E "^k3d-${CLUSTER_NAME}-(server|agent)-" || true)"
+  if [[ -z "$nodes" ]]; then
+    echo "No k3d server/agent containers are running for image import verification." >&2
+    return 1
+  fi
+
+  for node in $nodes; do
+    for image in "$AUTHORITY_IMAGE" "$RECEIVER_IMAGE" "$BRIDGE_IMAGE" "$CREATOR_IMAGE"; do
+      repo="${image%:*}"
+      tag="${image##*:}"
+      if ! docker exec "$node" crictl images 2>/dev/null | grep -F "$repo" | grep -F "$tag" >/dev/null; then
+        echo "Image $image is not present in k3d node $node." >&2
+        missing=1
+      fi
+    done
+  done
+
+  [[ "$missing" -eq 0 ]]
+}
+
 import_images_with_retry() {
   local attempt
   for attempt in {1..3}; do
     wait_for_docker_stable
     ensure_cluster_started
     wait_for_cluster_api
-    if import_images; then
+    if import_images && verify_images_imported_to_k3d; then
       wait_for_cluster_api
       return 0
     fi
@@ -507,6 +567,7 @@ rollout_status_with_retry() {
     echo "rollout status failed for $resource (attempt $attempt/3); recovering k3d before retry..." >&2
     capture_k3d_diagnostics "$DIAGNOSTIC_DIR/rollout-${resource//\//-}-attempt-$attempt" || true
     k3d cluster start "$CLUSTER_NAME" >/dev/null || true
+    import_images_with_retry
     sleep 15
   done
 
@@ -971,17 +1032,13 @@ PY
 fi
 
 if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
-  echo "Creating k3d cluster '$CLUSTER_NAME' (${SERVERS} server, ${AGENTS} agents)..."
-  k3d cluster create "$CLUSTER_NAME" \
-    --servers "$SERVERS" \
-    --agents "$AGENTS" \
-    --port "30030:30030@loadbalancer" \
-    --wait
+  create_k3d_cluster
 else
   echo "Using existing k3d cluster '$CLUSTER_NAME'."
   ensure_cluster_started
 fi
 validate_cluster_gate "initial cluster start"
+ALLOW_KUBELET_PROXY_CLUSTER_RECREATE=0
 
 echo "Conduit build version: $BUILD_VERSION"
 echo "Build source: $BUILD_SOURCE"

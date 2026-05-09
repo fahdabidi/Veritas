@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_creator::{
-    build_upload_session_to_disk, delete_upload_session, get_upload_session, list_upload_sessions,
-    BridgeFilterDrops, BuildUploadSessionOptions, CreatorClient, CreatorError,
-    DiscoveryProbeResult, LocalDhtStore, SanitizerFormatHint, SendDummyResult, SessionBuildError,
+    build_upload_session_to_disk, delete_upload_session, get_upload_dispatch_plan,
+    get_upload_session, list_upload_sessions, BridgeFilterDrops, BuildUploadSessionOptions,
+    CreatorClient, CreatorError, DiscoveryProbeResult, LocalDhtStore, SanitizerFormatHint,
+    SendDummyResult, SendUploadSessionResult, SessionBuildError, UploadDispatchPlan,
     UploadSessionSummary,
 };
 use gbn_bridge_protocol::{
@@ -47,6 +48,10 @@ pub const DEFAULT_ADMIN_BIND_ADDR: &str = "127.0.0.1:9090";
 const DEFAULT_FRAME_LIMIT: usize = 1_000;
 const DEFAULT_SEND_DUMMY_SIZE: usize = 512;
 const MAX_SEND_DUMMY_SIZE: usize = 8 * 1024;
+const DEFAULT_TARGET_LANE_COUNT: u32 = 10;
+const DEFAULT_LANE_OPEN_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_CHUNK_ACK_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_SUSPECT_TTL_MS: u64 = 300_000;
 
 pub fn admin_bind_addr_from_env() -> Result<SocketAddr, String> {
     std::env::var(ADMIN_BIND_ADDR_ENV)
@@ -491,6 +496,23 @@ pub struct UploadSessionDeleteResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendUploadRequest {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_lane_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_open_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_ack_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspect_ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_lane_failure: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminErrorResponse {
     pub error: AdminErrorBody,
 }
@@ -810,9 +832,12 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         ("GET", path) if path == AuthorityRoute::AdminLocalDht.path() => local_dht(state),
         ("GET", path) => match admin_bridge_dht_entry_target(path) {
             Some(bridge_id) => bridge_dht_entry(state, bridge_id),
-            None => match upload_session_target(path) {
-                Some(session_id) => get_creator_upload_session(state, session_id),
-                None => error_response(404, "not_found", "admin route not found"),
+            None => match upload_session_dispatch_plan_target(path) {
+                Some(session_id) => get_creator_upload_dispatch_plan(state, session_id),
+                None => match upload_session_target(path) {
+                    Some(session_id) => get_creator_upload_session(state, session_id),
+                    None => error_response(404, "not_found", "admin route not found"),
+                },
             },
         },
         ("POST", path) if path == AuthorityRoute::AdminInitializePublisherDht.path() => {
@@ -844,6 +869,9 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         }
         ("POST", path) if path == AuthorityRoute::AdminBuildUploadSession.path() => {
             build_upload_session_admin(state, &request.body, query)
+        }
+        ("POST", path) if path == AuthorityRoute::AdminSendUpload.path() => {
+            send_upload_admin(state, &request.body, query)
         }
         ("POST", path) if path == AuthorityRoute::AdminDiscoveryProbe.path() => {
             inject_discovery_probe(state, &request.body, query)
@@ -1101,6 +1129,20 @@ fn get_creator_upload_session(state: &AdminState, session_id: &str) -> Vec<u8> {
     }
 }
 
+fn get_creator_upload_dispatch_plan(state: &AdminState, session_id: &str) -> Vec<u8> {
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            404,
+            "not_found",
+            "upload-sessions is only available on creator admin listeners",
+        );
+    };
+    match get_upload_dispatch_plan(&creator_state_dir(state, store), session_id) {
+        Ok(plan) => json_response::<UploadDispatchPlan>(200, &plan),
+        Err(error) => session_error_response(error),
+    }
+}
+
 fn delete_creator_upload_session(state: &AdminState, session_id: &str) -> Vec<u8> {
     let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
         return error_response(
@@ -1118,6 +1160,85 @@ fn delete_creator_upload_session(state: &AdminState, session_id: &str) -> Vec<u8
             },
         ),
         Err(error) => session_error_response(error),
+    }
+}
+
+fn send_upload_admin(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
+    let Some(config) = &state.creator else {
+        return error_response(
+            404,
+            "not_found",
+            "send-upload is only available on creator admin listeners",
+        );
+    };
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            404,
+            "not_found",
+            "send-upload is only available on creator admin listeners",
+        );
+    };
+    let request = match serde_json::from_slice::<SendUploadRequest>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(
+                400,
+                "bad_request",
+                &format!("invalid send-upload json: {error}"),
+            )
+        }
+    };
+    if request.session_id.trim().is_empty() || request.session_id.contains('/') {
+        return error_response(
+            400,
+            "bad_request",
+            "session_id must be a non-empty path-safe upload session id",
+        );
+    }
+    let now_ms = now_ms();
+    let chain_id = match trace_chain_id(
+        query,
+        request.chain_id.as_deref(),
+        format!("send-upload-{}-{now_ms}", store.actor_id()),
+    ) {
+        Ok(chain_id) => Some(chain_id),
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
+    let chain_id_for_events = chain_id
+        .as_ref()
+        .expect("send-upload trace chain id is always supplied")
+        .clone();
+    let client = CreatorClient::new(
+        config.actor_id.clone(),
+        config.signing_key.clone(),
+        config.publisher_pub.clone(),
+    )
+    .with_creator_endpoint(config.creator_ip_addr.clone(), config.udp_punch_port)
+    .with_timeout(config.timeout);
+    match client.send_upload_session_from_local_dht(
+        store,
+        &creator_state_dir(state, store),
+        &request.session_id,
+        request
+            .target_lane_count
+            .unwrap_or(DEFAULT_TARGET_LANE_COUNT),
+        request
+            .lane_open_timeout_ms
+            .unwrap_or(DEFAULT_LANE_OPEN_TIMEOUT_MS),
+        request
+            .chunk_ack_timeout_ms
+            .unwrap_or(DEFAULT_CHUNK_ACK_TIMEOUT_MS),
+        request.suspect_ttl_ms.unwrap_or(DEFAULT_SUSPECT_TTL_MS),
+        request.force_lane_failure.unwrap_or_default(),
+        chain_id,
+    ) {
+        Ok(result) => {
+            let state_dir = creator_state_dir(state, store);
+            let plan = get_upload_dispatch_plan(&state_dir, &result.session_id).ok();
+            emit_send_upload_events(&chain_id_for_events, &result, plan.as_ref());
+            json_response(200, &result)
+        }
+        Err(error) => creator_error_response(error),
     }
 }
 
@@ -2827,6 +2948,81 @@ fn emit_upload_session_built_event(chain_id: &str, summary: &UploadSessionSummar
     );
 }
 
+fn emit_send_upload_events(
+    chain_id: &str,
+    result: &SendUploadSessionResult,
+    plan: Option<&UploadDispatchPlan>,
+) {
+    let _chain_span =
+        metrics_otlp::chain_span("creator_upload_session_complete", chain_id).entered();
+    metrics_otlp::record_chain_id(chain_id);
+    if let Some(plan) = plan {
+        tracing::info!(
+            event = "creator_upload_lanes_selected",
+            chain_id,
+            session_id = %result.session_id,
+            target_lane_count = plan.target_lane_count,
+            selected_lane_count = plan.lanes.len(),
+            overflow_pool_count = plan.overflow_pool.len(),
+        );
+        for lane in &plan.lanes {
+            tracing::info!(
+                event = "creator_upload_lane_open",
+                chain_id,
+                session_id = %result.session_id,
+                bridge_id = %lane.bridge_id,
+                status = ?lane.status,
+            );
+            if lane.is_failed() {
+                tracing::info!(
+                    event = "creator_upload_lane_failover",
+                    chain_id,
+                    session_id = %result.session_id,
+                    bridge_id = %lane.bridge_id,
+                );
+            }
+        }
+        for chunk_index in 0..result.total_chunks {
+            tracing::info!(
+                event = "creator_upload_chunk_encrypted",
+                chain_id,
+                session_id = %result.session_id,
+                chunk_index,
+            );
+        }
+        let mut seen_lanes = std::collections::BTreeSet::new();
+        for assignment in &plan.chunk_assignments {
+            tracing::info!(
+                event = "creator_upload_chunk_dispatched",
+                chain_id,
+                session_id = %result.session_id,
+                chunk_index = assignment.chunk_index,
+                bridge_id = %assignment.assigned_bridge_id,
+                attempts = assignment.attempts,
+            );
+            if !seen_lanes.insert(assignment.assigned_bridge_id.clone()) {
+                tracing::info!(
+                    event = "creator_upload_lane_reused",
+                    chain_id,
+                    session_id = %result.session_id,
+                    chunk_index = assignment.chunk_index,
+                    bridge_id = %assignment.assigned_bridge_id,
+                );
+            }
+        }
+    }
+    tracing::info!(
+        event = "creator_upload_session_complete",
+        chain_id,
+        session_id = %result.session_id,
+        session_status = ?result.session_status,
+        completed_chunks = result.completed_chunks,
+        total_chunks = result.total_chunks,
+        lane_count_at_first_dispatch = result.lane_count_at_first_dispatch,
+        lane_count_at_completion = result.lane_count_at_completion,
+    );
+}
+
 fn build_upload_input(
     request: &BuildUploadSessionRequest,
 ) -> Result<Vec<u8>, (&'static str, String)> {
@@ -3285,6 +3481,17 @@ fn admin_bridge_dht_entry_target(path: &str) -> Option<&str> {
 
 fn upload_session_target(path: &str) -> Option<&str> {
     let session_id = path.strip_prefix("/v1/admin/upload-sessions/")?;
+    if session_id.is_empty() || session_id.contains('/') {
+        None
+    } else {
+        Some(session_id)
+    }
+}
+
+fn upload_session_dispatch_plan_target(path: &str) -> Option<&str> {
+    let session_id = path
+        .strip_prefix("/v1/admin/upload-sessions/")?
+        .strip_suffix("/dispatch-plan")?;
     if session_id.is_empty() || session_id.contains('/') {
         None
     } else {

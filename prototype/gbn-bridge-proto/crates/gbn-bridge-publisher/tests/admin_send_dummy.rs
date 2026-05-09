@@ -207,6 +207,9 @@ fn fake_bridge_response(
                 },
             }
         }
+        CreatorBridgeRequest::FrameFragment(_) => CreatorBridgeResponse::Error {
+            message: "fragmented upload frames are not used by send-dummy tests".to_string(),
+        },
         CreatorBridgeRequest::Close(close) => {
             let chain_id = close.chain_id.clone();
             let session_id = close.session_id.clone();

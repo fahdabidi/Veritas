@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
@@ -7,7 +8,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
-use gbn_bridge_creator::{CreatorBridgeRequest, CreatorBridgeResponse};
+use gbn_bridge_creator::{CreatorBridgeFrameFragment, CreatorBridgeRequest, CreatorBridgeResponse};
 use gbn_bridge_protocol::{
     publisher_identity, BridgeCapability, BridgeCommandAckStatus, BridgeIngressEndpoint,
     BridgeLease, PublicKeyBytes, ReachabilityClass,
@@ -173,10 +174,10 @@ fn run() -> Result<(), String> {
         build_version, build_source, build_created, image
     );
     let authority_transport =
-        HttpJsonTransport::new(HttpTransportConfig::new(config.authority_url.clone()))
+        HttpJsonTransport::new(config.http_transport_config(config.authority_url.clone()))
             .map_err(|error| error.to_string())?;
     let receiver_transport =
-        HttpJsonTransport::new(HttpTransportConfig::new(config.receiver_url.clone()))
+        HttpJsonTransport::new(config.http_transport_config(config.receiver_url.clone()))
             .map_err(|error| error.to_string())?;
 
     let publisher_client = PublisherApiClient::new(
@@ -239,14 +240,17 @@ fn run() -> Result<(), String> {
         .expect("bridge metrics mutex poisoned")
         .record_control_reconnect();
     let (creator_upload_tx, creator_upload_rx) = mpsc::channel();
-    let _creator_upload_handle =
-        spawn_creator_upload_listener(config.punch_port, creator_upload_tx)
-            .map_err(|error| error.to_string())?;
+    let _creator_upload_handle = spawn_creator_upload_listener(
+        config.punch_port,
+        config.node_id.clone(),
+        creator_upload_tx,
+        Duration::from_millis(config.creator_upload_response_timeout_ms),
+    )
+    .map_err(|error| error.to_string())?;
 
     let mut last_keepalive_ms = now_ms();
     loop {
         let current_ms = now_ms();
-        handle_pending_creator_uploads(&mut runtime, &metrics, &creator_upload_rx);
 
         let control_ack = match runtime.receive_next_control_command(current_ms) {
             Ok(ack) => ack,
@@ -281,16 +285,27 @@ fn run() -> Result<(), String> {
             );
         }
 
-        if let Some(lease) = runtime
-            .heartbeat_tick(0, current_ms)
-            .map_err(|error| error.to_string())?
-        {
-            eprintln!(
-                "exit-bridge node_id={} renewed lease_id={} expires_at_ms={}",
-                config.node_id, lease.lease_id, lease.lease_expiry_ms
-            );
+        let current_ms = now_ms();
+        match runtime.heartbeat_tick(0, current_ms) {
+            Ok(Some(lease)) => {
+                tracing::debug!(
+                    event = "bridge_lease_renewed",
+                    bridge_id = config.node_id.as_str(),
+                    lease_id = lease.lease_id.as_str(),
+                    expires_at_ms = lease.lease_expiry_ms
+                );
+            }
+            Ok(None) => {}
+            Err(error) if is_startup_retryable(&error) => {
+                eprintln!(
+                    "exit-bridge node_id={} lease heartbeat transient authority error: {error}",
+                    config.node_id
+                );
+            }
+            Err(error) => return Err(error.to_string()),
         }
 
+        let current_ms = now_ms();
         if current_ms.saturating_sub(last_keepalive_ms) >= config.keepalive_interval_ms {
             match runtime.send_control_keepalive(current_ms) {
                 Ok(()) => {
@@ -312,6 +327,7 @@ fn run() -> Result<(), String> {
             }
         }
 
+        handle_next_creator_upload(&mut runtime, &metrics, &creator_upload_rx);
         thread::sleep(Duration::from_millis(config.poll_interval_ms));
     }
 }
@@ -460,18 +476,25 @@ fn is_control_transport_error(error: &RuntimeError) -> bool {
 }
 
 fn is_startup_retryable(error: &RuntimeError) -> bool {
-    matches!(error, RuntimeError::AuthorityTransport { .. })
+    matches!(
+        error,
+        RuntimeError::AuthorityTransport { .. } | RuntimeError::AuthorityProtocol { .. }
+    )
 }
 
 fn spawn_creator_upload_listener(
     punch_port: u16,
+    bridge_id: String,
     work_tx: Sender<CreatorUploadWork>,
+    response_timeout: Duration,
 ) -> io::Result<thread::JoinHandle<()>> {
     let socket = UdpSocket::bind(("0.0.0.0", punch_port))?;
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
     Ok(thread::spawn(move || {
         let mut buffer = vec![0_u8; 60 * 1024];
+        let mut fragment_store = CreatorUploadFragmentStore::default();
         loop {
+            fragment_store.prune_expired(now_ms());
             let (read, peer) = match socket.recv_from(&mut buffer) {
                 Ok(received) => received,
                 Err(error)
@@ -499,6 +522,14 @@ fn spawn_creator_upload_listener(
                     continue;
                 }
             };
+            let request =
+                match prepare_creator_upload_request(&bridge_id, &mut fragment_store, request) {
+                    CreatorUploadListenerAction::Respond(response) => {
+                        send_creator_upload_response(&socket, peer, response);
+                        continue;
+                    }
+                    CreatorUploadListenerAction::Queue(request) => request,
+                };
             let (response_tx, response_rx) = mpsc::channel();
             if work_tx
                 .send(CreatorUploadWork {
@@ -507,30 +538,110 @@ fn spawn_creator_upload_listener(
                 })
                 .is_err()
             {
-                let response = CreatorBridgeResponse::Error {
-                    message: "bridge upload worker is unavailable".to_string(),
-                };
-                if let Ok(payload) = serde_json::to_vec(&response) {
-                    let _ = socket.send_to(&payload, peer);
-                }
+                send_creator_upload_response(
+                    &socket,
+                    peer,
+                    CreatorBridgeResponse::Error {
+                        message: "bridge upload worker is unavailable".to_string(),
+                    },
+                );
                 continue;
             }
-            let response = match response_rx.recv_timeout(Duration::from_secs(5)) {
+            let response = match response_rx.recv_timeout(response_timeout) {
                 Ok(response) => response,
                 Err(error) => CreatorBridgeResponse::Error {
                     message: format!("bridge upload worker timed out: {error}"),
                 },
             };
-            let payload = match serde_json::to_vec(&response) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    eprintln!("exit-bridge creator upload response serialization error: {error}");
-                    continue;
-                }
-            };
-            let _ = socket.send_to(&payload, peer);
+            send_creator_upload_response(&socket, peer, response);
         }
     }))
+}
+
+enum CreatorUploadListenerAction {
+    Respond(CreatorBridgeResponse),
+    Queue(CreatorBridgeRequest),
+}
+
+fn prepare_creator_upload_request(
+    bridge_id: &str,
+    fragment_store: &mut CreatorUploadFragmentStore,
+    request: CreatorBridgeRequest,
+) -> CreatorUploadListenerAction {
+    let CreatorBridgeRequest::FrameFragment(fragment) = request else {
+        return CreatorUploadListenerAction::Queue(request);
+    };
+
+    let chain_id = fragment.chain_id.clone();
+    let is_final_fragment = fragment.fragment_index + 1 == fragment.total_fragments;
+    let _chain_span = is_final_fragment.then(|| {
+        metrics_otlp::chain_span("bridge_upload_frame_fragment_received", &chain_id).entered()
+    });
+    if is_final_fragment {
+        metrics_otlp::record_chain_id(&chain_id);
+        tracing::info!(
+            event = "bridge_upload_frame_fragment_received",
+            chain_id,
+            bridge_id,
+            session_id = fragment.session_id.as_str(),
+            frame_id = fragment.frame_id.as_str(),
+            sequence = fragment.sequence,
+            fragment_index = fragment.fragment_index,
+            total_fragments = fragment.total_fragments,
+            payload_bytes = fragment.frame_bytes_b64.len(),
+        );
+    }
+
+    match fragment_store.ingest(&fragment, now_ms()) {
+        Ok(Some(frame_bytes)) => {
+            let frame = match serde_json::from_slice(&frame_bytes) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return CreatorUploadListenerAction::Respond(CreatorBridgeResponse::Error {
+                        message: format!("invalid reassembled upload frame: {error}"),
+                    })
+                }
+            };
+            tracing::info!(
+                event = "bridge_upload_frame_reassembled",
+                chain_id = chain_id.as_str(),
+                bridge_id,
+                session_id = fragment.session_id.as_str(),
+                frame_id = fragment.frame_id.as_str(),
+                sequence = fragment.sequence,
+                total_fragments = fragment.total_fragments,
+                payload_bytes = frame_bytes.len(),
+            );
+            CreatorUploadListenerAction::Queue(CreatorBridgeRequest::Frame(frame))
+        }
+        Ok(None) => {
+            CreatorUploadListenerAction::Respond(CreatorBridgeResponse::FrameFragmentAccepted {
+                chain_id,
+                session_id: fragment.session_id,
+                frame_id: fragment.frame_id,
+                fragment_index: fragment.fragment_index,
+                total_fragments: fragment.total_fragments,
+            })
+        }
+        Err(error) => {
+            CreatorUploadListenerAction::Respond(CreatorBridgeResponse::Error { message: error })
+        }
+    }
+}
+
+fn send_creator_upload_response(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    response: CreatorBridgeResponse,
+) {
+    let payload = match serde_json::to_vec(&response) {
+        Ok(payload) => payload,
+        Err(error) => {
+            eprintln!("exit-bridge creator upload response serialization error: {error}");
+            return;
+        }
+    };
+    let _ = socket.send_to(&payload, peer);
 }
 
 struct CreatorUploadWork {
@@ -538,12 +649,124 @@ struct CreatorUploadWork {
     response_tx: Sender<CreatorBridgeResponse>,
 }
 
-fn handle_pending_creator_uploads(
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CreatorUploadFragmentKey {
+    chain_id: String,
+    session_id: String,
+    frame_id: String,
+}
+
+#[derive(Debug)]
+struct PendingCreatorUploadFrame {
+    created_at_ms: u64,
+    sequence: u32,
+    total_fragments: u16,
+    fragments: Vec<Option<Vec<u8>>>,
+}
+
+#[derive(Debug, Default)]
+struct CreatorUploadFragmentStore {
+    frames: BTreeMap<CreatorUploadFragmentKey, PendingCreatorUploadFrame>,
+}
+
+impl CreatorUploadFragmentStore {
+    const MAX_FRAGMENT_COUNT: u16 = 1024;
+    const MAX_REASSEMBLED_FRAME_BYTES: usize = 512 * 1024;
+    const FRAGMENT_TTL_MS: u64 = 300_000;
+
+    fn ingest(
+        &mut self,
+        fragment: &CreatorBridgeFrameFragment,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, String> {
+        if fragment.total_fragments == 0 {
+            return Err("frame fragment total_fragments must be greater than zero".to_string());
+        }
+        if fragment.total_fragments > Self::MAX_FRAGMENT_COUNT {
+            return Err(format!(
+                "frame fragment total_fragments exceeds limit ({} > {})",
+                fragment.total_fragments,
+                Self::MAX_FRAGMENT_COUNT
+            ));
+        }
+        if fragment.fragment_index >= fragment.total_fragments {
+            return Err(format!(
+                "frame fragment index {} is outside total {}",
+                fragment.fragment_index, fragment.total_fragments
+            ));
+        }
+
+        let bytes = fragment.decoded_frame_bytes()?;
+        let key = CreatorUploadFragmentKey {
+            chain_id: fragment.chain_id.clone(),
+            session_id: fragment.session_id.clone(),
+            frame_id: fragment.frame_id.clone(),
+        };
+        let entry = self
+            .frames
+            .entry(key.clone())
+            .or_insert_with(|| PendingCreatorUploadFrame {
+                created_at_ms: now_ms,
+                sequence: fragment.sequence,
+                total_fragments: fragment.total_fragments,
+                fragments: vec![None; fragment.total_fragments as usize],
+            });
+        if entry.total_fragments != fragment.total_fragments {
+            return Err(format!(
+                "frame fragment total mismatch for `{}`: expected {}, got {}",
+                fragment.frame_id, entry.total_fragments, fragment.total_fragments
+            ));
+        }
+        if entry.sequence != fragment.sequence {
+            return Err(format!(
+                "frame fragment sequence mismatch for `{}`: expected {}, got {}",
+                fragment.frame_id, entry.sequence, fragment.sequence
+            ));
+        }
+        entry.fragments[fragment.fragment_index as usize] = Some(bytes);
+
+        if entry.fragments.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+
+        let total_bytes = entry
+            .fragments
+            .iter()
+            .filter_map(|fragment| fragment.as_ref())
+            .map(Vec::len)
+            .sum::<usize>();
+        if total_bytes > Self::MAX_REASSEMBLED_FRAME_BYTES {
+            self.frames.remove(&key);
+            return Err(format!(
+                "reassembled frame is too large ({} > {})",
+                total_bytes,
+                Self::MAX_REASSEMBLED_FRAME_BYTES
+            ));
+        }
+
+        let completed = self
+            .frames
+            .remove(&key)
+            .expect("completed frame exists in fragment store");
+        let mut out = Vec::with_capacity(total_bytes);
+        for fragment in completed.fragments.into_iter().flatten() {
+            out.extend(fragment);
+        }
+        Ok(Some(out))
+    }
+
+    fn prune_expired(&mut self, now_ms: u64) {
+        self.frames
+            .retain(|_, frame| now_ms.saturating_sub(frame.created_at_ms) <= Self::FRAGMENT_TTL_MS);
+    }
+}
+
+fn handle_next_creator_upload(
     runtime: &mut ExitBridgeRuntime,
     metrics: &Arc<Mutex<BridgeMetrics>>,
     work_rx: &Receiver<CreatorUploadWork>,
 ) {
-    while let Ok(work) = work_rx.try_recv() {
+    if let Ok(work) = work_rx.try_recv() {
         let response = handle_creator_upload_request(work.request, runtime, metrics);
         let _ = work.response_tx.send(response);
     }
@@ -584,38 +807,10 @@ fn handle_creator_upload_request(
                 },
             }
         }
-        CreatorBridgeRequest::Frame(frame) => {
-            let chain_id = frame.chain_id.clone();
-            let _chain_span =
-                metrics_otlp::chain_span("bridge_dummy_frame_forwarded", &chain_id).entered();
-            metrics_otlp::record_chain_id(&chain_id);
-            let bytes = frame.ciphertext.len();
-            tracing::info!(
-                event = "bridge_dummy_frame_forwarded",
-                chain_id,
-                bridge_id = runtime.config().bridge_id.as_str(),
-                session_id = frame.session_id.as_str(),
-                sequence = frame.sequence,
-                payload_bytes = bytes,
-            );
-            let now = now_ms();
-            match runtime.forward_session_frame_with_chain_id(&chain_id, frame, now) {
-                Ok(ack) => {
-                    metrics
-                        .lock()
-                        .expect("bridge metrics mutex poisoned")
-                        .record_frame_forwarded(bytes);
-                    eprintln!(
-                        "exit-bridge creator upload forwarded session_id={} sequence={} chain_id={} status={:?} payload_bytes={}",
-                        ack.session_id, ack.acked_sequence, ack.chain_id, ack.status, bytes
-                    );
-                    CreatorBridgeResponse::Ack(ack)
-                }
-                Err(error) => CreatorBridgeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
-        }
+        CreatorBridgeRequest::Frame(frame) => handle_creator_upload_frame(frame, runtime, metrics),
+        CreatorBridgeRequest::FrameFragment(_) => CreatorBridgeResponse::Error {
+            message: "bridge frame fragments must be assembled by the upload listener".to_string(),
+        },
         CreatorBridgeRequest::Close(close) => {
             let chain_id = close.chain_id.clone();
             let _chain_span = metrics_otlp::chain_span("bridge_creator_close", &chain_id).entered();
@@ -641,6 +836,51 @@ fn handle_creator_upload_request(
     }
 }
 
+fn handle_creator_upload_frame(
+    frame: gbn_bridge_protocol::BridgeData,
+    runtime: &mut ExitBridgeRuntime,
+    metrics: &Arc<Mutex<BridgeMetrics>>,
+) -> CreatorBridgeResponse {
+    let chain_id = frame.chain_id.clone();
+    let _chain_span =
+        metrics_otlp::chain_span("bridge_upload_chunk_forwarded", &chain_id).entered();
+    metrics_otlp::record_chain_id(&chain_id);
+    let bytes = frame.ciphertext.len();
+    tracing::info!(
+        event = "bridge_dummy_frame_forwarded",
+        chain_id,
+        bridge_id = runtime.config().bridge_id.as_str(),
+        session_id = frame.session_id.as_str(),
+        sequence = frame.sequence,
+        payload_bytes = bytes,
+    );
+    tracing::info!(
+        event = "bridge_upload_chunk_forwarded",
+        chain_id,
+        bridge_id = runtime.config().bridge_id.as_str(),
+        session_id = frame.session_id.as_str(),
+        chunk_index = frame.sequence,
+        payload_bytes = bytes,
+    );
+    let now = now_ms();
+    match runtime.forward_session_frame_with_chain_id(&chain_id, frame, now) {
+        Ok(ack) => {
+            metrics
+                .lock()
+                .expect("bridge metrics mutex poisoned")
+                .record_frame_forwarded(bytes);
+            eprintln!(
+                "exit-bridge creator upload forwarded session_id={} sequence={} chain_id={} status={:?} payload_bytes={}",
+                ack.session_id, ack.acked_sequence, ack.chain_id, ack.status, bytes
+            );
+            CreatorBridgeResponse::Ack(ack)
+        }
+        Err(error) => CreatorBridgeResponse::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BridgeServiceConfig {
     node_id: String,
@@ -653,6 +893,10 @@ struct BridgeServiceConfig {
     control_max_skew_ms: u64,
     keepalive_interval_ms: u64,
     poll_interval_ms: u64,
+    creator_upload_response_timeout_ms: u64,
+    http_connect_timeout_ms: u64,
+    http_read_timeout_ms: u64,
+    http_write_timeout_ms: u64,
     bridge_signing_key_hex: Option<String>,
     bridge_signing_seed_hex: Option<String>,
     publisher_public_key_hex: Option<String>,
@@ -707,11 +951,26 @@ impl BridgeServiceConfig {
                 5_000,
             )?,
             poll_interval_ms: parse_env_u64("GBN_BRIDGE_POLL_INTERVAL_MS", 250)?,
+            creator_upload_response_timeout_ms: parse_env_u64(
+                "GBN_BRIDGE_CREATOR_UPLOAD_RESPONSE_TIMEOUT_MS",
+                60_000,
+            )?,
+            http_connect_timeout_ms: parse_env_u64("GBN_BRIDGE_HTTP_CONNECT_TIMEOUT_MS", 5_000)?,
+            http_read_timeout_ms: parse_env_u64("GBN_BRIDGE_HTTP_READ_TIMEOUT_MS", 5_000)?,
+            http_write_timeout_ms: parse_env_u64("GBN_BRIDGE_HTTP_WRITE_TIMEOUT_MS", 5_000)?,
             bridge_signing_key_hex: env::var("GBN_BRIDGE_BRIDGE_SIGNING_KEY_HEX").ok(),
             bridge_signing_seed_hex: env::var("GBN_BRIDGE_BRIDGE_SIGNING_SEED_HEX").ok(),
             publisher_public_key_hex: env::var("GBN_BRIDGE_PUBLISHER_PUBLIC_KEY_HEX").ok(),
             publisher_signing_key_hex: env::var("GBN_BRIDGE_PUBLISHER_SIGNING_KEY_HEX").ok(),
         })
+    }
+
+    fn http_transport_config(&self, base_url: String) -> HttpTransportConfig {
+        let mut config = HttpTransportConfig::new(base_url);
+        config.connect_timeout_ms = self.http_connect_timeout_ms;
+        config.read_timeout_ms = self.http_read_timeout_ms;
+        config.write_timeout_ms = self.http_write_timeout_ms;
+        config
     }
 
     fn load_signing_key(&self) -> Result<SigningKey, String> {

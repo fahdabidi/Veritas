@@ -1,5 +1,7 @@
 //! Optional OTLP tracing setup for local Kubernetes observability.
 
+use std::time::Duration;
+
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
@@ -54,6 +56,7 @@ pub fn init_otlp_tracing_from_env(service_name: &str) -> Result<Option<OtlpTraci
                 .with_trace_config(trace::config().with_resource(Resource::new(vec![
                     KeyValue::new("service.name", service_name.to_string()),
                 ])))
+                .with_batch_config(batch_config_from_env())
                 .install_batch(opentelemetry_sdk::runtime::Tokio)
                 .map_err(|error| format!("failed to install OTLP tracer: {error}"))?
         };
@@ -86,4 +89,33 @@ fn matches_env_false(key: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn batch_config_from_env() -> trace::BatchConfig {
+    trace::BatchConfig::default()
+        .with_max_queue_size(env_usize_or("OTEL_BSP_MAX_QUEUE_SIZE", 256))
+        .with_max_export_batch_size(env_usize_or("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", 64))
+        .with_scheduled_delay(Duration::from_millis(env_u64_or(
+            "OTEL_BSP_SCHEDULE_DELAY_MILLIS",
+            500,
+        )))
+        .with_max_export_timeout(Duration::from_millis(env_u64_or(
+            "OTEL_BSP_EXPORT_TIMEOUT_MILLIS",
+            5_000,
+        )))
+        .with_max_concurrent_exports(env_usize_or("OTEL_BSP_MAX_CONCURRENT_EXPORTS", 1))
+}
+
+fn env_usize_or(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64_or(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default)
 }

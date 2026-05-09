@@ -225,7 +225,8 @@ smoke_admin_curl_exec() {
 
 smoke_admin_curl_docker() {
   local pod="$1" _container="$2" method="$3" path="$4" body="${5:-}"
-  local node pod_ip target inner
+  local node pod_ip target inner request_timeout
+  request_timeout="${VERITAS_K8S_ADMIN_REQUEST_TIMEOUT_SECONDS:-300}"
   node="$(smoke_k3d_node_container)"
   if [[ -z "$node" ]]; then
     echo "ERROR: no running k3d node container found for Docker admin transport." >&2
@@ -251,10 +252,10 @@ smoke_admin_curl_docker() {
   target="http://${pod_ip}:${ADMIN_PORT:-9090}${path}"
   case "$method" in
     GET)
-      inner="wget -q -T 10 -O - $(smoke_shell_quote "$target")"
+      inner="wget -q -T $(smoke_shell_quote "$request_timeout") -O - $(smoke_shell_quote "$target")"
       ;;
     POST)
-      inner="wget -q -T 10 -O - --header 'Content-Type: application/json' --post-data $(smoke_shell_quote "$body") $(smoke_shell_quote "$target")"
+      inner="wget -q -T $(smoke_shell_quote "$request_timeout") -O - --header 'Content-Type: application/json' --post-data $(smoke_shell_quote "$body") $(smoke_shell_quote "$target")"
       ;;
     *)
       echo "ERROR: Docker admin transport only supports GET and POST, got '$method'." >&2
@@ -296,6 +297,38 @@ smoke_admin_curl() {
 
   smoke_log "$output"
   smoke_fail "admin request failed after $SMOKE_RETRY_ATTEMPTS attempt(s): pod=$1 container=$2 method=$3 path=$4"
+}
+
+smoke_admin_curl_once() {
+  local requested="${VERITAS_K8S_ADMIN_TRANSPORT:-auto}"
+  local output status transport
+  smoke_select_admin_transport
+
+  transport="$SMOKE_ADMIN_TRANSPORT"
+  case "$transport" in
+    docker) output="$(smoke_admin_curl_docker "$@" 2>&1)" && status=0 || status=$? ;;
+    exec) output="$(smoke_admin_curl_exec "$@" 2>&1)" && status=0 || status=$? ;;
+    *) smoke_fail "unsupported admin transport '$transport'" ;;
+  esac
+  if [[ "$status" -eq 0 ]]; then
+    printf '%s' "$output"
+    return 0
+  fi
+
+  if [[ "$requested" == "auto" && "$transport" == "exec" ]] &&
+    printf '%s' "$output" | grep -E 'x509|error dialing backend|tls: failed|container not found|No agent available' >/dev/null 2>&1 &&
+    command -v docker >/dev/null 2>&1 && [[ -n "$(smoke_k3d_node_container)" ]]; then
+    smoke_log "kubectl exec admin transport failed; falling back to Docker-network admin transport."
+    SMOKE_ADMIN_TRANSPORT=docker
+    output="$(smoke_admin_curl_docker "$@" 2>&1)" && status=0 || status=$?
+    if [[ "$status" -eq 0 ]]; then
+      printf '%s' "$output"
+      return 0
+    fi
+  fi
+
+  smoke_log "$output"
+  smoke_fail "non-idempotent admin request failed without retry: pod=$1 container=$2 method=$3 path=$4"
 }
 
 smoke_pod_for_selector() {

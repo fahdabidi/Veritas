@@ -44,6 +44,7 @@ fn receiver_public_metrics_endpoint_returns_current_snapshot() {
         bind_addr: "127.0.0.1:0".to_string(),
         authority_url: "http://127.0.0.1:1".to_string(),
         request_max_bytes: 1_048_576,
+        ..ReceiverProxyConfig::default()
     };
     let server = ReceiverProxyServer::bind_with_metrics(config, metrics).unwrap();
     let addr = server.local_addr().unwrap();

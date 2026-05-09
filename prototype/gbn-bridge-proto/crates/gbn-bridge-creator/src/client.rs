@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
@@ -15,14 +16,24 @@ use sha2::{Digest, Sha256};
 
 use crate::error::CreatorError;
 use crate::local_dht::LocalDhtStore;
+use crate::pipeline::{
+    dispatch_upload_session, load_upload_session, plan_lanes, save_upload_session,
+    DispatchUploadOptions, LanePlanError, SendUploadSessionResult, UploadSessionStatus,
+};
 use crate::session::CreatorSession;
-use crate::upload::{CreatorBridgeRequest, CreatorBridgeResponse};
+use crate::upload::{CreatorBridgeFrameFragment, CreatorBridgeRequest, CreatorBridgeResponse};
 
 const BOOTSTRAP_JOIN_PATH: &str = "/v1/bootstrap/join";
 const CREATOR_CATALOG_PATH: &str = "/v1/creator/catalog";
 const HTTP_TIMESTAMP_GUARD_MS: u64 = 25;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_UDP_DATAGRAM_BYTES: usize = 60 * 1024;
+const MAX_REASSEMBLED_UPLOAD_FRAME_BYTES: usize = 512 * 1024;
+const MAX_SAFE_UPLOAD_DATAGRAM_BYTES: usize = 1_200;
+const DEFAULT_FRAME_FRAGMENT_BYTES: usize = 700;
+const MIN_FRAME_FRAGMENT_BYTES: usize = 256;
+const MAX_FRAME_FRAGMENT_BYTES: usize = 48 * 1024;
+const DEFAULT_UPLOAD_CLOSE_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_SUSPECT_TTL_MS: u64 = 300_000;
 const ENCRYPTION_ENVELOPE_NAME: &str = "publisher_x25519_hkdf_aes256gcm_v1";
 
@@ -407,6 +418,115 @@ impl CreatorClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_upload_session_from_local_dht(
+        &self,
+        store: &LocalDhtStore,
+        base_state_dir: &Path,
+        session_id: &str,
+        target_lane_count: u32,
+        lane_open_timeout_ms: u64,
+        chunk_ack_timeout_ms: u64,
+        suspect_ttl_ms: u64,
+        force_lane_failure: Vec<String>,
+        chain_id: Option<String>,
+    ) -> Result<SendUploadSessionResult, CreatorError> {
+        let now_ms = now_ms();
+        let current_dht = store.snapshot();
+        ensure_onboarded(&current_dht)?;
+        let chain_id = chain_id.unwrap_or_else(|| {
+            default_chain_id(
+                "send-upload",
+                &self.actor_id,
+                &format!("{session_id}-{now_ms}"),
+            )
+        });
+        let mut session = load_upload_session(base_state_dir, session_id)
+            .map_err(|error| CreatorError::FrameUploadFailed(error.to_string()))?;
+        if !matches!(
+            session.status,
+            UploadSessionStatus::Built | UploadSessionStatus::Partial
+        ) {
+            return Err(CreatorError::FrameUploadFailed(format!(
+                "upload session `{session_id}` is not dispatchable from status {:?}",
+                session.status
+            )));
+        }
+        let publisher_entry = session
+            .local_dht_snapshot
+            .publisher_entry
+            .clone()
+            .ok_or(CreatorError::MissingPublisherEntry)?;
+        publisher_entry.verify_trust_root(&self.publisher_pub, now_ms)?;
+        let lane_plan = plan_lanes(
+            &session.local_dht_snapshot,
+            &self.publisher_pub,
+            target_lane_count,
+            now_ms,
+        )
+        .map_err(|error| match error {
+            LanePlanError::NoEligibleBridges { filter_drops } => {
+                CreatorError::NoEligibleBridge { filter_drops }
+            }
+            LanePlanError::InvalidTargetLaneCount => CreatorError::Protocol(error.to_string()),
+        })?;
+        session.status = UploadSessionStatus::Dispatching;
+        save_upload_session(base_state_dir, &session)
+            .map_err(|error| CreatorError::FrameUploadFailed(error.to_string()))?;
+
+        let dispatch_result = dispatch_upload_session(
+            &mut session,
+            lane_plan,
+            DispatchUploadOptions {
+                chain_id,
+                actor_id: self.actor_id.clone(),
+                actor_pub: self.actor_pub.clone(),
+                lane_open_timeout_ms,
+                chunk_ack_timeout_ms,
+                suspect_ttl_ms,
+                force_lane_failure,
+                now_ms,
+            },
+            |bridge_address, request| {
+                let timeout = match &request {
+                    CreatorBridgeRequest::Open(_) => timeout_from_ms(lane_open_timeout_ms),
+                    CreatorBridgeRequest::Frame(_) | CreatorBridgeRequest::FrameFragment(_) => {
+                        timeout_from_ms(chunk_ack_timeout_ms)
+                    }
+                    CreatorBridgeRequest::Close(_) => upload_close_timeout(),
+                };
+                self.bridge_round_trip_with_timeout(bridge_address, request, timeout)
+            },
+        );
+        if dispatch_result.is_err() && session.status == UploadSessionStatus::Dispatching {
+            session.status = UploadSessionStatus::Failed;
+            session.plan.session_status = UploadSessionStatus::Failed;
+        }
+        save_upload_session(base_state_dir, &session)
+            .map_err(|error| CreatorError::FrameUploadFailed(error.to_string()))?;
+        let result = dispatch_result?;
+        let failed_bridge_ids = session
+            .plan
+            .lanes
+            .iter()
+            .filter(|lane| lane.is_failed())
+            .map(|lane| lane.bridge_id.clone())
+            .collect::<Vec<_>>();
+        if !failed_bridge_ids.is_empty() {
+            let mut next = current_dht;
+            let suspect_until_ms = now_ms.saturating_add(suspect_ttl_ms);
+            for entry in &mut next.bridge_entries {
+                if failed_bridge_ids.contains(&entry.bridge_id) {
+                    entry.suspect_until_ms = Some(suspect_until_ms);
+                }
+            }
+            store
+                .replace(next)
+                .map_err(|error| CreatorError::LocalDht(error.to_string()))?;
+        }
+        Ok(result)
+    }
+
     fn post_authority_json<TBody, TResponse>(
         &self,
         base_url: &str,
@@ -506,6 +626,31 @@ impl CreatorClient {
         bridge_address: &str,
         request: CreatorBridgeRequest,
     ) -> Result<CreatorBridgeResponse, CreatorError> {
+        self.bridge_round_trip_with_timeout(bridge_address, request, self.timeout)
+    }
+
+    fn bridge_round_trip_with_timeout(
+        &self,
+        bridge_address: &str,
+        request: CreatorBridgeRequest,
+        timeout: Duration,
+    ) -> Result<CreatorBridgeResponse, CreatorError> {
+        if let CreatorBridgeRequest::Frame(frame) = &request {
+            let payload = serde_json::to_vec(&request).map_err(|error| {
+                CreatorError::Protocol(format!(
+                    "failed to serialize bridge upload request: {error}"
+                ))
+            })?;
+            if payload.len() > MAX_SAFE_UPLOAD_DATAGRAM_BYTES {
+                return self.fragmented_bridge_frame_round_trip(
+                    bridge_address,
+                    frame.clone(),
+                    timeout,
+                );
+            }
+            return self.bridge_payload_round_trip(bridge_address, &payload, timeout);
+        }
+
         let payload = serde_json::to_vec(&request).map_err(|error| {
             CreatorError::Protocol(format!(
                 "failed to serialize bridge upload request: {error}"
@@ -519,35 +664,134 @@ impl CreatorClient {
             )));
         }
 
-        let mut addresses =
-            bridge_address
-                .to_socket_addrs()
-                .map_err(|error| CreatorError::Transport {
-                    operation: "resolve-bridge",
-                    detail: error.to_string(),
-                })?;
-        let bridge_address = addresses.next().ok_or_else(|| CreatorError::Transport {
-            operation: "resolve-bridge",
-            detail: format!("no socket address resolved for `{bridge_address}`"),
+        self.bridge_payload_round_trip(bridge_address, &payload, timeout)
+    }
+
+    fn fragmented_bridge_frame_round_trip(
+        &self,
+        bridge_address: &str,
+        frame: BridgeData,
+        timeout: Duration,
+    ) -> Result<CreatorBridgeResponse, CreatorError> {
+        let frame_bytes = serde_json::to_vec(&frame).map_err(|error| {
+            CreatorError::Protocol(format!("failed to serialize bridge upload frame: {error}"))
         })?;
+        if frame_bytes.len() > MAX_REASSEMBLED_UPLOAD_FRAME_BYTES {
+            return Err(CreatorError::FrameUploadFailed(format!(
+                "bridge upload frame is too large to fragment ({} > {})",
+                frame_bytes.len(),
+                MAX_REASSEMBLED_UPLOAD_FRAME_BYTES
+            )));
+        }
+        let frame_fragment_bytes = frame_fragment_bytes();
+        let total_fragments = frame_bytes.len().div_ceil(frame_fragment_bytes);
+        if total_fragments == 0 || total_fragments > u16::MAX as usize {
+            return Err(CreatorError::FrameUploadFailed(format!(
+                "bridge upload frame fragment count is invalid: {total_fragments}"
+            )));
+        }
+        let total_fragments = total_fragments as u16;
+        let bridge_address = resolve_bridge_address(bridge_address)?;
+        let socket = self.creator_udp_socket(timeout)?;
+        for (index, chunk) in frame_bytes.chunks(frame_fragment_bytes).enumerate() {
+            let fragment_index = index as u16;
+            let fragment =
+                CreatorBridgeFrameFragment::new(&frame, fragment_index, total_fragments, chunk);
+            let request = CreatorBridgeRequest::FrameFragment(fragment);
+            let payload = serde_json::to_vec(&request).map_err(|error| {
+                CreatorError::Protocol(format!(
+                    "failed to serialize bridge upload frame fragment: {error}"
+                ))
+            })?;
+            if payload.len() > MAX_UDP_DATAGRAM_BYTES {
+                return Err(CreatorError::FrameUploadFailed(format!(
+                    "bridge upload fragment datagram is too large ({} > {})",
+                    payload.len(),
+                    MAX_UDP_DATAGRAM_BYTES
+                )));
+            }
+            let response = self.bridge_socket_round_trip(&socket, bridge_address, &payload)?;
+            if fragment_index + 1 == total_fragments {
+                return match response {
+                    CreatorBridgeResponse::Ack(_) | CreatorBridgeResponse::Error { .. } => {
+                        Ok(response)
+                    }
+                    other => Err(CreatorError::FrameUploadFailed(format!(
+                        "unexpected final bridge fragment response: {other:?}"
+                    ))),
+                };
+            }
+            match response {
+                CreatorBridgeResponse::FrameFragmentAccepted {
+                    frame_id,
+                    fragment_index: accepted_index,
+                    total_fragments: accepted_total,
+                    ..
+                } if frame_id == frame.frame_id
+                    && accepted_index == fragment_index
+                    && accepted_total == total_fragments => {}
+                CreatorBridgeResponse::Error { message } => {
+                    return Err(CreatorError::FrameUploadFailed(message));
+                }
+                other => {
+                    return Err(CreatorError::FrameUploadFailed(format!(
+                        "unexpected bridge fragment response: {other:?}"
+                    )));
+                }
+            }
+        }
+
+        Err(CreatorError::FrameUploadFailed(
+            "bridge upload frame fragmentation produced no fragments".to_string(),
+        ))
+    }
+
+    fn bridge_payload_round_trip(
+        &self,
+        bridge_address: &str,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<CreatorBridgeResponse, CreatorError> {
+        let bridge_address = resolve_bridge_address(bridge_address)?;
+        let socket = self.creator_udp_socket(timeout)?;
+        self.bridge_socket_round_trip(&socket, bridge_address, payload)
+    }
+
+    fn creator_udp_socket(&self, timeout: Duration) -> Result<UdpSocket, CreatorError> {
         let socket = UdpSocket::bind("0.0.0.0:0").map_err(|error| CreatorError::Transport {
             operation: "bind-creator-udp",
             detail: error.to_string(),
         })?;
         socket
-            .set_read_timeout(Some(self.timeout))
+            .set_read_timeout(Some(timeout))
             .map_err(|error| CreatorError::Transport {
                 operation: "set-creator-udp-read-timeout",
                 detail: error.to_string(),
             })?;
         socket
-            .set_write_timeout(Some(self.timeout))
+            .set_write_timeout(Some(timeout))
             .map_err(|error| CreatorError::Transport {
                 operation: "set-creator-udp-write-timeout",
                 detail: error.to_string(),
             })?;
+        Ok(socket)
+    }
+
+    fn bridge_socket_round_trip(
+        &self,
+        socket: &UdpSocket,
+        bridge_address: SocketAddr,
+        payload: &[u8],
+    ) -> Result<CreatorBridgeResponse, CreatorError> {
+        if payload.len() > MAX_UDP_DATAGRAM_BYTES {
+            return Err(CreatorError::FrameUploadFailed(format!(
+                "bridge upload datagram is too large ({} > {})",
+                payload.len(),
+                MAX_UDP_DATAGRAM_BYTES
+            )));
+        }
         socket
-            .send_to(&payload, bridge_address)
+            .send_to(payload, bridge_address)
             .map_err(|error| CreatorError::Transport {
                 operation: "send-bridge-upload",
                 detail: error.to_string(),
@@ -564,6 +808,21 @@ impl CreatorClient {
             CreatorError::Protocol(format!("failed to parse bridge upload response: {error}"))
         })
     }
+}
+
+fn resolve_bridge_address(bridge_address: &str) -> Result<SocketAddr, CreatorError> {
+    let mut addresses =
+        bridge_address
+            .to_socket_addrs()
+            .map_err(|error| CreatorError::Transport {
+                operation: "resolve-bridge",
+                detail: error.to_string(),
+            })?;
+    let bridge_address = addresses.next().ok_or_else(|| CreatorError::Transport {
+        operation: "resolve-bridge",
+        detail: format!("no socket address resolved for `{bridge_address}`"),
+    })?;
+    Ok(bridge_address)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -742,6 +1001,22 @@ fn synthesize_frame_with_marker(size: usize, marker: Option<&[u8]>) -> Vec<u8> {
     buf
 }
 
+fn frame_fragment_bytes() -> usize {
+    std::env::var("GBN_BRIDGE_UPLOAD_FRAGMENT_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(MIN_FRAME_FRAGMENT_BYTES, MAX_FRAME_FRAGMENT_BYTES))
+        .unwrap_or(DEFAULT_FRAME_FRAGMENT_BYTES)
+}
+
+fn upload_close_timeout() -> Duration {
+    std::env::var("GBN_BRIDGE_CREATOR_UPLOAD_CLOSE_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(timeout_from_ms)
+        .unwrap_or_else(|| timeout_from_ms(DEFAULT_UPLOAD_CLOSE_TIMEOUT_MS))
+}
+
 fn ensure_onboarded(table: &LocalDiscoveryTable) -> Result<(), CreatorError> {
     if matches!(
         table.self_onboarding_state,
@@ -877,6 +1152,10 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn default_chain_id(prefix: &str, actor_id: &str, request_id: &str) -> String {
     format!("{prefix}-{actor_id}-{request_id}")
+}
+
+fn timeout_from_ms(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms.max(1))
 }
 
 fn now_ms() -> u64 {

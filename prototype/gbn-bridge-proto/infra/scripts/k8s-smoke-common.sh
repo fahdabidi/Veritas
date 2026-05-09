@@ -555,13 +555,17 @@ smoke_loki_query_range() {
 
 smoke_tempo_query_chain() {
   local chain_id="$1" output="$2"
+  local limit="${VERITAS_TEMPO_SEARCH_LIMIT:-200}"
   curl -fsS -G --data-urlencode "q={ .chain_id = \"$chain_id\" }" \
+    --data-urlencode "limit=$limit" \
     "$TEMPO_URL/api/search" >"$output" 2>/dev/null || printf '{"traces":[]}\n' >"$output"
 }
 
 smoke_tempo_query_chain_service() {
   local chain_id="$1" service_name="$2" output="$3"
+  local limit="${VERITAS_TEMPO_SEARCH_LIMIT:-200}"
   curl -fsS -G --data-urlencode "q={ resource.service.name = \"$service_name\" && .chain_id = \"$chain_id\" }" \
+    --data-urlencode "limit=$limit" \
     "$TEMPO_URL/api/search" >"$output" 2>/dev/null || printf '{"traces":[]}\n' >"$output"
 }
 
@@ -591,6 +595,16 @@ print(json.dumps([
     for item in data.get("items", [])
     if not item.get("metadata", {}).get("deletionTimestamp")
 ], sort_keys=True))'
+}
+
+smoke_bootstrap_session_query() {
+  local chain_id="$1" bootstrap_session_id="$2" output="$3" path
+  if [[ -n "$bootstrap_session_id" ]]; then
+    path="/v1/admin/bootstrap-session?bootstrap_session_id=${bootstrap_session_id}"
+  else
+    path="/v1/admin/bootstrap-session?chain_id=${chain_id}"
+  fi
+  smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "$path" >"$output"
 }
 
 smoke_json_result_count() {

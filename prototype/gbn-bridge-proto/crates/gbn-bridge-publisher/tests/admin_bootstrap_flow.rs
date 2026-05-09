@@ -16,8 +16,8 @@ use gbn_bridge_protocol::{
 use gbn_bridge_publisher::{
     admin::{
         AdminCreatorConfig, AdminErrorResponse, AdminHttpServer, AdminHttpServerHandle,
-        AdminNodeMetadata, AdminState, InitializePublisherDhtResponse, SeedNewCreatorRequest,
-        SeedNewCreatorResponse,
+        AdminNodeMetadata, AdminState, BootstrapSessionAdminResponse,
+        InitializePublisherDhtResponse, SeedNewCreatorRequest, SeedNewCreatorResponse,
     },
     api::AuthorityRoute,
     storage::BootstrapSessionState,
@@ -373,6 +373,14 @@ fn full_bootstrap_payload_populates_local_dht_and_records_progress() {
         SelfOnboardingState::Onboarded
     );
     let bootstrap_session_id = response.bootstrap_session_id.unwrap();
+    let authority_admin = AdminHttpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        AdminState::authority(authority.service.clone()),
+        1_048_576,
+    )
+    .unwrap()
+    .spawn()
+    .unwrap();
 
     let (status, table): (u16, LocalDiscoveryTable) =
         get_json(new_admin.local_addr(), AuthorityRoute::AdminLocalDht.path());
@@ -429,6 +437,29 @@ fn full_bootstrap_payload_populates_local_dht_and_records_progress() {
             && event.stage == BootstrapProgressStage::BridgeSetComplete));
     drop(service);
 
+    let path = format!(
+        "{}?bootstrap_session_id={bootstrap_session_id}",
+        AuthorityRoute::AdminBootstrapSession.path()
+    );
+    let (status, response): (u16, BootstrapSessionAdminResponse) =
+        get_json(authority_admin.local_addr(), &path);
+    assert_eq!(status, 200);
+    assert_eq!(
+        response.bootstrap_session.bootstrap_session_id,
+        bootstrap_session_id
+    );
+    assert_eq!(
+        response.bootstrap_session.chain_id,
+        table.current_bootstrap_session.unwrap().chain_id.unwrap()
+    );
+    assert_eq!(response.bootstrap_session.host_creator_id, "creator-host");
+    assert_eq!(response.bootstrap_session.relay_bridge_id, "exit-bridge-a");
+    assert_ne!(
+        response.bootstrap_session.seed_bridge_id,
+        response.bootstrap_session.relay_bridge_id
+    );
+
+    authority_admin.join().unwrap();
     new_admin.join().unwrap();
     host_admin.join().unwrap();
     authority.join();

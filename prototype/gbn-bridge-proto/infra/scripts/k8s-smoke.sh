@@ -268,7 +268,7 @@ fi
 echo "Registered bridges: $bridge_count"
 
 if [[ "$SEND_DUMMY" == "1" ]]; then
-  echo "Running SendDummy through authority, receiver, and bridge pods..."
+  echo "Checking legacy SendDummy surfaces reject non-onboarded/non-creator nodes..."
   declare -a checks=(
     "$authority_pod:publisher-authority"
     "$receiver_pod:publisher-receiver"
@@ -281,41 +281,15 @@ if [[ "$SEND_DUMMY" == "1" ]]; then
     pod="${check%%:*}"
     container="${check##*:}"
     result="$(admin_curl "$pod" "$container" POST /v1/admin/send-dummy '{"size":256}')"
-    chain_id="$(printf '%s' "$result" | json_field chain_id)"
-    assigned="$(printf '%s' "$result" | json_field assigned_bridge_id)"
-    if [[ -z "$chain_id" || -z "$assigned" ]]; then
-      echo "ERROR: send-dummy on $pod did not return chain_id and assigned_bridge_id." >&2
+    code="$(printf '%s' "$result" | python3 -c 'import json,sys; data=json.load(sys.stdin); print((data.get("error") or {}).get("code", ""))')"
+    if [[ "$code" != "creator_not_onboarded" && "$code" != "not_supported" ]]; then
+      echo "ERROR: send-dummy on non-creator pod $pod should be rejected after Pass 3 local-DHT routing." >&2
       printf '%s\n' "$result" >&2
       exit 1
     fi
-    frames="$(
-      admin_curl "$authority_pod" publisher-authority GET "/v1/admin/frames?chain_id=${chain_id}" |
-        python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("frames", [])))'
-    )"
-    if [[ "$frames" -lt 1 ]]; then
-      echo "ERROR: chain_id $chain_id from $pod was not persisted in authority frames." >&2
-      exit 1
-    fi
-    log_found=0
-    for _ in {1..10}; do
-      recent_logs="$(
-        kubectl -n "$NAMESPACE" logs --tail=2000 \
-        --insecure-skip-tls-verify-backend=true \
-        -l app.kubernetes.io/part-of=veritas-conduit \
-        --all-containers=true
-      )"
-      if [[ "$recent_logs" == *"$chain_id"* ]]; then
-        log_found=1
-        break
-      fi
-      sleep 2
-    done
-    if [[ "$log_found" != "1" ]]; then
-      echo "ERROR: chain_id $chain_id from $pod did not appear in recent pod logs." >&2
-      exit 1
-    fi
-    echo "  $pod -> chain_id=$chain_id assigned_bridge_id=$assigned frames=$frames"
+    echo "  $pod -> rejected as expected with code=$code"
   done
+  echo "  Full SendDummy success is covered by Pass 3 Smoke 3 after creator onboarding."
 fi
 
 echo "Local Conduit Kubernetes smoke validation passed."

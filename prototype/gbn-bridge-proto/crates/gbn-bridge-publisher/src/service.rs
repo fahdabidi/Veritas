@@ -518,8 +518,7 @@ impl AuthorityService {
         )
         .map_err(map_authority_error)?;
         let _chain_span =
-            crate::metrics_otlp::chain_span("publisher_bootstrap_join", &request.chain_id)
-                .entered();
+            crate::metrics_otlp::chain_span("publisher_join_received", &request.chain_id).entered();
         crate::metrics_otlp::record_chain_id(&request.chain_id);
         tracing::info!(
             chain_id = request.chain_id.as_str(),

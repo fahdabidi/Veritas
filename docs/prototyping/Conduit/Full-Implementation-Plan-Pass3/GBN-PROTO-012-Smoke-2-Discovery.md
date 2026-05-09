@@ -1,8 +1,8 @@
 # GBN-PROTO-012 - Execution Phase 8 - Smoke 2 Discovery / Bootup Suite Implementation (Pass 3 Successor To GBN-PROTO-009)
 
 **Document ID:** GBN-PROTO-012-Smoke-2
-**Status:** Pending
-**Last Updated:** 2026-05-08
+**Status:** Completed
+**Last Updated:** 2026-05-09
 **Phase:** 8 (Smoke 2 — Discovery / Bootup Suite Implementation)
 **Supersedes (in scope only):** [GBN-PROTO-009 Local Kubernetes Discovery Smoke Test Plan](../Full-Implementation-Plan-Pass2/GBN-PROTO-009-Local-Kubernetes-Discovery-Smoke-Test-Plan.md)
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
@@ -16,6 +16,13 @@ local DHT / discovery table.
 The Pass 2 file `GBN-PROTO-009-Local-Kubernetes-Discovery-Smoke-Test-Plan.md` is left
 unchanged. The Pass 2 baseline `discovery-probe` shortcut is **not** treated as Smoke
 2 success in Pass 3.
+
+Completed 2026-05-09. Phase 8 implements `k8s-smoke-discovery-v3.sh`, adds the
+Publisher authority `GET /v1/admin/bootstrap-session` inspection endpoint, and hardens
+local Tempo validation with stable memory/ballast values plus a higher TraceQL search
+limit. Live validation passed in k3d with `creator-new` onboarded, 10 active local DHT
+bridge entries, a distinct NewCreator/HostCreator/ExitBridgeA/ExitBridgeB chain, and
+all 16 bootstrap events present in Tempo.
 
 ---
 
@@ -63,6 +70,7 @@ Prove that:
 bash prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-discovery-v3.sh \
   --require-observability \
   --bootstrap-timeout 120 \
+  --trace-timeout 300 \
   --min-active-bridges 5 \
   --allow-fanout-partial
 ```
@@ -71,6 +79,7 @@ Flags:
 
 - `--require-observability`: as Smoke 1.
 - `--bootstrap-timeout N`: max seconds to poll `local-dht` (default 120).
+- `--trace-timeout N`: max seconds to wait for Tempo event evidence (default 300).
 - `--min-active-bridges N`: minimum active bridge count for a `fanout_partial` to be
   accepted (default 5). `onboarded` always passes.
 - `--allow-fanout-partial`: if set, `fanout_partial ≥ min-active-bridges` is treated
@@ -193,7 +202,8 @@ assertion. Any `discovery_probe` span under the Smoke 2 `chain_id` fails the run
 
 ## 6. Artifacts
 
-Written to `/tmp/conduit-smoke-2-${chain_id}/`:
+Written to
+`prototype/gbn-bridge-proto/target/k8s-smoke-artifacts/smoke-2-discovery/<run-id>/`:
 
 - `pods.json`
 - `chain-id.txt`
@@ -218,6 +228,8 @@ Written to `/tmp/conduit-smoke-2-${chain_id}/`:
 | `fanout_failed` | Publisher BridgeBatchAssign not reaching remaining bridges; check authority control session |
 | Local DHT bridge count != 10 | Publisher created bootstrap with wrong count; check `bridge_count_target` in publisher logic |
 | 16-event trace missing return-path events | T0.5 not implemented; Phase 4 return-path block missing |
+| Tempo search returns only a subset of events | TraceQL result limit too low; `VERITAS_TEMPO_SEARCH_LIMIT` defaults to 200 for Smoke 2 |
+| Tempo port-forward fails or pod restarts | Observability backend degraded; verify Tempo is not OOM-killed and that `tempo.memBallastSizeMbs` is below its memory limit |
 | All four actor ids equal | Pre-Pass-3 shortcut still in place; Phase 3 was not actually completed |
 
 ---
@@ -246,5 +258,7 @@ Written to `/tmp/conduit-smoke-2-${chain_id}/`:
 - Against a fresh `k8s-up.sh` cluster, the script exits 0.
 - All 16 events present in Tempo.
 - Distinct actor chain proven.
+- Live local validation passed on 2026-05-09 with artifacts under
+  `prototype/gbn-bridge-proto/target/k8s-smoke-artifacts/smoke-2-discovery/20260508-184504-1982332/`.
 - `git diff --stat -- docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/` is empty.
 - V1 (`prototype/gbn-proto/**`) is unchanged.

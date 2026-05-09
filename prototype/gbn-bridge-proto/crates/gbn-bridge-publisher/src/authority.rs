@@ -318,6 +318,10 @@ impl PublisherAuthority {
         self.storage.bootstrap_sessions.get(bootstrap_session_id)
     }
 
+    pub fn bootstrap_sessions(&self) -> impl Iterator<Item = &BootstrapSessionRecord> {
+        self.storage.bootstrap_sessions.values()
+    }
+
     pub fn catalog_issuance(&self, catalog_id: &str) -> Option<&CatalogIssuanceRecord> {
         self.storage.catalog_issuance.get(catalog_id)
     }

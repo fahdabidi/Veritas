@@ -1,6 +1,7 @@
 # Local Tempo single-binary deployment for Conduit OTLP spans.
 tempo:
   retention: 24h
+  memBallastSizeMbs: 64
   storage:
     trace:
       backend: local
@@ -16,10 +17,10 @@ tempo:
   resources:
     requests:
       cpu: 50m
-      memory: 128Mi
+      memory: 256Mi
     limits:
       cpu: 250m
-      memory: 512Mi
+      memory: 1Gi
 
 persistence:
   enabled: true

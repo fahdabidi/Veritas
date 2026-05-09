@@ -2,7 +2,7 @@
 
 **Document ID:** GBN-PROTO-012
 **Status:** Pending
-**Last Updated:** 2026-05-08
+**Last Updated:** 2026-05-09
 **Related Docs:**
 [GBN-ARCH-001-V2 Media Creation Network](../../../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md),
 [GBN-PROTO-007 Pass 2 V2-V1 Parity](../Full-Implementation-Plan-Pass2/GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md),
@@ -67,7 +67,7 @@ Pass 3 replaces the synthetic shortcut with the documented flow:
 | 5 | Onboarded-Creator SendDummy And Local-DHT Single-Lane Envelope Demo | `[x]` |
 | 6 | Operator Scripts And Acceptance Gate | `[x]` |
 | 7 | Smoke 1 — Tracing Suite Implementation | `[x]` |
-| 8 | Smoke 2 — Discovery / Bootup Suite Implementation | `[ ]` |
+| 8 | Smoke 2 — Discovery / Bootup Suite Implementation | `[x]` |
 | 9 | Smoke 3 — Route And Encryption Boundary Suite Implementation | `[ ]` |
 | 10 | Upload Session Build And Per-Chunk Encryption Pipeline (§3.4 + §3.5) | `[ ]` |
 | 11 | Multi-Lane Progressive Fanout (§3.6 + §3.7) | `[ ]` |
@@ -447,6 +447,14 @@ Implement `infra/scripts/k8s-smoke-discovery-v3.sh`. Drives `SeedHostCreator` an
 `GET /v1/admin/local-dht` until terminal state, and asserts the §3.3 architecture
 flow: full local DHT population, distinct actor chain (4 distinct ids), all 16 §2.5
 events present in Tempo, no legacy `discovery-probe` shortcut.
+
+Completed 2026-05-09. Smoke 2 now seeds HostCreator with in-cluster Publisher service
+metadata, initializes the Publisher's 10-entry ExitBridge DHT, starts NewCreator
+first-contact bootup, reads the Publisher bootstrap session through
+`GET /v1/admin/bootstrap-session`, and proves `creator-new` reaches `onboarded` with
+10 active local DHT bridge entries. Live k3d validation passed with Tempo evidence for
+all 16 bootstrap events after hardening Tempo resource values and widening TraceQL
+search result limits.
 
 ### Phase 9 - Smoke 3 - Route And Encryption Boundary Suite Implementation
 

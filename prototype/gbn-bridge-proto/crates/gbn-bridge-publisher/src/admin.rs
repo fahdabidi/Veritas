@@ -35,7 +35,7 @@ use crate::metrics::{
 };
 use crate::metrics_otlp;
 use crate::service::{AuthorityService, ServiceError};
-use crate::storage::{BridgeRecord, IngestedFrameRecord};
+use crate::storage::{BootstrapSessionRecord, BridgeRecord, IngestedFrameRecord};
 use crate::AuthorityError;
 
 pub const ADMIN_BIND_ADDR_ENV: &str = "GBN_BRIDGE_ADMIN_BIND_ADDR";
@@ -312,6 +312,17 @@ pub struct EchoChainIdResponse {
     pub conduit_actor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher_surface: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BootstrapSessionQuery {
+    chain_id: Option<String>,
+    bootstrap_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapSessionAdminResponse {
+    pub bootstrap_session: BootstrapSessionRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -724,6 +735,12 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         }
         ("GET", path) if path == AuthorityRoute::AdminMetrics.path() => metrics_snapshot(state),
         ("GET", path) if path == AuthorityRoute::AdminNodeMetadata.path() => node_metadata(state),
+        ("GET", path) if path == AuthorityRoute::AdminBootstrapSession.path() => {
+            match parse_bootstrap_session_query(query) {
+                Ok(query) => bootstrap_session(state, query),
+                Err(message) => error_response(400, "bad_query", &message),
+            }
+        }
         ("GET", path) if path == AuthorityRoute::AdminLocalDht.path() => local_dht(state),
         ("GET", path) => match admin_bridge_dht_entry_target(path) {
             Some(bridge_id) => bridge_dht_entry(state, bridge_id),
@@ -773,6 +790,45 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
 
 fn node_metadata(state: &AdminState) -> Vec<u8> {
     json_response(200, &state.node_metadata)
+}
+
+fn bootstrap_session(state: &AdminState, query: BootstrapSessionQuery) -> Vec<u8> {
+    let Some(authority) = &state.authority else {
+        return error_response(
+            501,
+            "not_supported",
+            "bootstrap sessions are only available on the publisher authority",
+        );
+    };
+    let service = authority
+        .lock()
+        .expect("authority service mutex poisoned while reading bootstrap session");
+    let authority = service.publisher_authority();
+    let session = if let Some(session_id) = query.bootstrap_session_id.as_deref() {
+        authority.bootstrap_session(session_id).cloned()
+    } else if let Some(chain_id) = query.chain_id.as_deref() {
+        authority
+            .bootstrap_sessions()
+            .find(|session| session.chain_id == chain_id)
+            .cloned()
+    } else {
+        return error_response(
+            400,
+            "bad_query",
+            "bootstrap-session requires chain_id or bootstrap_session_id",
+        );
+    };
+
+    match session {
+        Some(bootstrap_session) => {
+            json_response(200, &BootstrapSessionAdminResponse { bootstrap_session })
+        }
+        None => error_response(
+            404,
+            "bootstrap_session_not_found",
+            "no bootstrap session matched the supplied query",
+        ),
+    }
 }
 
 fn echo_chain_id(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
@@ -2354,7 +2410,7 @@ fn emit_host_seed_event(
     bootstrap_genesis: bool,
     forced: bool,
 ) {
-    let _chain_span = metrics_otlp::chain_span("admin_seed_host_creator", chain_id).entered();
+    let _chain_span = metrics_otlp::chain_span(event, chain_id).entered();
     metrics_otlp::record_chain_id(chain_id);
     tracing::info!(
         event,
@@ -2376,7 +2432,7 @@ fn emit_host_seed_warn_event(
     bootstrap_genesis: bool,
     forced: bool,
 ) {
-    let _chain_span = metrics_otlp::chain_span("admin_seed_host_creator", chain_id).entered();
+    let _chain_span = metrics_otlp::chain_span(event, chain_id).entered();
     metrics_otlp::record_chain_id(chain_id);
     tracing::warn!(
         event,
@@ -2398,7 +2454,7 @@ fn emit_new_seed_event(
     bootstrap_session_id: Option<&str>,
     forced: bool,
 ) {
-    let _chain_span = metrics_otlp::chain_span("admin_seed_new_creator", chain_id).entered();
+    let _chain_span = metrics_otlp::chain_span(event, chain_id).entered();
     metrics_otlp::record_chain_id(chain_id);
     tracing::info!(
         event,
@@ -2419,7 +2475,7 @@ fn emit_join_path_event(
     relay_bridge_id: Option<&str>,
     bootstrap_session_id: Option<&str>,
 ) {
-    let _chain_span = metrics_otlp::chain_span("creator_bootstrap_join", chain_id).entered();
+    let _chain_span = metrics_otlp::chain_span(event, chain_id).entered();
     metrics_otlp::record_chain_id(chain_id);
     tracing::info!(
         event,
@@ -2437,8 +2493,7 @@ fn emit_publisher_dht_event(
     initialized_bridge_count: usize,
     active_bridge_count: usize,
 ) {
-    let _chain_span =
-        metrics_otlp::chain_span("admin_initialize_publisher_dht", chain_id).entered();
+    let _chain_span = metrics_otlp::chain_span(event, chain_id).entered();
     metrics_otlp::record_chain_id(chain_id);
     tracing::info!(
         event,
@@ -2626,6 +2681,40 @@ fn parse_trace_chain_id_query(query: Option<&str>) -> Result<Option<String>, Str
         }
     }
     Ok(chain_id)
+}
+
+fn parse_bootstrap_session_query(query: Option<&str>) -> Result<BootstrapSessionQuery, String> {
+    let mut chain_id = None;
+    let mut bootstrap_session_id = None;
+
+    let Some(query) = query else {
+        return Ok(BootstrapSessionQuery {
+            chain_id,
+            bootstrap_session_id,
+        });
+    };
+
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "chain_id" if !value.is_empty() => {
+                validate_chain_id(value).map_err(|error| error.to_string())?;
+                chain_id = Some(value.to_string());
+            }
+            "bootstrap_session_id" if !value.is_empty() => {
+                if value.contains('/') || value.contains('&') {
+                    return Err("bootstrap_session_id contains invalid characters".to_string());
+                }
+                bootstrap_session_id = Some(value.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    Ok(BootstrapSessionQuery {
+        chain_id,
+        bootstrap_session_id,
+    })
 }
 
 fn env_u16(name: &str) -> Option<u16> {

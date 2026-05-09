@@ -14,19 +14,24 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = PublisherServiceConfig::from_env()?;
+    let authority_config = AuthorityConfig::from_env()?;
     let signing_key = PublisherSigningSource::from_env()
         .and_then(|source| source.load_signing_key())
         .map_err(|error| error.to_string())?;
     let authority = match PostgresStorageConfig::from_env().map_err(|error| error.to_string())? {
         Some(postgres_config) => PublisherAuthority::with_postgres(
             signing_key,
-            AuthorityConfig::default(),
+            authority_config,
             AuthorityPolicy::default(),
             postgres_config,
             now_ms(),
         )
         .map_err(|error| error.to_string())?,
-        None => PublisherAuthority::new(signing_key),
+        None => PublisherAuthority::with_config(
+            signing_key,
+            authority_config,
+            AuthorityPolicy::default(),
+        ),
     };
     let server = AuthorityServer::new(authority, config);
     let bound = server.bind().map_err(|error| error.to_string())?;

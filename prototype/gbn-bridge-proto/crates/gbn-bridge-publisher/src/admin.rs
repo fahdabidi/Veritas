@@ -287,6 +287,8 @@ pub struct SendDummyRequest {
     pub force_bridge_failure: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_marker: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1598,6 +1600,7 @@ fn inject_send_dummy(state: &AdminState, body: &[u8], query: Option<&str>) -> Ve
             size: None,
             force_bridge_failure: false,
             chain_id: None,
+            plaintext_marker: None,
         }
     } else {
         match serde_json::from_slice::<SendDummyRequest>(body) {
@@ -1638,6 +1641,34 @@ fn inject_send_dummy(state: &AdminState, body: &[u8], query: Option<&str>) -> Ve
         Ok(chain_id) => Some(chain_id),
         Err(message) => return error_response(400, "bad_query", &message),
     };
+    let chain_id_ref = chain_id
+        .as_deref()
+        .expect("send-dummy trace chain id is always supplied");
+    emit_send_dummy_event(
+        "creator_send_dummy_requested",
+        chain_id_ref,
+        &config.actor_id,
+        None,
+        request.force_bridge_failure,
+        None,
+        None,
+    );
+    let pre_route_snapshot = store.snapshot();
+    emit_send_dummy_event(
+        "creator_local_dht_loaded",
+        chain_id_ref,
+        &config.actor_id,
+        None,
+        request.force_bridge_failure,
+        Some(pre_route_snapshot.bridge_entries.len()),
+        Some(
+            pre_route_snapshot
+                .bridge_entries
+                .iter()
+                .filter(|entry| entry.active)
+                .count(),
+        ),
+    );
 
     let client = CreatorClient::new(
         config.actor_id.clone(),
@@ -1646,11 +1677,36 @@ fn inject_send_dummy(state: &AdminState, body: &[u8], query: Option<&str>) -> Ve
     )
     .with_creator_endpoint(config.creator_ip_addr.clone(), config.udp_punch_port)
     .with_timeout(config.timeout);
-    match client.send_dummy_from_local_dht(store, size, request.force_bridge_failure, chain_id) {
+    let plaintext_marker = request.plaintext_marker.as_deref().map(str::as_bytes);
+    match client.send_dummy_from_local_dht(
+        store,
+        size,
+        request.force_bridge_failure,
+        chain_id,
+        plaintext_marker,
+    ) {
         Ok(result) => {
             let _chain_span =
                 metrics_otlp::chain_span("admin_send_dummy", &result.chain_id).entered();
             metrics_otlp::record_chain_id(&result.chain_id);
+            emit_send_dummy_event(
+                "creator_route_selected",
+                &result.chain_id,
+                &result.actor_id,
+                Some(&result.assigned_bridge_id),
+                result.force_bridge_failure_used,
+                Some(result.candidate_bridge_ids.len()),
+                Some(result.selected_bridge_ids.len()),
+            );
+            emit_send_dummy_event(
+                "creator_dummy_frame_sent",
+                &result.chain_id,
+                &result.actor_id,
+                Some(&result.assigned_bridge_id),
+                result.force_bridge_failure_used,
+                None,
+                Some(result.frames as usize),
+            );
             json_response::<SendDummyResult>(200, &result)
         }
         Err(error) => creator_error_response(error),
@@ -2500,6 +2556,28 @@ fn emit_publisher_dht_event(
         chain_id,
         initialized_bridge_count,
         active_bridge_count
+    );
+}
+
+fn emit_send_dummy_event(
+    event: &'static str,
+    chain_id: &str,
+    actor_id: &str,
+    assigned_bridge_id: Option<&str>,
+    force_bridge_failure: bool,
+    candidate_count: Option<usize>,
+    selected_count: Option<usize>,
+) {
+    let _chain_span = metrics_otlp::chain_span(event, chain_id).entered();
+    metrics_otlp::record_chain_id(chain_id);
+    tracing::info!(
+        event,
+        chain_id,
+        actor_id,
+        assigned_bridge_id = assigned_bridge_id.unwrap_or("none"),
+        force_bridge_failure,
+        candidate_count = candidate_count.unwrap_or_default(),
+        selected_count = selected_count.unwrap_or_default(),
     );
 }
 

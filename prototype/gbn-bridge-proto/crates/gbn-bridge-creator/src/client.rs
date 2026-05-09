@@ -309,6 +309,7 @@ impl CreatorClient {
         size: usize,
         force_bridge_failure: bool,
         chain_id: Option<String>,
+        plaintext_marker: Option<&[u8]>,
     ) -> Result<SendDummyResult, CreatorError> {
         let started = Instant::now();
         let now_ms = now_ms();
@@ -366,7 +367,7 @@ impl CreatorClient {
         let bridge_address = bridge_upload_address(&selected)?;
         let session_id_bytes = session_id_bytes(&chain_id);
         let session_id = hex_bytes(&session_id_bytes);
-        let frame = synthesize_frame(size);
+        let frame = synthesize_frame_with_marker(size, plaintext_marker);
         let ephemeral_private = ephemeral_private_bytes(&self.actor_id, &chain_id, now_ms);
         let encrypted = encrypt_for_publisher(
             &frame,
@@ -723,8 +724,19 @@ struct ParsedEndpoint {
 }
 
 fn synthesize_frame(size: usize) -> Vec<u8> {
+    synthesize_frame_with_marker(size, None)
+}
+
+fn synthesize_frame_with_marker(size: usize, marker: Option<&[u8]>) -> Vec<u8> {
     let mut buf = Vec::with_capacity(size);
+    if let Some(marker) = marker.filter(|marker| !marker.is_empty()) {
+        let marker_len = marker.len().min(size);
+        buf.extend_from_slice(&marker[..marker_len]);
+    }
     for i in 0..size {
+        if buf.len() >= size {
+            break;
+        }
         buf.push((i % 251) as u8);
     }
     buf

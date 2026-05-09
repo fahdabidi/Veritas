@@ -607,6 +607,11 @@ smoke_bootstrap_session_query() {
   smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "$path" >"$output"
 }
 
+smoke_frames_by_chain_id() {
+  local chain_id="$1" output="$2" limit="${3:-10}"
+  smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/frames?chain_id=${chain_id}&limit=${limit}" >"$output"
+}
+
 smoke_json_result_count() {
   python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(len(data.get("data", {}).get("result", data.get("traces", []))))' "$1"
 }

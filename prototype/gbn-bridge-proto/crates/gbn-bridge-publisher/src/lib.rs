@@ -196,6 +196,106 @@ impl Default for AuthorityConfig {
     }
 }
 
+impl AuthorityConfig {
+    pub fn from_env() -> Result<Self, String> {
+        let defaults = Self::default();
+        Ok(Self {
+            default_udp_punch_port: parse_env_u16(
+                "GBN_BRIDGE_AUTHORITY_DEFAULT_UDP_PUNCH_PORT",
+                defaults.default_udp_punch_port,
+            )?,
+            lease_ttl_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_LEASE_TTL_MS",
+                defaults.lease_ttl_ms,
+            )?,
+            heartbeat_interval_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_HEARTBEAT_INTERVAL_MS",
+                defaults.heartbeat_interval_ms,
+            )?,
+            catalog_ttl_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_CATALOG_TTL_MS",
+                defaults.catalog_ttl_ms,
+            )?,
+            bootstrap_entry_ttl_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_BOOTSTRAP_ENTRY_TTL_MS",
+                defaults.bootstrap_entry_ttl_ms,
+            )?,
+            bootstrap_response_ttl_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_BOOTSTRAP_RESPONSE_TTL_MS",
+                defaults.bootstrap_response_ttl_ms,
+            )?,
+            punch_instruction_ttl_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_PUNCH_INSTRUCTION_TTL_MS",
+                defaults.punch_instruction_ttl_ms,
+            )?,
+            bootstrap_bridge_count: parse_env_usize(
+                "GBN_BRIDGE_AUTHORITY_BOOTSTRAP_BRIDGE_COUNT",
+                defaults.bootstrap_bridge_count,
+            )?,
+            bootstrap_seed_ack_timeout_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_BOOTSTRAP_SEED_ACK_TIMEOUT_MS",
+                defaults.bootstrap_seed_ack_timeout_ms,
+            )?,
+            bootstrap_seed_tunnel_timeout_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_BOOTSTRAP_SEED_TUNNEL_TIMEOUT_MS",
+                defaults.bootstrap_seed_tunnel_timeout_ms,
+            )?,
+            bootstrap_bridge_set_timeout_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_BOOTSTRAP_BRIDGE_SET_TIMEOUT_MS",
+                defaults.bootstrap_bridge_set_timeout_ms,
+            )?,
+            bootstrap_max_reassignments: parse_env_u32(
+                "GBN_BRIDGE_AUTHORITY_BOOTSTRAP_MAX_REASSIGNMENTS",
+                defaults.bootstrap_max_reassignments,
+            )?,
+            batch_window_ms: parse_env_u64(
+                "GBN_BRIDGE_AUTHORITY_BATCH_WINDOW_MS",
+                defaults.batch_window_ms,
+            )?,
+            batch_capacity: parse_env_usize(
+                "GBN_BRIDGE_AUTHORITY_BATCH_CAPACITY",
+                defaults.batch_capacity,
+            )?,
+        })
+    }
+}
+
+fn parse_env_u16(key: &str, default: u16) -> Result<u16, String> {
+    match std::env::var(key) {
+        Ok(value) => value
+            .parse::<u16>()
+            .map_err(|_| format!("{key} must be a valid u16, got {value:?}")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_u32(key: &str, default: u32) -> Result<u32, String> {
+    match std::env::var(key) {
+        Ok(value) => value
+            .parse::<u32>()
+            .map_err(|_| format!("{key} must be a valid u32, got {value:?}")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_u64(key: &str, default: u64) -> Result<u64, String> {
+    match std::env::var(key) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|_| format!("{key} must be a valid u64, got {value:?}")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_usize(key: &str, default: usize) -> Result<usize, String> {
+    match std::env::var(key) {
+        Ok(value) => value
+            .parse::<usize>()
+            .map_err(|_| format!("{key} must be a valid usize, got {value:?}")),
+        Err(_) => Ok(default),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorityPolicy {
     pub direct_only_bootstrap: bool,

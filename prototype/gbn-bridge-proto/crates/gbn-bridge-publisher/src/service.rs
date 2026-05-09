@@ -658,6 +658,18 @@ impl AuthorityService {
             request.body.received_at_ms,
         )
         .map_err(map_authority_error)?;
+        let _chain_span =
+            crate::metrics_otlp::chain_span("publisher_dummy_ack_returned", &request.chain_id)
+                .entered();
+        crate::metrics_otlp::record_chain_id(&request.chain_id);
+        tracing::info!(
+            event = "publisher_dummy_ack_returned",
+            chain_id = request.chain_id.as_str(),
+            bridge_id = request.body.via_bridge_id.as_str(),
+            session_id = ack.session_id.as_str(),
+            acked_sequence = ack.acked_sequence,
+            status = ?ack.status,
+        );
         self.success_response(&request.chain_id, &request.request_id, ack)
     }
 

@@ -557,8 +557,15 @@ fn handle_creator_upload_request(
     match request {
         CreatorBridgeRequest::Open(open) => {
             let chain_id = open.chain_id.clone();
-            let _chain_span = metrics_otlp::chain_span("bridge_creator_open", &chain_id).entered();
+            let _chain_span =
+                metrics_otlp::chain_span("creator_bridge_open_sent", &chain_id).entered();
             metrics_otlp::record_chain_id(&chain_id);
+            tracing::info!(
+                event = "creator_bridge_open_sent",
+                chain_id,
+                bridge_id = runtime.config().bridge_id.as_str(),
+                session_id = open.session_id.as_str(),
+            );
             let session_id = open.session_id.clone();
             let now = now_ms();
             match runtime.open_data_session_with_chain_id(&chain_id, open, now) {
@@ -579,9 +586,18 @@ fn handle_creator_upload_request(
         }
         CreatorBridgeRequest::Frame(frame) => {
             let chain_id = frame.chain_id.clone();
-            let _chain_span = metrics_otlp::chain_span("bridge_creator_frame", &chain_id).entered();
+            let _chain_span =
+                metrics_otlp::chain_span("bridge_dummy_frame_forwarded", &chain_id).entered();
             metrics_otlp::record_chain_id(&chain_id);
             let bytes = frame.ciphertext.len();
+            tracing::info!(
+                event = "bridge_dummy_frame_forwarded",
+                chain_id,
+                bridge_id = runtime.config().bridge_id.as_str(),
+                session_id = frame.session_id.as_str(),
+                sequence = frame.sequence,
+                payload_bytes = bytes,
+            );
             let now = now_ms();
             match runtime.forward_session_frame_with_chain_id(&chain_id, frame, now) {
                 Ok(ack) => {
@@ -590,8 +606,8 @@ fn handle_creator_upload_request(
                         .expect("bridge metrics mutex poisoned")
                         .record_frame_forwarded(bytes);
                     eprintln!(
-                        "exit-bridge creator upload forwarded session_id={} sequence={} chain_id={} status={:?}",
-                        ack.session_id, ack.acked_sequence, ack.chain_id, ack.status
+                        "exit-bridge creator upload forwarded session_id={} sequence={} chain_id={} status={:?} payload_bytes={}",
+                        ack.session_id, ack.acked_sequence, ack.chain_id, ack.status, bytes
                     );
                     CreatorBridgeResponse::Ack(ack)
                 }

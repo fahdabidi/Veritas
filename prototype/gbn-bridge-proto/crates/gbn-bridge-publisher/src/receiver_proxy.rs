@@ -198,11 +198,23 @@ fn handle_connection(
     }
 
     let chain_id = extract_chain_id(&request.body);
+    let operation = if request.path == "/v1/receiver/frame" {
+        "receiver_dummy_frame_ingested"
+    } else {
+        "publisher_receiver_proxy"
+    };
     let _chain_span = chain_id
         .as_deref()
-        .map(|chain_id| metrics_otlp::chain_span("publisher_receiver_proxy", chain_id).entered());
+        .map(|chain_id| metrics_otlp::chain_span(operation, chain_id).entered());
     if let Some(chain_id) = &chain_id {
         metrics_otlp::record_chain_id(chain_id);
+        if request.path == "/v1/receiver/frame" {
+            tracing::info!(
+                event = "receiver_dummy_frame_ingested",
+                chain_id,
+                payload_bytes = request.body.len(),
+            );
+        }
         eprintln!(
             "publisher-receiver proxy method={} path={} chain_id={}",
             request.method, request.path, chain_id

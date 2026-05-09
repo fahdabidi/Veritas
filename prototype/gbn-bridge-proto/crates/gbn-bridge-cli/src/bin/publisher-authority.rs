@@ -19,6 +19,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let _otlp_guard = metrics_otlp::init_otlp_tracing_from_env("publisher-authority")?;
     let config = PublisherServiceConfig::from_env()?;
+    let authority_config = AuthorityConfig::from_env()?;
     let request_max_bytes = config.request_max_bytes;
     let authority_url = local_http_url_from_bind_addr(&config.bind_addr, 8080);
     let signing_key = PublisherSigningSource::from_env()
@@ -37,13 +38,17 @@ fn run() -> Result<(), String> {
     let authority = match PostgresStorageConfig::from_env().map_err(|error| error.to_string())? {
         Some(postgres_config) => PublisherAuthority::with_postgres(
             signing_key,
-            AuthorityConfig::default(),
+            authority_config,
             AuthorityPolicy::default(),
             postgres_config,
             now_ms(),
         )
         .map_err(|error| error.to_string())?,
-        None => PublisherAuthority::new(signing_key),
+        None => PublisherAuthority::with_config(
+            signing_key,
+            authority_config,
+            AuthorityPolicy::default(),
+        ),
     };
     let server = AuthorityServer::new(authority, config);
     let service_handle = server.service_handle();

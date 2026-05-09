@@ -71,12 +71,15 @@ import sys
 
 expected_role, expected_surface = sys.argv[1:3]
 data = json.load(sys.stdin)
-if data.get("role") != expected_role:
-    raise SystemExit(f"expected local DHT role {expected_role!r}, got {data.get('role')!r}")
-if data.get("state") != "not_applicable":
-    raise SystemExit(f"expected state not_applicable, got {data.get('state')!r}")
-if expected_surface and data.get("publisher_surface") != expected_surface:
-    raise SystemExit(f"expected publisher_surface {expected_surface!r}, got {data.get('publisher_surface')!r}")
+role = data.get("role")
+state = data.get("state")
+publisher_surface = data.get("publisher_surface")
+if role != expected_role:
+    raise SystemExit(f"expected local DHT role {expected_role!r}, got {role!r}")
+if state != "not_applicable":
+    raise SystemExit(f"expected state not_applicable, got {state!r}")
+if expected_surface and publisher_surface != expected_surface:
+    raise SystemExit(f"expected publisher_surface {expected_surface!r}, got {publisher_surface!r}")
 if not data.get("reason"):
     raise SystemExit(f"expected a not_applicable reason, got {data!r}")
 ' "$expected_role" "$expected_surface"
@@ -90,10 +93,12 @@ import sys
 
 expected_surface, expected_url_field = sys.argv[1:3]
 data = json.load(sys.stdin)
-if data.get("role") != "publisher":
-    raise SystemExit(f"expected publisher role, got {data.get('role')!r}")
-if data.get("publisher_surface") != expected_surface:
-    raise SystemExit(f"expected publisher_surface {expected_surface!r}, got {data.get('publisher_surface')!r}")
+role = data.get("role")
+publisher_surface = data.get("publisher_surface")
+if role != "publisher":
+    raise SystemExit(f"expected publisher role, got {role!r}")
+if publisher_surface != expected_surface:
+    raise SystemExit(f"expected publisher_surface {expected_surface!r}, got {publisher_surface!r}")
 if not data.get(expected_url_field):
     raise SystemExit(f"expected {expected_url_field} in metadata, got {data!r}")
 if not data.get("public_key") or not data.get("publisher_public_key"):
@@ -108,8 +113,9 @@ import json
 import sys
 
 data = json.load(sys.stdin)
-if data.get("role") != "exit_bridge":
-    raise SystemExit(f"expected exit_bridge role, got {data.get('role')!r}")
+role = data.get("role")
+if role != "exit_bridge":
+    raise SystemExit(f"expected exit_bridge role, got {role!r}")
 if not data.get("ingress_endpoints"):
     raise SystemExit(f"expected ingress_endpoints, got {data!r}")
 if not data.get("udp_punch_port"):
@@ -154,6 +160,12 @@ if before != after:
     raise SystemExit(f"creator local DHT did not persist across restart\nbefore={before!r}\nafter={after!r}")
 PY
   rm -f "$before_file" "$after_file"
+}
+
+reset_creator_state() {
+  local pod="$1" actor="$2" chain_id
+  chain_id="k8s-smoke-reset-${actor}-$(date +%s%N)"
+  admin_curl "$pod" creator-runner POST "/v1/admin/reset-creator-state?chain_id=${chain_id}" "{}" >/dev/null
 }
 
 echo "Checking namespace '$NAMESPACE'..."
@@ -209,6 +221,9 @@ for pod in "${bridge_pods[@]}"; do
   assert_bridge_metadata "$pod"
   assert_not_applicable_local_dht "$pod" exit-bridge exit_bridge
 done
+echo "Resetting creator local DHT baseline for repeatable smoke validation..."
+reset_creator_state "$creator_host_pod" host-creator
+reset_creator_state "$creator_new_pod" new-creator
 for check in "$creator_host_pod:host-creator" "$creator_new_pod:new-creator"; do
   pod="${check%%:*}"
   actor="${check##*:}"
@@ -220,24 +235,30 @@ import sys
 
 actor = sys.argv[1]
 data = json.load(sys.stdin)
-if data.get("role") != "creator":
-    raise SystemExit(f"expected creator role, got {data.get('role')!r}")
-if data.get("conduit_actor") != actor:
-    raise SystemExit(f"expected actor {actor!r}, got {data.get('conduit_actor')!r}")
+role = data.get("role")
+conduit_actor = data.get("conduit_actor")
+if role != "creator":
+    raise SystemExit(f"expected creator role, got {role!r}")
+if conduit_actor != actor:
+    raise SystemExit(f"expected actor {actor!r}, got {conduit_actor!r}")
 ' "$actor"
   printf '%s' "$local_dht" | python3 -c '
 import json
 import sys
 
 data = json.load(sys.stdin)
-if data.get("role") != "creator":
-    raise SystemExit(f"expected creator local DHT role, got {data.get('role')!r}")
-if data.get("actor_id") != sys.argv[1]:
-    raise SystemExit(f"expected actor_id {sys.argv[1]!r}, got {data.get('actor_id')!r}")
-if data.get("self_onboarding_state") != "none":
-    raise SystemExit(f"expected self_onboarding_state none, got {data.get('self_onboarding_state')!r}")
-if data.get("host_role_state") != "not_host":
-    raise SystemExit(f"expected host_role_state not_host, got {data.get('host_role_state')!r}")
+role = data.get("role")
+actor_id = data.get("actor_id")
+self_onboarding_state = data.get("self_onboarding_state")
+host_role_state = data.get("host_role_state")
+if role != "creator":
+    raise SystemExit(f"expected creator local DHT role, got {role!r}")
+if actor_id != sys.argv[1]:
+    raise SystemExit(f"expected actor_id {sys.argv[1]!r}, got {actor_id!r}")
+if self_onboarding_state != "none":
+    raise SystemExit(f"expected self_onboarding_state none, got {self_onboarding_state!r}")
+if host_role_state != "not_host":
+    raise SystemExit(f"expected host_role_state not_host, got {host_role_state!r}")
 if data.get("bridge_entries") != [] or data.get("active_tunnels") != []:
     raise SystemExit(f"expected empty bridge/tunnel state, got {data!r}")
 ' "$actor"

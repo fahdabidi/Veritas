@@ -1,8 +1,8 @@
 # GBN-PROTO-012 - Execution Phase 9 - Smoke 3 Route And Encryption Boundary Suite Implementation (Pass 3 Successor To GBN-PROTO-010)
 
 **Document ID:** GBN-PROTO-012-Smoke-3
-**Status:** Pending
-**Last Updated:** 2026-05-08
+**Status:** Completed
+**Last Updated:** 2026-05-09
 **Phase:** 9 (Smoke 3 — Route And Encryption Boundary Suite Implementation)
 **Supersedes (in scope only):** [GBN-PROTO-010 Local Kubernetes Creator-To-Publisher Route Smoke Test Plan](../Full-Implementation-Plan-Pass2/GBN-PROTO-010-Local-Kubernetes-Creator-Publisher-Route-Smoke-Test-Plan.md)
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
@@ -13,6 +13,11 @@ an onboarded NewCreator constructs its upload route from its own local DHT (per
 `GBN-ARCH-001-V2` §3.6 and §3.7), envelope-encrypts the dummy frame so bridges only
 see ciphertext (per §3.5 / §6 / §9.2), and can fail over to a second bridge after a
 forced primary failure (per §7.1 / §9.1).
+
+Implementation completed on 2026-05-09. The live local-k8s run passed with artifacts at
+`prototype/gbn-bridge-proto/target/k8s-smoke-artifacts/smoke-3-route/20260508-194801-2480163`
+and bootstrap fallback artifacts at
+`prototype/gbn-bridge-proto/target/k8s-smoke-artifacts/smoke-2-discovery/20260508-194816-2483142`.
 
 The Pass 2 file `GBN-PROTO-010-Local-Kubernetes-Creator-Publisher-Route-Smoke-Test-Plan.md`
 is left unchanged. The Pass 2 baseline `send-dummy` shortcut is **not** treated as
@@ -66,6 +71,8 @@ Flags:
 - `--include-failover`: also run `force_bridge_failure=true` invocation. Default on.
 - `--bridge-decrypt-attempt`: enable the bridge-side ciphertext intercept assertion.
   Default on.
+- `--plaintext-marker TEXT`: marker seeded into dummy plaintext before encryption.
+  Default `VERITAS-SMOKE-3-PLAINTEXT`.
 
 ---
 
@@ -76,11 +83,13 @@ Flags:
 2. Capture `local-dht` snapshot before any send: `creator-local-dht-before.json`.
 3. **Normal invocation**:
    - POST `/v1/admin/send-dummy?chain_id=<chain_id_normal>` to `creator-new` with
-     `{ "size": <--message-size>, "force_bridge_failure": false }`.
+     `{ "size": <--message-size>, "force_bridge_failure": false,
+     "plaintext_marker": "<--plaintext-marker>" }`.
    - Capture response.
 4. **Failover invocation**:
    - POST `/v1/admin/send-dummy?chain_id=<chain_id_failover>` to `creator-new` with
-     `{ "size": <--message-size>, "force_bridge_failure": true }`.
+     `{ "size": <--message-size>, "force_bridge_failure": true,
+     "plaintext_marker": "<--plaintext-marker>" }`.
    - Capture response.
 5. Wait 5 s for trace export and receiver persistence.
 6. Run assertions.
@@ -168,7 +177,8 @@ direct authority catalog call.
 
 ## 6. Artifacts
 
-Written to `/tmp/conduit-smoke-3-${chain_id_normal}/`:
+Written to
+`prototype/gbn-bridge-proto/target/k8s-smoke-artifacts/smoke-3-route/<run-id>/`:
 
 - `pods.json`
 - `creator-local-dht-before.json`
@@ -230,3 +240,16 @@ Written to `/tmp/conduit-smoke-3-${chain_id_normal}/`:
 - Bridge plaintext grep returns empty.
 - `git diff --stat -- docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/` is empty.
 - V1 (`prototype/gbn-proto/**`) is unchanged.
+
+Completed validation:
+
+- `cargo fmt --all --check`
+- `cargo check --workspace`
+- `cargo test -p gbn-bridge-publisher --test admin_send_dummy`
+- `cargo test -p gbn-bridge-publisher --test admin_bootstrap_flow`
+- `cargo test -p gbn-bridge-protocol --test encryption_envelope`
+- `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke.sh`
+- `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-common.sh`
+- `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-route-v3.sh`
+- `bash prototype/gbn-bridge-proto/infra/scripts/k8s-smoke.sh --send-dummy --check-creator-restart-persistence`
+- `bash prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-route-v3.sh --require-observability --message-size 256 --include-failover`

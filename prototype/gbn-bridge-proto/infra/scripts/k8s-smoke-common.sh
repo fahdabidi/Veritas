@@ -331,6 +331,38 @@ smoke_admin_curl_once() {
   smoke_fail "non-idempotent admin request failed without retry: pod=$1 container=$2 method=$3 path=$4"
 }
 
+smoke_admin_curl_try_once() {
+  local requested="${VERITAS_K8S_ADMIN_TRANSPORT:-auto}"
+  local output status transport
+  smoke_select_admin_transport
+
+  transport="$SMOKE_ADMIN_TRANSPORT"
+  case "$transport" in
+    docker) output="$(smoke_admin_curl_docker "$@" 2>&1)" && status=0 || status=$? ;;
+    exec) output="$(smoke_admin_curl_exec "$@" 2>&1)" && status=0 || status=$? ;;
+    *) echo "unsupported admin transport '$transport'"; return 2 ;;
+  esac
+  if [[ "$status" -eq 0 ]]; then
+    printf '%s' "$output"
+    return 0
+  fi
+
+  if [[ "$requested" == "auto" && "$transport" == "exec" ]] &&
+    printf '%s' "$output" | grep -E 'x509|error dialing backend|tls: failed|container not found|No agent available' >/dev/null 2>&1 &&
+    command -v docker >/dev/null 2>&1 && [[ -n "$(smoke_k3d_node_container)" ]]; then
+    smoke_log "kubectl exec admin transport failed; falling back to Docker-network admin transport."
+    SMOKE_ADMIN_TRANSPORT=docker
+    output="$(smoke_admin_curl_docker "$@" 2>&1)" && status=0 || status=$?
+    if [[ "$status" -eq 0 ]]; then
+      printf '%s' "$output"
+      return 0
+    fi
+  fi
+
+  printf '%s' "$output"
+  return "$status"
+}
+
 smoke_pod_for_selector() {
   local selector="$1"
   kubectl -n "$NAMESPACE" get pod -l "$selector" -o json |
@@ -643,6 +675,21 @@ smoke_bootstrap_session_query() {
 smoke_frames_by_chain_id() {
   local chain_id="$1" output="$2" limit="${3:-10}"
   smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/frames?chain_id=${chain_id}&limit=${limit}" >"$output"
+}
+
+smoke_creator_upload_session() {
+  local session_id="$1" output="$2"
+  smoke_admin_curl "$CREATOR_NEW_POD" creator-runner GET "/v1/admin/upload-sessions/${session_id}" >"$output"
+}
+
+smoke_creator_upload_dispatch_plan() {
+  local session_id="$1" output="$2"
+  smoke_admin_curl "$CREATOR_NEW_POD" creator-runner GET "/v1/admin/upload-sessions/${session_id}/dispatch-plan" >"$output"
+}
+
+smoke_received_upload_session() {
+  local session_id="$1" output="$2"
+  smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/received-upload-sessions/${session_id}" >"$output"
 }
 
 smoke_json_result_count() {

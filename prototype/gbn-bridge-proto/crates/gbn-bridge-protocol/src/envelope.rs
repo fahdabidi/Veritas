@@ -1,5 +1,6 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
+use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,6 +31,16 @@ pub struct EncryptedFrame {
     pub plaintext_hash: Vec<u8>,
     pub ciphertext: Vec<u8>,
     pub auth_tag: Vec<u8>,
+}
+
+pub fn publisher_encryption_private_from_signing_key(signing_key: &SigningKey) -> [u8; 32] {
+    signing_key.to_bytes()
+}
+
+pub fn publisher_encryption_identity(signing_key: &SigningKey) -> PublicKeyBytes {
+    let private = publisher_encryption_private_from_signing_key(signing_key);
+    let public = PublicKey::from(&StaticSecret::from(private));
+    PublicKeyBytes(public.as_bytes().to_vec())
 }
 
 pub fn encrypt_for_publisher(

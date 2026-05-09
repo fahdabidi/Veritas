@@ -4,11 +4,12 @@ pub mod session;
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BootstrapJoinReply, BridgeCapability,
-    BridgeDhtEntry, BridgeDhtEntryUnsigned, BridgeIngressEndpointKind, BridgeSeedAssign,
-    BridgeSetResponse, BridgeSetResponseUnsigned, CreatorBootstrapResponse,
-    CreatorBootstrapResponseUnsigned, CreatorDhtEntry, CreatorDhtEntryUnsigned, CreatorJoinRequest,
-    DhtBridgeIngressEndpoint, PublicKeyBytes, ReachabilityClass,
+    publisher_encryption_identity, BootstrapDhtEntry, BootstrapDhtEntryUnsigned,
+    BootstrapJoinReply, BridgeCapability, BridgeDhtEntry, BridgeDhtEntryUnsigned,
+    BridgeIngressEndpointKind, BridgeSeedAssign, BridgeSetResponse, BridgeSetResponseUnsigned,
+    CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned, CreatorDhtEntry,
+    CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint, PublicKeyBytes,
+    ReachabilityClass,
 };
 use serde::{Deserialize, Serialize};
 
@@ -251,6 +252,7 @@ pub fn begin_bootstrap(
             bootstrap_session_id: bootstrap_session_id.clone(),
             seed_bridge: bridge_bootstrap_entry(&seed_record, signing_key, config, now_ms)?,
             publisher_pub: publisher_pub.clone(),
+            publisher_encryption_pub: Some(publisher_encryption_identity(signing_key)),
             response_expiry_ms: now_ms + config.bootstrap_response_ttl_ms,
             assigned_bridge_count: bridge_entries.len() as u16,
         },

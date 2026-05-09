@@ -101,6 +101,8 @@ pub struct CreatorBootstrapResponseUnsigned {
     pub bootstrap_session_id: String,
     pub seed_bridge: BootstrapDhtEntry,
     pub publisher_pub: PublicKeyBytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_encryption_pub: Option<PublicKeyBytes>,
     pub response_expiry_ms: u64,
     pub assigned_bridge_count: u16,
 }
@@ -111,6 +113,8 @@ pub struct CreatorBootstrapResponse {
     pub bootstrap_session_id: String,
     pub seed_bridge: BootstrapDhtEntry,
     pub publisher_pub: PublicKeyBytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_encryption_pub: Option<PublicKeyBytes>,
     pub response_expiry_ms: u64,
     pub assigned_bridge_count: u16,
     pub publisher_sig: SignatureBytes,
@@ -129,6 +133,7 @@ impl CreatorBootstrapResponse {
             bootstrap_session_id: unsigned.bootstrap_session_id,
             seed_bridge: unsigned.seed_bridge,
             publisher_pub: unsigned.publisher_pub,
+            publisher_encryption_pub: unsigned.publisher_encryption_pub,
             response_expiry_ms: unsigned.response_expiry_ms,
             assigned_bridge_count: unsigned.assigned_bridge_count,
             publisher_sig,
@@ -141,6 +146,7 @@ impl CreatorBootstrapResponse {
             bootstrap_session_id: self.bootstrap_session_id.clone(),
             seed_bridge: self.seed_bridge.clone(),
             publisher_pub: self.publisher_pub.clone(),
+            publisher_encryption_pub: self.publisher_encryption_pub.clone(),
             response_expiry_ms: self.response_expiry_ms,
             assigned_bridge_count: self.assigned_bridge_count,
         }

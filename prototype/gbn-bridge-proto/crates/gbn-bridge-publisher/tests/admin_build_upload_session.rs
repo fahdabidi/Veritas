@@ -45,6 +45,7 @@ fn start_creator_admin() -> (gbn_bridge_publisher::admin::AdminHttpServerHandle,
         authority_url: "http://publisher-authority:8080".to_string(),
         receiver_url: "http://publisher-receiver:8081".to_string(),
         pub_key: publisher_key.clone(),
+        encryption_pub_key: None,
         entry_expiry_ms: now_ms() + 300_000,
     };
     let mut table = LocalDiscoveryTable::empty("new-creator", now_ms());

@@ -37,6 +37,7 @@ fn publisher_entry() -> (PublisherDhtEntry, [u8; 32]) {
             authority_url: "http://publisher-authority:8080".to_string(),
             receiver_url: "http://publisher-receiver:8081".to_string(),
             pub_key: PublicKeyBytes(public.as_bytes().to_vec()),
+            encryption_pub_key: None,
             entry_expiry_ms: now_ms() + 300_000,
         },
         private,

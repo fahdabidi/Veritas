@@ -293,6 +293,7 @@ fn start_topology(state_kind: AdminStateKind) -> TestTopology {
                 authority_url: authority_url.clone(),
                 receiver_url: authority_url.clone(),
                 pub_key: publisher_pub.clone(),
+                encryption_pub_key: None,
                 entry_expiry_ms: now + 300_000,
             });
             if matches!(

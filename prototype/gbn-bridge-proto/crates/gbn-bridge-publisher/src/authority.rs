@@ -1,11 +1,11 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    publisher_identity, BootstrapJoinReply, BootstrapProgress, BootstrapProgressStage, BridgeAck,
-    BridgeAckStatus, BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose, BridgeCommandAck,
-    BridgeCommandAckStatus, BridgeCommandPayload, BridgeData, BridgeDhtEntry, BridgeHeartbeat,
-    BridgeLease, BridgeOpen, BridgeRegister, BridgeRevoke, CreatorDhtEntry,
-    CreatorDhtEntryUnsigned, CreatorJoinRequest, PublicKeyBytes, ReachabilityClass,
-    RevocationReason,
+    publisher_encryption_identity, publisher_identity, BootstrapJoinReply, BootstrapProgress,
+    BootstrapProgressStage, BridgeAck, BridgeAckStatus, BridgeCatalogRequest,
+    BridgeCatalogResponse, BridgeClose, BridgeCommandAck, BridgeCommandAckStatus,
+    BridgeCommandPayload, BridgeData, BridgeDhtEntry, BridgeHeartbeat, BridgeLease, BridgeOpen,
+    BridgeRegister, BridgeRevoke, CreatorDhtEntry, CreatorDhtEntryUnsigned, CreatorJoinRequest,
+    PublicKeyBytes, ReachabilityClass, RevocationReason,
 };
 use serde::Serialize;
 
@@ -983,6 +983,9 @@ impl PublisherAuthority {
                     bootstrap_session_id: bootstrap_session_id.clone(),
                     seed_bridge: new_seed_entry,
                     publisher_pub: self.publisher_pub.clone(),
+                    publisher_encryption_pub: Some(publisher_encryption_identity(
+                        &self.signing_key,
+                    )),
                     response_expiry_ms: now_ms + self.config.bootstrap_response_ttl_ms,
                     assigned_bridge_count: current.creator_response.assigned_bridge_count,
                 },

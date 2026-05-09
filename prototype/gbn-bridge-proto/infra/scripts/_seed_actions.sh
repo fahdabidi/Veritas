@@ -74,6 +74,7 @@ if not pub_hex:
 pub_hex = pub_hex.removeprefix("0x")
 if len(pub_hex) % 2:
     raise SystemExit("publisher public key hex has odd length")
+enc_hex = (authority.get("publisher_encryption_public_key") or "").removeprefix("0x")
 
 publisher_entry = {
     "node_id": authority.get("node_id") or "publisher",
@@ -82,6 +83,12 @@ publisher_entry = {
     "pub_key": [int(pub_hex[i:i + 2], 16) for i in range(0, len(pub_hex), 2)],
     "entry_expiry_ms": int(os.environ["ENTRY_EXPIRY_MS"]),
 }
+if enc_hex:
+    if len(enc_hex) % 2:
+        raise SystemExit("publisher encryption public key hex has odd length")
+    publisher_entry["encryption_pub_key"] = [
+        int(enc_hex[i:i + 2], 16) for i in range(0, len(enc_hex), 2)
+    ]
 
 payload = {
     "host_creator_id": host.get("conduit_actor") or host.get("node_id"),

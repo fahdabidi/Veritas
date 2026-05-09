@@ -47,6 +47,7 @@ fn local_dht(bridge_count: u16, now_ms: u64) -> (LocalDiscoveryTable, PublicKeyB
         authority_url: "http://publisher-authority:8080".to_string(),
         receiver_url: "http://publisher-receiver:8081".to_string(),
         pub_key: publisher_pub.clone(),
+        encryption_pub_key: None,
         entry_expiry_ms: now_ms + 300_000,
     });
     table.bridge_entries = (0..bridge_count)

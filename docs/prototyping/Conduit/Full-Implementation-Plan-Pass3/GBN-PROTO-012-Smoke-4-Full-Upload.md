@@ -1,8 +1,8 @@
 # GBN-PROTO-012 - Execution Phase 12 - Smoke 4 Full Upload Pipeline Suite Implementation
 
 **Document ID:** GBN-PROTO-012-Smoke-4
-**Status:** Pending
-**Last Updated:** 2026-05-08
+**Status:** Completed
+**Last Updated:** 2026-05-09
 **Phase:** 12 (Smoke 4 — Full Upload Pipeline Suite Implementation)
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
 **Depends On:** Phases 0–11 complete; Phases 7 (Smoke 1), 8 (Smoke 2), 9 (Smoke 3)
@@ -50,6 +50,9 @@ Prove that:
 - `creator-new` reports `self_onboarding_state ∈ { onboarded, fanout_partial }`.
 - `creator-new` local DHT bridge entries came from the Publisher-seeded bootstrap set;
   full upload must not refresh lanes from a direct authority catalog shortcut.
+- `creator-new.publisher_entry.encryption_pub_key` is present. Smoke 4 fails fast and
+  reruns Smoke 2 bootstrap if an older local-DHT snapshot predates the Publisher
+  encryption metadata addition.
 - ≥ 5 active bridge entries in `creator-new`'s local DHT (failover proof needs
   redundancy).
 
@@ -63,6 +66,7 @@ bash prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-upload-v3.sh \
   --synthetic-size 1048576 \
   --chunk-size 8192 \
   --target-lane-count 10 \
+  --failover-synthetic-size 65536 \
   --include-failover \
   --upload-timeout 120
 ```
@@ -73,8 +77,13 @@ Flags:
 - `--synthetic-size N`: synthetic test bytes (default 1 MiB).
 - `--chunk-size N`: chunk size (default 8 KiB → ~128 chunks for default size).
 - `--target-lane-count N`: passed to `send-upload` (default 10).
+- `--failover-synthetic-size N`: failover invocation byte count (default 64 KiB
+  so the normal run proves the full 1 MiB path while failover remains fast).
 - `--include-failover`: also run a second invocation with
   `force_lane_failure=[<one selected lane>]`. Default on.
+- `--include-persistence-check`: restart `creator-new` and assert the completed
+  normal session is still listed and present under
+  `/var/lib/gbn-conduit/upload_sessions/`. Default on.
 - `--upload-timeout N`: max seconds to wait for `session_status=Completed`.
 
 ---
@@ -145,22 +154,26 @@ Flags:
 - `force_lane_failure_used == [<chosen_bridge_id>]`.
 - `lanes_used` does not include `<chosen_bridge_id>` (or includes it only with
   `attempts > 1` showing reroute).
-- At least one chunk in `dispatch-plan-failover.json.chunk_assignments` has
-  `attempts >= 2` (a failover reroute happened).
+- `failover_events >= 1` in the send response and dispatch plan. The local
+  prototype may fail the forced lane before assigning a chunk to it, so a
+  reroute does not always imply `attempts >= 2` for a chunk assignment.
 
 ### 5.4 Receiver Content Reconstruction
 
 For each `session_id`:
 
-- The Publisher (receiver surface) admin API
-  `GET /v1/admin/upload-sessions/<session_id>` (added in Phase 11 on receiver)
+- The Publisher authority admin API
+  `GET /v1/admin/received-upload-sessions/<session_id>`
   returns:
   - `chunks_received == total_chunks`;
   - `manifest_received == true`;
-  - `content_hash_match == true` (receiver computes `SHA-256(reassembled
-    plaintext)` and compares to manifest.content_hash);
-  - `synthetic_marker_first_byte_at == 0` (receiver finds the test marker at the
-    start of the reconstructed plaintext, proving end-to-end integrity).
+  - `content_hash_match == true` (the Publisher decrypts and reassembles
+    plaintext chunks, then compares `SHA-256(reassembled_plaintext)` to
+    `manifest.content_hash`);
+  - `synthetic_marker_zeroed_at_start == true` (the reassembled plaintext begins
+    with zeroed bytes where the synthetic marker used to be, proving the
+    sanitizer ran before encryption and upload);
+  - `decrypt_errors == []`.
 
 ### 5.5 Bridge Ciphertext-Only
 
@@ -241,6 +254,11 @@ Written to `/tmp/conduit-smoke-4-${chain_id_normal}/`:
 - `upload-summary.md` (table: invocation, session_id, lanes_used,
   completed_chunks, failover_used, content_hash_match)
 
+The receiver summaries are read from the Publisher authority because the local
+prototype forwards receiver ingress into the authority storage service. This keeps
+the smoke assertion tied to the persisted upload session while preserving the
+runtime actor logs for `publisher-receiver`.
+
 ---
 
 ## 7. Failure Modes And Triage
@@ -273,14 +291,17 @@ Written to `/tmp/conduit-smoke-4-${chain_id_normal}/`:
 
 ## 9. Implementation Tasks
 
-1. Add `infra/scripts/k8s-smoke-upload-v3.sh` (new file).
+1. Add `infra/scripts/k8s-smoke-upload-v3.sh` (implemented).
 2. Test fixture: synthetic byte generator with the marker prefix
-   `VERITAS-SMOKE-4-PLAINTEXT` (Phase 10 supplies the build-session input
-   source).
-3. Extend `k8s-smoke-common.sh` with `upload_session_query(creator_id,
-   session_id)` helpers for both creator and receiver views.
-4. WSL2 guard at top of script per Master plan §2.8.
-5. Print artifact directory at end.
+   `VERITAS-SMOKE-4-PLAINTEXT` (implemented through the Phase 10
+   build-session input source).
+3. Extend `k8s-smoke-common.sh` with upload-session helpers for creator dispatch
+   plans and Publisher received-session summaries (implemented).
+4. Add Publisher encryption metadata to bootstrap/DHT state so receiver-side
+   reconstruction uses a matching local prototype encryption private key
+   (implemented).
+5. WSL2 guard at top of script per Master plan §2.8 (implemented).
+6. Print artifact directory at end (implemented).
 
 ---
 
@@ -289,7 +310,8 @@ Written to `/tmp/conduit-smoke-4-${chain_id_normal}/`:
 - `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-upload-v3.sh`
   passes.
 - Against a Smoke-3-green cluster, the script exits 0 with completed normal +
-  completed failover sessions, content_hash match, and bridge plaintext grep
+  completed failover sessions, content_hash match from
+  `/v1/admin/received-upload-sessions/<session_id>`, and bridge plaintext grep
   empty.
 - All 12 §2.5 upload-pipeline events present in Tempo.
 - `lanes_used.length >= 2` and progressive timeline asserted.
@@ -299,3 +321,17 @@ Written to `/tmp/conduit-smoke-4-${chain_id_normal}/`:
   is empty.
 - V1 (`prototype/gbn-proto/**`) is unchanged.
 - Parent plan status tracker is updated.
+
+Validation recorded during implementation:
+
+- `cargo test -p gbn-bridge-publisher --test admin_received_upload -p gbn-bridge-protocol --test encryption_envelope -p gbn-bridge-creator --test session_builder`
+- `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-upload-v3.sh`
+- `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-common.sh`
+- WSL/k3d scaled normal + failover smoke:
+  `target/k8s-smoke-artifacts/smoke-4-upload/20260509-165227-8236`
+  (`16/16` normal chunks, `8/8` failover chunks, content hash match true).
+- WSL/k3d creator restart persistence smoke:
+  `target/k8s-smoke-artifacts/smoke-4-upload/20260509-165409-24217`.
+- WSL/k3d full-size normal upload smoke:
+  `target/k8s-smoke-artifacts/smoke-4-upload/20260509-165512-32301`
+  (`128/128` chunks, 9 lanes used, content hash match true).

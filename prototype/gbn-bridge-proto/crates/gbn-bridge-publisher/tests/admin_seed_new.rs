@@ -52,6 +52,7 @@ fn publisher_entry(authority_url: String, now_ms: u64) -> PublisherDhtEntry {
         authority_url,
         receiver_url: "http://publisher-receiver:8081".to_string(),
         pub_key: public_key(9),
+        encryption_pub_key: None,
         entry_expiry_ms: now_ms + 60_000,
     }
 }

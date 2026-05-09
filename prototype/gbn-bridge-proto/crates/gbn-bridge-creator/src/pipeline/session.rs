@@ -211,9 +211,13 @@ pub fn build_upload_session(
         upload_ephemeral_private(&options.actor_id, &session_id, &chunked.content_hash);
 
     let total_chunks = chunked.chunks.len() as u32;
+    let publisher_encryption_key = publisher_entry
+        .encryption_pub_key
+        .as_ref()
+        .unwrap_or(&publisher_entry.pub_key);
     let creator_ephemeral_pubkey = encrypt_for_publisher(
         b"manifest-key-probe",
-        &publisher_entry.pub_key,
+        publisher_encryption_key,
         publisher_entry.node_id.clone(),
         session_id,
         MANIFEST_CHUNK_INDEX,
@@ -236,7 +240,7 @@ pub fn build_upload_session(
     let manifest_plaintext = serde_json::to_vec(&manifest)?;
     let manifest_ciphertext = encrypt_for_publisher(
         &manifest_plaintext,
-        &publisher_entry.pub_key,
+        publisher_encryption_key,
         publisher_entry.node_id.clone(),
         session_id,
         MANIFEST_CHUNK_INDEX,
@@ -249,7 +253,7 @@ pub fn build_upload_session(
         .map(|chunk| {
             encrypt_for_publisher(
                 &chunk.plaintext,
-                &publisher_entry.pub_key,
+                publisher_encryption_key,
                 publisher_entry.node_id.clone(),
                 session_id,
                 chunk.index,

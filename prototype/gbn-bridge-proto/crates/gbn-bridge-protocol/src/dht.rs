@@ -50,6 +50,8 @@ pub struct PublisherDhtEntry {
     pub authority_url: String,
     pub receiver_url: String,
     pub pub_key: PublicKeyBytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_pub_key: Option<PublicKeyBytes>,
     pub entry_expiry_ms: u64,
 }
 

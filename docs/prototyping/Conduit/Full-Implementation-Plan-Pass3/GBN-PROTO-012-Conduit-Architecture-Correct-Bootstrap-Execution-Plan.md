@@ -71,7 +71,7 @@ Pass 3 replaces the synthetic shortcut with the documented flow:
 | 9 | Smoke 3 — Route And Encryption Boundary Suite Implementation | `[x]` |
 | 10 | Upload Session Build And Per-Chunk Encryption Pipeline (§3.4 + §3.5) | `[x]` |
 | 11 | Multi-Lane Progressive Fanout (§3.6 + §3.7) | `[x]` |
-| 12 | Smoke 4 — Full Upload Pipeline Suite Implementation | `[ ]` |
+| 12 | Smoke 4 — Full Upload Pipeline Suite Implementation | `[x]` |
 
 Each phase must update this status tracker when completed.
 
@@ -500,6 +500,12 @@ Implement `infra/scripts/k8s-smoke-upload-v3.sh`. Drives `BuildUploadSession` th
 (content_hash matches), bridges saw only ciphertext for every chunk, ≥ 2 distinct
 lanes used, progressive fanout timeline (chunks delivered before all lanes active),
 all 12 upload-pipeline §2.5 events present in Tempo.
+
+Status: implemented. Smoke 4 uses the Publisher-seeded local DHT, validates the
+Publisher encryption key delivered through bootstrap metadata, queries
+`/v1/admin/received-upload-sessions/<session_id>` on the Publisher authority for
+receiver-side decrypt/reassembly state, and restarts `creator-new` to prove the
+completed session remains on the PVC.
 
 ---
 

@@ -3,6 +3,7 @@
 //! This listener binds to 127.0.0.1:9090 by default inside each container.
 //! Operators reach it through ECS exec; it is not exposed through public ingress.
 
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -17,11 +18,13 @@ use gbn_bridge_creator::{
     get_upload_session, list_upload_sessions, BridgeFilterDrops, BuildUploadSessionOptions,
     CreatorClient, CreatorError, DiscoveryProbeResult, LocalDhtStore, SanitizerFormatHint,
     SendDummyResult, SendUploadSessionResult, SessionBuildError, UploadDispatchPlan,
-    UploadSessionSummary,
+    UploadManifest, UploadSessionSummary,
 };
 use gbn_bridge_protocol::{
-    validate_chain_id, BootstrapJoinReply, BootstrapSession, BridgeCommandPayload, BridgeDhtEntry,
-    CreatorDhtEntry, CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint,
+    decrypt_from_creator, publisher_encryption_identity,
+    publisher_encryption_private_from_signing_key, validate_chain_id, BootstrapJoinReply,
+    BootstrapSession, BridgeCommandPayload, BridgeDhtEntry, CreatorDhtEntry,
+    CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint, EncryptedFrame,
     HostCreatorSeedState, HostRoleState, LocalDiscoveryTable, NewCreatorSeedState, PendingCreator,
     ProtocolError, PublicKeyBytes, PublisherDhtEntry, ReachabilityClass, SelfOnboardingState,
     TunnelPeerRole, TunnelState,
@@ -39,9 +42,11 @@ use crate::metrics::{
 };
 use crate::metrics_otlp;
 use crate::service::{AuthorityService, ServiceError};
-use crate::storage::{BootstrapSessionRecord, BridgeRecord, IngestedFrameRecord};
+use crate::storage::{
+    BootstrapSessionRecord, BridgeRecord, IngestedFrameRecord, UploadSessionRecord,
+};
 use crate::AuthorityError;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 
 pub const ADMIN_BIND_ADDR_ENV: &str = "GBN_BRIDGE_ADMIN_BIND_ADDR";
 pub const DEFAULT_ADMIN_BIND_ADDR: &str = "127.0.0.1:9090";
@@ -52,6 +57,7 @@ const DEFAULT_TARGET_LANE_COUNT: u32 = 10;
 const DEFAULT_LANE_OPEN_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_CHUNK_ACK_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_SUSPECT_TTL_MS: u64 = 300_000;
+const SMOKE_4_SYNTHETIC_MARKER: &[u8] = b"VERITAS-SMOKE-4-PLAINTEXT";
 
 pub fn admin_bind_addr_from_env() -> Result<SocketAddr, String> {
     std::env::var(ADMIN_BIND_ADDR_ENV)
@@ -110,6 +116,8 @@ pub struct AdminNodeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher_public_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_encryption_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher_surface: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_url: Option<String>,
@@ -146,6 +154,10 @@ impl AdminNodeMetadata {
             .or_else(|| std::env::var("GBN_BRIDGE_PUBLISHER_URL").ok());
         let receiver_url = std::env::var("GBN_BRIDGE_RECEIVER_URL").ok();
         let publisher_public_key = env_public_key_hex();
+        let publisher_encryption_public_key =
+            std::env::var("GBN_BRIDGE_PUBLISHER_ENCRYPTION_PUBLIC_KEY_HEX")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
         Self {
             node_id: node_id.into(),
             role,
@@ -157,6 +169,7 @@ impl AdminNodeMetadata {
             creator_udp_punch_port: env_u16("GBN_BRIDGE_PUNCH_PORT"),
             public_key: None,
             publisher_public_key,
+            publisher_encryption_public_key,
             publisher_surface: None,
             authority_url,
             receiver_url,
@@ -181,6 +194,11 @@ impl AdminNodeMetadata {
 
     pub fn with_publisher_public_key(mut self, key: &PublicKeyBytes) -> Self {
         self.publisher_public_key = Some(bytes_to_hex(&key.0));
+        self
+    }
+
+    pub fn with_publisher_encryption_public_key(mut self, key: &PublicKeyBytes) -> Self {
+        self.publisher_encryption_public_key = Some(bytes_to_hex(&key.0));
         self
     }
 
@@ -274,6 +292,26 @@ pub struct BridgesResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FramesResponse {
     pub frames: Vec<IngestedFrameRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceivedUploadSessionSummary {
+    pub session_id: String,
+    pub chain_id: Option<String>,
+    pub creator_id: String,
+    pub expected_chunks: Option<u16>,
+    pub chunks_received: usize,
+    pub manifest_received: bool,
+    pub content_hash: Option<String>,
+    pub content_hash_match: Option<bool>,
+    pub synthetic_marker_zeroed_at_start: Option<bool>,
+    pub decrypted_total_bytes: Option<usize>,
+    pub opened_via_bridges: Vec<String>,
+    pub completed_at_ms: Option<u64>,
+    pub closed_at_ms: Option<u64>,
+    pub close_reason: Option<String>,
+    pub chunk_sequences: Vec<u32>,
+    pub decrypt_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -545,11 +583,15 @@ pub struct AdminHttpServerHandle {
 
 impl AdminState {
     pub fn authority(service: Arc<Mutex<AuthorityService>>) -> Self {
-        let publisher_pub = service
-            .lock()
-            .expect("authority service mutex poisoned while reading publisher key")
-            .publisher_public_key()
-            .clone();
+        let (publisher_pub, publisher_encryption_pub) = {
+            let service = service
+                .lock()
+                .expect("authority service mutex poisoned while reading publisher key");
+            (
+                service.publisher_public_key().clone(),
+                publisher_encryption_identity(service.publisher_authority().signing_key()),
+            )
+        };
         Self {
             authority: Some(service),
             metrics: AdminMetricsSource::Authority,
@@ -557,7 +599,8 @@ impl AdminState {
             node_metadata: AdminNodeMetadata::from_env("publisher-authority", "publisher")
                 .with_publisher_surface("authority")
                 .with_public_key(&publisher_pub)
-                .with_publisher_public_key(&publisher_pub),
+                .with_publisher_public_key(&publisher_pub)
+                .with_publisher_encryption_public_key(&publisher_encryption_pub),
             local_dht: AdminLocalDhtSource::NotApplicable(
                 AdminLocalDhtResponse::not_applicable("publisher")
                     .with_publisher_surface("authority"),
@@ -569,6 +612,7 @@ impl AdminState {
         service: Arc<Mutex<AuthorityService>>,
         creator: AdminCreatorConfig,
     ) -> Self {
+        let publisher_encryption_pub = publisher_encryption_identity(&creator.signing_key);
         Self {
             authority: Some(service),
             metrics: AdminMetricsSource::Authority,
@@ -576,7 +620,8 @@ impl AdminState {
                 .with_publisher_surface("authority")
                 .with_authority_url(creator.authority_url.clone())
                 .with_public_key(&creator.publisher_pub)
-                .with_publisher_public_key(&creator.publisher_pub),
+                .with_publisher_public_key(&creator.publisher_pub)
+                .with_publisher_encryption_public_key(&publisher_encryption_pub),
             local_dht: AdminLocalDhtSource::NotApplicable(
                 AdminLocalDhtResponse::not_applicable("publisher")
                     .with_publisher_surface("authority"),
@@ -832,11 +877,14 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         ("GET", path) if path == AuthorityRoute::AdminLocalDht.path() => local_dht(state),
         ("GET", path) => match admin_bridge_dht_entry_target(path) {
             Some(bridge_id) => bridge_dht_entry(state, bridge_id),
-            None => match upload_session_dispatch_plan_target(path) {
-                Some(session_id) => get_creator_upload_dispatch_plan(state, session_id),
-                None => match upload_session_target(path) {
-                    Some(session_id) => get_creator_upload_session(state, session_id),
-                    None => error_response(404, "not_found", "admin route not found"),
+            None => match received_upload_session_target(path) {
+                Some(session_id) => get_received_upload_session(state, session_id),
+                None => match upload_session_dispatch_plan_target(path) {
+                    Some(session_id) => get_creator_upload_dispatch_plan(state, session_id),
+                    None => match upload_session_target(path) {
+                        Some(session_id) => get_creator_upload_session(state, session_id),
+                        None => error_response(404, "not_found", "admin route not found"),
+                    },
                 },
             },
         },
@@ -2256,6 +2304,118 @@ fn list_frames(state: &AdminState, query: FramesQuery) -> Vec<u8> {
     json_response(200, &response)
 }
 
+fn get_received_upload_session(state: &AdminState, session_id: &str) -> Vec<u8> {
+    let Some(authority) = &state.authority else {
+        return error_response(
+            501,
+            "not_supported",
+            "received upload sessions are only available on the publisher authority",
+        );
+    };
+    let service = authority
+        .lock()
+        .expect("authority service mutex poisoned while reading received upload session");
+    let Some(record) = service.publisher_authority().upload_session(session_id) else {
+        return error_response(
+            404,
+            "upload_session_not_found",
+            &format!("upload session `{session_id}` was not found"),
+        );
+    };
+    let private =
+        publisher_encryption_private_from_signing_key(service.publisher_authority().signing_key());
+    json_response(200, &received_upload_session_summary(record, private))
+}
+
+fn received_upload_session_summary(
+    record: &UploadSessionRecord,
+    publisher_encryption_private: [u8; 32],
+) -> ReceivedUploadSessionSummary {
+    let mut manifest = None;
+    let mut chunks = BTreeMap::<u32, Vec<u8>>::new();
+    let mut decrypt_errors = Vec::new();
+
+    for (sequence, frame_record) in &record.frames_by_sequence {
+        let encrypted =
+            match serde_json::from_slice::<EncryptedFrame>(&frame_record.frame.ciphertext) {
+                Ok(encrypted) => encrypted,
+                Err(error) => {
+                    decrypt_errors.push(format!(
+                        "sequence {sequence}: encrypted frame json: {error}"
+                    ));
+                    continue;
+                }
+            };
+        let plaintext = match decrypt_from_creator(&encrypted, publisher_encryption_private) {
+            Ok(plaintext) => plaintext,
+            Err(error) => {
+                decrypt_errors.push(format!("sequence {sequence}: decrypt: {error}"));
+                continue;
+            }
+        };
+        if *sequence == u32::MAX {
+            match serde_json::from_slice::<UploadManifest>(&plaintext) {
+                Ok(decoded) => manifest = Some(decoded),
+                Err(error) => {
+                    decrypt_errors.push(format!("sequence {sequence}: manifest json: {error}"));
+                }
+            }
+        } else {
+            chunks.insert(*sequence, plaintext);
+        }
+    }
+
+    let mut content_hash = None;
+    let mut content_hash_match = None;
+    let mut synthetic_marker_zeroed_at_start = None;
+    let mut decrypted_total_bytes = None;
+
+    if let Some(manifest) = &manifest {
+        content_hash = Some(base64_encode(&manifest.content_hash));
+        let mut reassembled = Vec::new();
+        let mut complete = true;
+        for idx in 0..manifest.total_chunks {
+            match chunks.get(&idx) {
+                Some(bytes) => reassembled.extend_from_slice(bytes),
+                None => {
+                    complete = false;
+                    decrypt_errors.push(format!("missing decrypted data chunk {idx}"));
+                }
+            }
+        }
+        if complete {
+            let actual_hash = Sha256::digest(&reassembled).to_vec();
+            content_hash_match = Some(actual_hash == manifest.content_hash);
+            decrypted_total_bytes = Some(reassembled.len());
+            let marker_len = SMOKE_4_SYNTHETIC_MARKER.len().min(reassembled.len());
+            synthetic_marker_zeroed_at_start =
+                Some(marker_len > 0 && reassembled[..marker_len].iter().all(|byte| *byte == 0));
+        }
+    }
+
+    ReceivedUploadSessionSummary {
+        session_id: record.session_id.clone(),
+        chain_id: record.chain_id.clone(),
+        creator_id: record.creator_id.clone(),
+        expected_chunks: record.expected_chunks,
+        chunks_received: chunks.len(),
+        manifest_received: manifest.is_some(),
+        content_hash,
+        content_hash_match,
+        synthetic_marker_zeroed_at_start,
+        decrypted_total_bytes,
+        opened_via_bridges: record.opened_via_bridges.clone(),
+        completed_at_ms: record.completed_at_ms,
+        closed_at_ms: record.closed_at_ms,
+        close_reason: record
+            .close_reason
+            .as_ref()
+            .map(|reason| format!("{reason:?}")),
+        chunk_sequences: chunks.keys().copied().collect(),
+        decrypt_errors,
+    }
+}
+
 fn inject_bridge_command(state: &AdminState, bridge_id: &str, body: &[u8]) -> Vec<u8> {
     let Some(authority) = &state.authority else {
         return error_response(
@@ -2671,6 +2831,11 @@ fn begin_new_creator_bootstrap(
             .clone()
             .unwrap_or_else(|| config.authority_url.clone()),
         pub_key: relay.bootstrap_reply.response.publisher_pub.clone(),
+        encryption_pub_key: relay
+            .bootstrap_reply
+            .response
+            .publisher_encryption_pub
+            .clone(),
         entry_expiry_ms: bridge_set
             .bridge_dht_entries
             .iter()
@@ -3492,6 +3657,15 @@ fn upload_session_dispatch_plan_target(path: &str) -> Option<&str> {
     let session_id = path
         .strip_prefix("/v1/admin/upload-sessions/")?
         .strip_suffix("/dispatch-plan")?;
+    if session_id.is_empty() || session_id.contains('/') {
+        None
+    } else {
+        Some(session_id)
+    }
+}
+
+fn received_upload_session_target(path: &str) -> Option<&str> {
+    let session_id = path.strip_prefix("/v1/admin/received-upload-sessions/")?;
     if session_id.is_empty() || session_id.contains('/') {
         None
     } else {

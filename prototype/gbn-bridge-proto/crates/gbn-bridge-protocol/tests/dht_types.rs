@@ -62,6 +62,7 @@ fn local_discovery_table_round_trips_with_orthogonal_states() {
         authority_url: "http://publisher-authority:8080".to_string(),
         receiver_url: "http://publisher-receiver:8081".to_string(),
         pub_key: publisher_pub,
+        encryption_pub_key: None,
         entry_expiry_ms: 10_000,
     });
     table.creator_entry = Some(creator_entry(&publisher, 10_000));
@@ -82,6 +83,7 @@ fn publisher_entry_has_no_publisher_signature_and_uses_trust_root() {
         authority_url: "http://publisher-authority:8080".to_string(),
         receiver_url: "http://publisher-receiver:8081".to_string(),
         pub_key: publisher_pub.clone(),
+        encryption_pub_key: None,
         entry_expiry_ms: 10_000,
     };
 

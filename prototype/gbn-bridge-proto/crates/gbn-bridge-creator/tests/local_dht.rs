@@ -106,6 +106,7 @@ fn local_dht_serialization_round_trip_through_store() {
         authority_url: "http://publisher-authority:8080".to_string(),
         receiver_url: "http://publisher-receiver:8081".to_string(),
         pub_key: publisher_pub.clone(),
+        encryption_pub_key: None,
         entry_expiry_ms: 10_000,
     });
     table.creator_entry = Some(creator_entry(&publisher, 10_000));
@@ -134,6 +135,7 @@ fn trust_root_validation_prunes_invalid_persisted_entries() {
         authority_url: "http://publisher-authority:8080".to_string(),
         receiver_url: "http://publisher-receiver:8081".to_string(),
         pub_key: public_key(10),
+        encryption_pub_key: None,
         entry_expiry_ms: 10_000,
     });
     table.creator_entry = Some(creator_entry(&attacker, 10_000));

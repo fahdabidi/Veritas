@@ -48,6 +48,7 @@ fn publisher_entry(publisher_pub: PublicKeyBytes, now_ms: u64) -> PublisherDhtEn
         authority_url: "http://publisher-authority:8080".to_string(),
         receiver_url: "http://publisher-receiver:8081".to_string(),
         pub_key: publisher_pub,
+        encryption_pub_key: None,
         entry_expiry_ms: now_ms + 60_000,
     }
 }

@@ -41,7 +41,8 @@ pub use dht::{
     LOCAL_DISCOVERY_TABLE_SCHEMA_VERSION,
 };
 pub use envelope::{
-    decrypt_from_creator, encrypt_for_publisher, EncryptedFrame, EnvelopeKeyDerivation,
+    decrypt_from_creator, encrypt_for_publisher, publisher_encryption_identity,
+    publisher_encryption_private_from_signing_key, EncryptedFrame, EnvelopeKeyDerivation,
 };
 pub use error::ProtocolError;
 pub use lease::{

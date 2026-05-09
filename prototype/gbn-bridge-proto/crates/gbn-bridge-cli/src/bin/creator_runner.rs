@@ -9,10 +9,12 @@ use gbn_bridge_creator::LocalDhtStore;
 use gbn_bridge_protocol::{publisher_identity, PublicKeyBytes};
 use gbn_bridge_publisher::{
     admin::{
-        admin_bind_addr_from_env, AdminCreatorConfig, AdminHttpServer, AdminNodeMetadata,
-        AdminState,
+        admin_bind_addr_from_env, creator_trace_service_name, AdminCreatorConfig, AdminHttpServer,
+        AdminNodeMetadata, AdminState,
     },
+    metrics_http::MetricsHttpServer,
     metrics_otlp,
+    metrics_prometheus::{creator_metrics_text, stack_from_env},
 };
 use sha2::{Digest, Sha256};
 
@@ -60,7 +62,6 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let _otlp_guard = metrics_otlp::init_otlp_tracing_from_env("creator-runner")?;
     let admin_addr = admin_bind_addr_from_env()?;
     let node_id = env::var("GBN_BRIDGE_NODE_ID").unwrap_or_else(|_| "creator".to_string());
     let conduit_actor = env::var("GBN_CONDUIT_ACTOR")
@@ -68,6 +69,9 @@ fn run() -> Result<(), String> {
         .or_else(|| env::var("GBN_NODE_ACTOR").ok())
         .filter(|value| !value.trim().is_empty());
     let actor_id = conduit_actor.clone().unwrap_or_else(|| node_id.clone());
+    let otlp_service_name = env::var("GBN_BRIDGE_OTLP_SERVICE_NAME")
+        .unwrap_or_else(|_| creator_trace_service_name(&actor_id, &node_id));
+    let _otlp_guard = metrics_otlp::init_otlp_tracing_from_env(&otlp_service_name)?;
     let state_dir = PathBuf::from(
         env::var("GBN_BRIDGE_STATE_DIR").unwrap_or_else(|_| DEFAULT_STATE_DIR.to_string()),
     );
@@ -119,6 +123,27 @@ fn run() -> Result<(), String> {
         1_048_576,
     )
     .map_err(|error| error.to_string())?;
+    let prometheus_stack = stack_from_env();
+    let prometheus_actor_id = actor_id.clone();
+    let prometheus_service_name = otlp_service_name.clone();
+    let prometheus_addr: SocketAddr = env::var("GBN_BRIDGE_METRICS_BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:9100".to_string())
+        .parse()
+        .map_err(|_| "GBN_BRIDGE_METRICS_BIND_ADDR must be a valid socket address".to_string())?;
+    let prometheus_server = MetricsHttpServer::bind(prometheus_addr, move || {
+        creator_metrics_text(
+            &prometheus_actor_id,
+            &prometheus_service_name,
+            &prometheus_stack,
+        )
+    })
+    .map_err(|error| error.to_string())?;
+    let prometheus_local_addr = prometheus_server
+        .local_addr()
+        .map_err(|error| error.to_string())?;
+    let _prometheus_handle = prometheus_server
+        .spawn()
+        .map_err(|error| error.to_string())?;
 
     let (build_version, build_source, build_created, image) = conduit_build_metadata();
     println!(
@@ -133,8 +158,9 @@ fn run() -> Result<(), String> {
         image
     );
     println!(
-        "creator-runner admin listening on {}; state_path={}",
+        "creator-runner admin listening on {}; metrics listening on {}; state_path={}",
         socket_addr_display(admin_addr),
+        socket_addr_display(prometheus_local_addr),
         state_path.display()
     );
 

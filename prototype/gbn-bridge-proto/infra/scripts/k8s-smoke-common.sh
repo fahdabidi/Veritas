@@ -543,10 +543,54 @@ smoke_loki_query() {
   curl -fsS -G --data-urlencode "query=$query" "$LOKI_URL/loki/api/v1/query" >"$output"
 }
 
+smoke_loki_query_range() {
+  local query="$1" output="$2" start_ns="$3" end_ns="$4" limit="${5:-5000}"
+  curl -fsS -G \
+    --data-urlencode "query=$query" \
+    --data-urlencode "start=$start_ns" \
+    --data-urlencode "end=$end_ns" \
+    --data-urlencode "limit=$limit" \
+    "$LOKI_URL/loki/api/v1/query_range" >"$output"
+}
+
 smoke_tempo_query_chain() {
   local chain_id="$1" output="$2"
   curl -fsS -G --data-urlencode "q={ .chain_id = \"$chain_id\" }" \
     "$TEMPO_URL/api/search" >"$output" 2>/dev/null || printf '{"traces":[]}\n' >"$output"
+}
+
+smoke_tempo_query_chain_service() {
+  local chain_id="$1" service_name="$2" output="$3"
+  curl -fsS -G --data-urlencode "q={ resource.service.name = \"$service_name\" && .chain_id = \"$chain_id\" }" \
+    "$TEMPO_URL/api/search" >"$output" 2>/dev/null || printf '{"traces":[]}\n' >"$output"
+}
+
+smoke_loki_query_chain_actor() {
+  local chain_id="$1" actor_id="$2" output="$3"
+  local query end_ns
+  query="{namespace=\"$NAMESPACE\"} |= \"$chain_id\" |= \"$actor_id\""
+  if [[ -n "${SMOKE_LOKI_QUERY_START_NS:-}" ]]; then
+    end_ns="$(date +%s%N)"
+    smoke_loki_query_range "$query" "$output" "$SMOKE_LOKI_QUERY_START_NS" "$end_ns"
+  else
+    smoke_loki_query "$query" "$output"
+  fi
+}
+
+smoke_pod_list_by_role() {
+  local role="$1"
+  kubectl -n "$NAMESPACE" get pods -l "veritas-role=$role" -o json |
+    python3 -c 'import json,sys
+data=json.load(sys.stdin)
+print(json.dumps([
+    {
+        "pod": item.get("metadata", {}).get("name", ""),
+        "phase": item.get("status", {}).get("phase", ""),
+        "pod_ip": item.get("status", {}).get("podIP", ""),
+    }
+    for item in data.get("items", [])
+    if not item.get("metadata", {}).get("deletionTimestamp")
+], sort_keys=True))'
 }
 
 smoke_json_result_count() {

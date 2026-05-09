@@ -21,6 +21,10 @@ spec:
         app.kubernetes.io/part-of: veritas-conduit
         veritas-role: creator
         conduit-actor: new-creator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9100"
     spec:
       securityContext:
         fsGroup: 10001
@@ -31,6 +35,8 @@ spec:
           ports:
             - name: admin
               containerPort: 9090
+            - name: metrics
+              containerPort: 9100
           envFrom:
             - configMapRef:
                 name: conduit-config

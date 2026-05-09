@@ -199,6 +199,17 @@ pub fn bridge_metrics_text(snapshot: &BridgeMetricsSnapshot, service: &str, stac
     out
 }
 
+pub fn creator_metrics_text(actor_id: &str, service: &str, stack: &str) -> String {
+    let actor_id = escape_label_value(actor_id);
+    let service = escape_label_value(service);
+    let stack = escape_label_value(stack);
+    format!(
+        "# HELP conduit_creator_info Creator admin runner readiness marker.\n\
+         # TYPE conduit_creator_info gauge\n\
+         conduit_creator_info{{service=\"{service}\",stack=\"{stack}\",actor_id=\"{actor_id}\"}} 1\n"
+    )
+}
+
 fn write_metric(out: &mut String, name: &str, help: &str, value: u64, service: &str, stack: &str) {
     let service = escape_label_value(service);
     let stack = escape_label_value(stack);
@@ -295,5 +306,15 @@ mod tests {
         let body = bridge_metrics_text(&BridgeMetricsSnapshot::default(), "br\"idge", "dev\\local");
 
         assert!(body.contains("{service=\"br\\\"idge\",stack=\"dev\\\\local\"}"));
+    }
+
+    #[test]
+    fn creator_exposition_includes_actor_info_gauge() {
+        let body = creator_metrics_text("host-creator", "creator-host", "dev-local");
+
+        assert!(body.contains("# TYPE conduit_creator_info gauge"));
+        assert!(body.contains(
+            "conduit_creator_info{service=\"creator-host\",stack=\"dev-local\",actor_id=\"host-creator\"} 1"
+        ));
     }
 }

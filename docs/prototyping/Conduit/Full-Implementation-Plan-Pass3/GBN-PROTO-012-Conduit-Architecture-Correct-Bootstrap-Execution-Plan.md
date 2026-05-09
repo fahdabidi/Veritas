@@ -66,7 +66,7 @@ Pass 3 replaces the synthetic shortcut with the documented flow:
 | 4 | Bootstrap Payload Delivery, Local DHT Population, And Punch Fanout | `[x]` |
 | 5 | Onboarded-Creator SendDummy And Local-DHT Single-Lane Envelope Demo | `[x]` |
 | 6 | Operator Scripts And Acceptance Gate | `[x]` |
-| 7 | Smoke 1 — Tracing Suite Implementation | `[ ]` |
+| 7 | Smoke 1 — Tracing Suite Implementation | `[x]` |
 | 8 | Smoke 2 — Discovery / Bootup Suite Implementation | `[ ]` |
 | 9 | Smoke 3 — Route And Encryption Boundary Suite Implementation | `[ ]` |
 | 10 | Upload Session Build And Per-Chunk Encryption Pipeline (§3.4 + §3.5) | `[ ]` |
@@ -430,6 +430,13 @@ endpoint on all four binaries. Validates that all 14 actor pods (2 Publisher
 surfaces + 10 ExitBridges + 2 creators) emit Loki logs and Tempo spans for any
 chain_id, and that Prometheus has fresh scrape samples from each. First gate of the
 suite.
+
+Completed 2026-05-08. The shared admin listener now exposes
+`POST /v1/admin/echo-chain-id`, every actor-specific binary emits a ChainID-tagged
+span/log with stable service naming, creator pods expose a Prometheus readiness
+gauge, and `k8s-smoke-tracing-v3.sh` validates echo responses plus per-actor
+Loki/Tempo/Prometheus evidence. The live local k3d run passed for all 14 actor
+pods after hardening Tempo settling and Loki bounded-range queries.
 
 ### Phase 8 - Smoke 2 - Discovery / Bootup Suite Implementation
 

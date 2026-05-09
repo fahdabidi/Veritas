@@ -296,6 +296,25 @@ pub struct DiscoveryProbeRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EchoChainIdRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EchoChainIdResponse {
+    pub chain_id: String,
+    pub actor_id: String,
+    pub node_id: String,
+    pub role: String,
+    pub service_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conduit_actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_surface: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedHostCreatorRequest {
     pub host_creator_id: String,
     pub publisher_entry: PublisherDhtEntry,
@@ -713,6 +732,9 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         ("POST", path) if path == AuthorityRoute::AdminInitializePublisherDht.path() => {
             initialize_publisher_dht(state, &request.body, query)
         }
+        ("POST", path) if path == AuthorityRoute::AdminEchoChainId.path() => {
+            echo_chain_id(state, &request.body, query)
+        }
         ("POST", path) if path == AuthorityRoute::AdminCreatorDhtEntry.path() => {
             creator_dht_entry(state, &request.body)
         }
@@ -751,6 +773,68 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
 
 fn node_metadata(state: &AdminState) -> Vec<u8> {
     json_response(200, &state.node_metadata)
+}
+
+fn echo_chain_id(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
+    let request = if body.is_empty() {
+        EchoChainIdRequest { chain_id: None }
+    } else {
+        match serde_json::from_slice::<EchoChainIdRequest>(body) {
+            Ok(request) => request,
+            Err(error) => {
+                return error_response(
+                    400,
+                    "bad_json",
+                    &format!("invalid echo-chain-id request json: {error}"),
+                )
+            }
+        }
+    };
+    let chain_id = match trace_chain_id(
+        query,
+        request.chain_id.as_deref(),
+        format!(
+            "echo-chain-id-{}-{}",
+            trace_actor_id(&state.node_metadata),
+            now_ms()
+        ),
+    ) {
+        Ok(chain_id) => chain_id,
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
+    let actor_id = trace_actor_id(&state.node_metadata);
+    let service_name = trace_service_name(&state.node_metadata);
+    let role = state.node_metadata.role.clone();
+    let _chain_span = tracing::info_span!(
+        "conduit_chain",
+        operation = "admin_echo_chain_id",
+        chain_id = %chain_id,
+        actor_id = %actor_id,
+        role = %role,
+        service_name = %service_name,
+    )
+    .entered();
+    metrics_otlp::record_chain_id(&chain_id);
+    tracing::info!(
+        event = "admin_echo_chain_id",
+        chain_id = %chain_id,
+        actor_id = %actor_id,
+        node_id = %state.node_metadata.node_id,
+        role = %role,
+        service_name = %service_name,
+    );
+    json_response(
+        200,
+        &EchoChainIdResponse {
+            chain_id,
+            actor_id,
+            node_id: state.node_metadata.node_id.clone(),
+            role,
+            service_name,
+            conduit_actor: state.node_metadata.conduit_actor.clone(),
+            publisher_surface: state.node_metadata.publisher_surface.clone(),
+        },
+    )
 }
 
 fn local_dht(state: &AdminState) -> Vec<u8> {
@@ -2495,6 +2579,37 @@ fn trace_chain_id(
             Ok(body_chain_id.to_string())
         }
         (None, None) => Ok(default_chain_id),
+    }
+}
+
+fn trace_actor_id(metadata: &AdminNodeMetadata) -> String {
+    metadata
+        .conduit_actor
+        .clone()
+        .unwrap_or_else(|| metadata.node_id.clone())
+}
+
+pub fn creator_trace_service_name(actor_id: &str, node_id: &str) -> String {
+    match actor_id {
+        "host-creator" => "creator-host".to_string(),
+        "new-creator" => "creator-new".to_string(),
+        "" => node_id.to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn trace_service_name(metadata: &AdminNodeMetadata) -> String {
+    match metadata.role.as_str() {
+        "publisher" => match metadata.publisher_surface.as_deref() {
+            Some("receiver") => "publisher-receiver".to_string(),
+            _ => "publisher-authority".to_string(),
+        },
+        "exit_bridge" => metadata.node_id.clone(),
+        "creator" => creator_trace_service_name(
+            metadata.conduit_actor.as_deref().unwrap_or(""),
+            &metadata.node_id,
+        ),
+        _ => metadata.node_id.clone(),
     }
 }
 

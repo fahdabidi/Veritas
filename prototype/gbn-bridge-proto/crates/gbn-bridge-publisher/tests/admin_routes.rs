@@ -10,8 +10,8 @@ use gbn_bridge_protocol::{
 };
 use gbn_bridge_publisher::{
     admin::{
-        AdminErrorResponse, AdminHttpServer, AdminState, BridgesResponse, FramesResponse,
-        MetricsResponse,
+        AdminErrorResponse, AdminHttpServer, AdminState, BridgesResponse, EchoChainIdResponse,
+        FramesResponse, MetricsResponse,
     },
     api::AuthorityRoute,
     AuthorityServer, PublisherAuthority, PublisherServiceConfig,
@@ -121,6 +121,23 @@ where
 {
     let mut stream = TcpStream::connect(addr).unwrap();
     let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    parse_http_response(&response)
+}
+
+fn post_json<R>(addr: SocketAddr, path: &str, body: &str) -> (u16, R)
+where
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
     stream.write_all(request.as_bytes()).unwrap();
     stream.shutdown(std::net::Shutdown::Write).unwrap();
 
@@ -324,5 +341,44 @@ fn admin_metrics_returns_bridge_snapshot_variant() {
     };
     assert_eq!(snapshot.commands_received, 1);
     assert_eq!(snapshot.commands_acked, 1);
+    handle.join().unwrap();
+}
+
+#[test]
+fn admin_echo_chain_id_emits_actor_role_and_service_metadata() {
+    let handle = stub_admin_server();
+    let chain_id = "smoke-1-unit-chain";
+    let path = format!(
+        "{}?chain_id={chain_id}",
+        AuthorityRoute::AdminEchoChainId.path()
+    );
+
+    let (status, response): (u16, EchoChainIdResponse) = post_json(
+        handle.local_addr(),
+        &path,
+        r#"{"chain_id":"smoke-1-unit-chain"}"#,
+    );
+
+    assert_eq!(status, 200);
+    assert_eq!(response.chain_id, chain_id);
+    assert_eq!(response.actor_id, "publisher-authority");
+    assert_eq!(response.node_id, "publisher-authority");
+    assert_eq!(response.role, "publisher");
+    assert_eq!(response.service_name, "publisher-authority");
+    handle.join().unwrap();
+}
+
+#[test]
+fn admin_echo_chain_id_rejects_mismatched_query_and_body_chain() {
+    let handle = stub_admin_server();
+
+    let (status, error): (u16, AdminErrorResponse) = post_json(
+        handle.local_addr(),
+        "/v1/admin/echo-chain-id?chain_id=query-chain",
+        r#"{"chain_id":"body-chain"}"#,
+    );
+
+    assert_eq!(status, 400);
+    assert_eq!(error.error.code, "bad_query");
     handle.join().unwrap();
 }

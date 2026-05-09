@@ -106,8 +106,10 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let _otlp_guard = metrics_otlp::init_otlp_tracing_from_env("exit-bridge")?;
     let config = BridgeServiceConfig::from_env()?;
+    let otlp_service_name =
+        env::var("GBN_BRIDGE_OTLP_SERVICE_NAME").unwrap_or_else(|_| config.node_id.clone());
+    let _otlp_guard = metrics_otlp::init_otlp_tracing_from_env(&otlp_service_name)?;
     let signing_key = config.load_signing_key()?;
     let publisher_public_key = config.load_publisher_public_key()?;
     let bridge_identity = PublicKeyBytes::from_verifying_key(&signing_key.verifying_key());

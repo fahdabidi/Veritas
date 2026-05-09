@@ -69,7 +69,7 @@ Pass 3 replaces the synthetic shortcut with the documented flow:
 | 7 | Smoke 1 — Tracing Suite Implementation | `[x]` |
 | 8 | Smoke 2 — Discovery / Bootup Suite Implementation | `[x]` |
 | 9 | Smoke 3 — Route And Encryption Boundary Suite Implementation | `[x]` |
-| 10 | Upload Session Build And Per-Chunk Encryption Pipeline (§3.4 + §3.5) | `[ ]` |
+| 10 | Upload Session Build And Per-Chunk Encryption Pipeline (§3.4 + §3.5) | `[x]` |
 | 11 | Multi-Lane Progressive Fanout (§3.6 + §3.7) | `[ ]` |
 | 12 | Smoke 4 — Full Upload Pipeline Suite Implementation | `[ ]` |
 

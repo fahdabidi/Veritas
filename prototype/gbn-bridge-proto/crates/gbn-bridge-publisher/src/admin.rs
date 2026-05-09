@@ -5,6 +5,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -12,8 +13,10 @@ use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_creator::{
-    BridgeFilterDrops, CreatorClient, CreatorError, DiscoveryProbeResult, LocalDhtStore,
-    SendDummyResult,
+    build_upload_session_to_disk, delete_upload_session, get_upload_session, list_upload_sessions,
+    BridgeFilterDrops, BuildUploadSessionOptions, CreatorClient, CreatorError,
+    DiscoveryProbeResult, LocalDhtStore, SanitizerFormatHint, SendDummyResult, SessionBuildError,
+    UploadSessionSummary,
 };
 use gbn_bridge_protocol::{
     validate_chain_id, BootstrapJoinReply, BootstrapSession, BridgeCommandPayload, BridgeDhtEntry,
@@ -37,6 +40,7 @@ use crate::metrics_otlp;
 use crate::service::{AuthorityService, ServiceError};
 use crate::storage::{BootstrapSessionRecord, BridgeRecord, IngestedFrameRecord};
 use crate::AuthorityError;
+use sha2::Digest;
 
 pub const ADMIN_BIND_ADDR_ENV: &str = "GBN_BRIDGE_ADMIN_BIND_ADDR";
 pub const DEFAULT_ADMIN_BIND_ADDR: &str = "127.0.0.1:9090";
@@ -430,6 +434,63 @@ pub struct HostJoinRelayResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildUploadInputSource {
+    Synthetic,
+    Inline,
+    Path,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildUploadSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    pub input_source: BuildUploadInputSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_size_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_bytes_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_size_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitization_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildUploadSessionManifestResponse {
+    pub total_chunks: u32,
+    pub content_hash: String,
+    pub chunk_size: u32,
+    pub total_bytes: u64,
+    pub sanitization_profile: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildUploadSessionResponse {
+    pub session_id: String,
+    pub chain_id: String,
+    pub manifest: BuildUploadSessionManifestResponse,
+    pub sanitization_report: gbn_bridge_creator::SanitizationReport,
+    pub ciphertext_only_at_bridge: bool,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadSessionsResponse {
+    pub sessions: Vec<UploadSessionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadSessionDeleteResponse {
+    pub session_id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminErrorResponse {
     pub error: AdminErrorBody,
 }
@@ -737,6 +798,9 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         }
         ("GET", path) if path == AuthorityRoute::AdminMetrics.path() => metrics_snapshot(state),
         ("GET", path) if path == AuthorityRoute::AdminNodeMetadata.path() => node_metadata(state),
+        ("GET", path) if path == AuthorityRoute::AdminUploadSessions.path() => {
+            list_creator_upload_sessions(state)
+        }
         ("GET", path) if path == AuthorityRoute::AdminBootstrapSession.path() => {
             match parse_bootstrap_session_query(query) {
                 Ok(query) => bootstrap_session(state, query),
@@ -746,7 +810,10 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         ("GET", path) if path == AuthorityRoute::AdminLocalDht.path() => local_dht(state),
         ("GET", path) => match admin_bridge_dht_entry_target(path) {
             Some(bridge_id) => bridge_dht_entry(state, bridge_id),
-            None => error_response(404, "not_found", "admin route not found"),
+            None => match upload_session_target(path) {
+                Some(session_id) => get_creator_upload_session(state, session_id),
+                None => error_response(404, "not_found", "admin route not found"),
+            },
         },
         ("POST", path) if path == AuthorityRoute::AdminInitializePublisherDht.path() => {
             initialize_publisher_dht(state, &request.body, query)
@@ -775,9 +842,16 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         ("POST", path) if path == AuthorityRoute::AdminSendDummy.path() => {
             inject_send_dummy(state, &request.body, query)
         }
+        ("POST", path) if path == AuthorityRoute::AdminBuildUploadSession.path() => {
+            build_upload_session_admin(state, &request.body, query)
+        }
         ("POST", path) if path == AuthorityRoute::AdminDiscoveryProbe.path() => {
             inject_discovery_probe(state, &request.body, query)
         }
+        ("DELETE", path) => match upload_session_target(path) {
+            Some(session_id) => delete_creator_upload_session(state, session_id),
+            None => error_response(404, "not_found", "admin route not found"),
+        },
         ("POST", path) => match admin_bridge_command_target(path) {
             Some(bridge_id) => inject_bridge_command(state, bridge_id, &request.body),
             None => error_response(404, "not_found", "admin route not found"),
@@ -902,6 +976,151 @@ fn local_dht(state: &AdminState) -> Vec<u8> {
     }
 }
 
+fn build_upload_session_admin(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
+    let started = std::time::Instant::now();
+    let Some(config) = &state.creator else {
+        return error_response(
+            404,
+            "not_found",
+            "build-upload-session is only available on creator admin listeners",
+        );
+    };
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            404,
+            "not_found",
+            "build-upload-session is only available on creator admin listeners",
+        );
+    };
+    let request = match serde_json::from_slice::<BuildUploadSessionRequest>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(
+                400,
+                "bad_request",
+                &format!("invalid build-upload-session json: {error}"),
+            )
+        }
+    };
+    let now_ms = now_ms();
+    let chain_id = match trace_chain_id(
+        query,
+        request.chain_id.as_deref(),
+        format!("build-upload-session-{}-{now_ms}", store.actor_id()),
+    ) {
+        Ok(chain_id) => chain_id,
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
+    let input = match build_upload_input(&request) {
+        Ok(input) => input,
+        Err((code, message)) => return error_response(400, code, &message),
+    };
+    let snapshot = store.snapshot();
+    let Some(publisher_entry) = snapshot.publisher_entry.clone() else {
+        return error_response(
+            409,
+            "missing_publisher_entry",
+            "creator local DHT is missing a Publisher entry",
+        );
+    };
+    if let Err(error) = publisher_entry.verify_trust_root(&config.publisher_pub, now_ms) {
+        return error_response(
+            409,
+            "publisher_entry_invalid",
+            &format!("creator Publisher entry failed trust-root validation: {error}"),
+        );
+    }
+    let state_dir = creator_state_dir(state, store);
+    let result = build_upload_session_to_disk(
+        &state_dir,
+        BuildUploadSessionOptions {
+            chain_id: chain_id.clone(),
+            actor_id: store.actor_id().to_string(),
+            plaintext: input,
+            format_hint: upload_format_hint(&request),
+            chunk_size: request.chunk_size_bytes.unwrap_or(8 * 1024),
+            sanitization_profile: request
+                .sanitization_profile
+                .clone()
+                .unwrap_or_else(|| "v3-default-no-visual-anon".to_string()),
+            now_ms,
+        },
+        &publisher_entry,
+        &snapshot,
+    );
+    match result {
+        Ok(result) => {
+            emit_upload_session_built_event(&chain_id, &result.summary);
+            json_response(
+                200,
+                &BuildUploadSessionResponse {
+                    session_id: result.summary.session_id,
+                    chain_id,
+                    manifest: BuildUploadSessionManifestResponse {
+                        total_chunks: result.summary.total_chunks,
+                        content_hash: base64_encode(&result.summary.content_hash),
+                        chunk_size: result.summary.chunk_size,
+                        total_bytes: result.summary.total_bytes,
+                        sanitization_profile: result.summary.sanitization_profile,
+                    },
+                    sanitization_report: result.summary.sanitization_report,
+                    ciphertext_only_at_bridge: true,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                },
+            )
+        }
+        Err(error) => session_error_response(error),
+    }
+}
+
+fn list_creator_upload_sessions(state: &AdminState) -> Vec<u8> {
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            404,
+            "not_found",
+            "upload-sessions is only available on creator admin listeners",
+        );
+    };
+    match list_upload_sessions(&creator_state_dir(state, store)) {
+        Ok(sessions) => json_response(200, &UploadSessionsResponse { sessions }),
+        Err(error) => session_error_response(error),
+    }
+}
+
+fn get_creator_upload_session(state: &AdminState, session_id: &str) -> Vec<u8> {
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            404,
+            "not_found",
+            "upload-sessions is only available on creator admin listeners",
+        );
+    };
+    match get_upload_session(&creator_state_dir(state, store), session_id) {
+        Ok(summary) => json_response(200, &summary),
+        Err(error) => session_error_response(error),
+    }
+}
+
+fn delete_creator_upload_session(state: &AdminState, session_id: &str) -> Vec<u8> {
+    let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
+        return error_response(
+            404,
+            "not_found",
+            "upload-sessions is only available on creator admin listeners",
+        );
+    };
+    match delete_upload_session(&creator_state_dir(state, store), session_id) {
+        Ok(deleted) => json_response(
+            200,
+            &UploadSessionDeleteResponse {
+                session_id: session_id.to_string(),
+                deleted,
+            },
+        ),
+        Err(error) => session_error_response(error),
+    }
+}
+
 fn reset_creator_state(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
     if !body.is_empty() {
         if let Err(error) = serde_json::from_slice::<serde_json::Value>(body) {
@@ -931,7 +1150,11 @@ fn reset_creator_state(state: &AdminState, body: &[u8], query: Option<&str>) -> 
         Err(message) => return error_response(400, "bad_query", &message),
     };
     match store.reset(chain_id, now_ms) {
-        Ok(response) => json_response(200, &response),
+        Ok(response) => {
+            let _ =
+                std::fs::remove_dir_all(creator_state_dir(state, store).join("upload_sessions"));
+            json_response(200, &response)
+        }
         Err(error) => error_response(500, "local_dht_reset_failed", &error.to_string()),
     }
 }
@@ -2581,6 +2804,203 @@ fn emit_send_dummy_event(
     );
 }
 
+fn emit_upload_session_built_event(chain_id: &str, summary: &UploadSessionSummary) {
+    let _chain_span = metrics_otlp::chain_span("creator_upload_session_built", chain_id).entered();
+    metrics_otlp::record_chain_id(chain_id);
+    tracing::info!(
+        event = "creator_upload_session_built",
+        chain_id,
+        session_id = %summary.session_id,
+        actor_id = %summary.actor_id,
+        total_chunks = summary.total_chunks,
+        total_bytes = summary.total_bytes,
+        chunk_size = summary.chunk_size,
+        content_hash = %base64_encode(&summary.content_hash),
+        sanitization_profile = %summary.sanitization_profile,
+        exif_segments_stripped = summary.sanitization_report.exif_segments_stripped,
+        container_metadata_blocks_stripped = summary
+            .sanitization_report
+            .container_metadata_blocks_stripped,
+        encoder_id_strings_stripped = summary.sanitization_report.encoder_id_strings_stripped,
+        timestamps_normalized = summary.sanitization_report.timestamps_normalized,
+        synthetic_marker_zeroed = summary.sanitization_report.synthetic_marker_zeroed,
+    );
+}
+
+fn build_upload_input(
+    request: &BuildUploadSessionRequest,
+) -> Result<Vec<u8>, (&'static str, String)> {
+    const SYNTHETIC_MAX_BYTES: usize = 1_048_576;
+    match request.input_source {
+        BuildUploadInputSource::Synthetic => {
+            let size = request.synthetic_size_bytes.unwrap_or(SYNTHETIC_MAX_BYTES);
+            if size > SYNTHETIC_MAX_BYTES {
+                return Err((
+                    "synthetic_size_too_large",
+                    format!("synthetic_size_bytes must be <= {SYNTHETIC_MAX_BYTES}"),
+                ));
+            }
+            let marker = request
+                .synthetic_marker
+                .as_deref()
+                .unwrap_or("VERITAS-SMOKE-4-PLAINTEXT")
+                .as_bytes();
+            Ok(synthetic_upload_bytes(size, marker))
+        }
+        BuildUploadInputSource::Inline => {
+            let Some(encoded) = request.inline_bytes_b64.as_deref() else {
+                return Err((
+                    "missing_inline_bytes",
+                    "inline_bytes_b64 is required".to_string(),
+                ));
+            };
+            let bytes = base64_decode(encoded).map_err(|message| ("bad_inline_bytes", message))?;
+            if bytes.len() > SYNTHETIC_MAX_BYTES {
+                return Err((
+                    "inline_size_too_large",
+                    format!("inline input must be <= {SYNTHETIC_MAX_BYTES} bytes"),
+                ));
+            }
+            Ok(bytes)
+        }
+        BuildUploadInputSource::Path => {
+            let Some(path) = request.path.as_deref() else {
+                return Err(("missing_path", "path is required".to_string()));
+            };
+            std::fs::read(path).map_err(|error| ("path_read_failed", error.to_string()))
+        }
+    }
+}
+
+fn upload_format_hint(request: &BuildUploadSessionRequest) -> SanitizerFormatHint {
+    match request.input_source {
+        BuildUploadInputSource::Synthetic => SanitizerFormatHint::Synthetic,
+        BuildUploadInputSource::Inline | BuildUploadInputSource::Path => request
+            .path
+            .as_deref()
+            .or(request.inline_bytes_b64.as_deref())
+            .map(format_hint_from_name)
+            .unwrap_or(SanitizerFormatHint::Opaque),
+    }
+}
+
+fn format_hint_from_name(value: &str) -> SanitizerFormatHint {
+    let lower = value.to_ascii_lowercase();
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        SanitizerFormatHint::Jpeg
+    } else if lower.ends_with(".png") {
+        SanitizerFormatHint::Png
+    } else if lower.ends_with(".mp4") || lower.ends_with(".mov") {
+        SanitizerFormatHint::Mp4
+    } else {
+        SanitizerFormatHint::Opaque
+    }
+}
+
+fn synthetic_upload_bytes(size: usize, marker: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size);
+    let marker_len = marker.len().min(size);
+    out.extend_from_slice(&marker[..marker_len]);
+    let mut counter = 0_u64;
+    while out.len() < size {
+        let digest = sha2::Sha256::digest(counter.to_le_bytes());
+        for byte in digest {
+            if out.len() == size {
+                break;
+            }
+            out.push(byte);
+        }
+        counter = counter.saturating_add(1);
+    }
+    out
+}
+
+fn creator_state_dir(state: &AdminState, store: &LocalDhtStore) -> PathBuf {
+    state
+        .node_metadata
+        .state_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| store.state_path().parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn session_error_response(error: SessionBuildError) -> Vec<u8> {
+    match error {
+        SessionBuildError::CreatorNotOnboarded(current_state) => error_response_with_context(
+            409,
+            "creator_not_onboarded",
+            "selected node has not completed NewCreator onboarding",
+            Some(current_state),
+            None,
+        ),
+        SessionBuildError::MissingPublisherEntry => error_response(
+            409,
+            "missing_publisher_entry",
+            "creator local DHT is missing a Publisher entry",
+        ),
+        SessionBuildError::NotFound { session_id } => error_response(
+            404,
+            "upload_session_not_found",
+            &format!("upload session `{session_id}` was not found"),
+        ),
+        SessionBuildError::Chunk(error) => {
+            error_response(400, "bad_upload_input", &error.to_string())
+        }
+        other => error_response(500, "upload_session_error", &other.to_string()),
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    let mut bits = 0_u32;
+    let mut bit_count = 0_u8;
+    let mut out = Vec::new();
+    for byte in input.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return Err(format!("invalid base64 byte `{}`", byte as char)),
+        } as u32;
+        bits = (bits << 6) | value;
+        bit_count += 6;
+        if bit_count >= 8 {
+            bit_count -= 8;
+            out.push((bits >> bit_count) as u8);
+            bits &= (1 << bit_count) - 1;
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedHttpUrl {
     host: String,
@@ -2860,6 +3280,15 @@ fn admin_bridge_dht_entry_target(path: &str) -> Option<&str> {
         None
     } else {
         Some(bridge_id)
+    }
+}
+
+fn upload_session_target(path: &str) -> Option<&str> {
+    let session_id = path.strip_prefix("/v1/admin/upload-sessions/")?;
+    if session_id.is_empty() || session_id.contains('/') {
+        None
+    } else {
+        Some(session_id)
     }
 }
 

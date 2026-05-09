@@ -230,6 +230,9 @@ pub enum AuthorityRoute {
     AdminCreatorDhtEntry,
     AdminSendDummy,
     AdminDiscoveryProbe,
+    AdminBuildUploadSession,
+    AdminUploadSessions,
+    AdminSendUpload,
 }
 
 impl AuthorityRoute {
@@ -263,6 +266,9 @@ impl AuthorityRoute {
             Self::AdminCreatorDhtEntry => "/v1/admin/creator-dht-entry",
             Self::AdminSendDummy => "/v1/admin/send-dummy",
             Self::AdminDiscoveryProbe => "/v1/admin/discovery-probe",
+            Self::AdminBuildUploadSession => "/v1/admin/build-upload-session",
+            Self::AdminUploadSessions => "/v1/admin/upload-sessions",
+            Self::AdminSendUpload => "/v1/admin/send-upload",
         }
     }
 }

@@ -1,7 +1,7 @@
 # GBN-PROTO-012 - Execution Phase 10 - Upload Session Build And Per-Chunk Encryption Pipeline
 
-**Status:** Pending
-**Last Updated:** 2026-05-08
+**Status:** Completed
+**Last Updated:** 2026-05-09
 **Phase:** 10 (Upload Session Build And Per-Chunk Encryption Pipeline)
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
 **Depends On:** Phases 0–5 complete (creator pods, local DHT, single-frame envelope
@@ -185,7 +185,9 @@ Steps:
 
 1. Sanitize input.
 2. Chunk sanitized bytes (compute per-chunk plaintext_hash and content_hash).
-3. Generate session_id (random 16 bytes).
+3. Generate a path-safe 16-byte session_id (rendered as 32 lowercase hex
+   characters) from the creator, chain, sanitized content hash, timestamp, and a
+   process-local monotonic counter so repeated byte-identical builds remain unique.
 4. Generate creator ephemeral X25519 keypair.
 5. Derive `upload_content_key` and `nonce_base` via X25519 + HKDF against
    `publisher_entry.pub_key`.
@@ -378,11 +380,12 @@ Phase 10 emits 1 of the 12 §2.5 upload-pipeline events; Phase 11 emits the othe
 
 ## Tests
 
-Unit tests listed inline above. Integration test
-(`gbn-bridge-creator/tests/build_upload_session.rs`):
+Unit tests listed inline above. Integration coverage lives in
+`gbn-bridge-creator/tests/session_builder.rs` and
+`gbn-bridge-publisher/tests/admin_build_upload_session.rs`:
 
 - Build a synthetic 1 MiB / 8 KiB session → 128 chunks; manifest content_hash
-  matches `SHA-256(synthetic_bytes)`.
+  matches `SHA-256(sanitized_bytes)`.
 - Persistence: build → kill the creator process → re-launch → `GET
   /v1/admin/upload-sessions` returns the session.
 - Idempotency: rebuilding with byte-identical input produces a different
@@ -405,10 +408,41 @@ cargo test -p gbn-bridge-creator --test sanitizer
 cargo test -p gbn-bridge-creator --test chunker
 cargo test -p gbn-bridge-creator --test manifest
 cargo test -p gbn-bridge-creator --test session_builder
-cargo test -p gbn-bridge-creator --test build_upload_session
+cargo test -p gbn-bridge-publisher --test admin_build_upload_session
 ```
 
 ---
+
+## Completion Notes
+
+Implemented in `gbn-bridge-creator` and exposed through creator-only admin
+endpoints in `gbn-bridge-publisher`.
+
+Validation completed on 2026-05-09:
+
+- `cargo fmt --all --check`
+- `cargo check --workspace`
+- `cargo test -p gbn-bridge-creator --test sanitizer`
+- `cargo test -p gbn-bridge-creator --test chunker`
+- `cargo test -p gbn-bridge-creator --test manifest`
+- `cargo test -p gbn-bridge-creator --test session_builder`
+- `cargo test -p gbn-bridge-publisher --test admin_build_upload_session`
+- Live k3d validation after image rollout
+  `local-20260509T033552Z-d63696d5a88d-dirty`:
+  `BuildUploadSession` on onboarded `creator-new` produced 128 encrypted chunk
+  files for a 1 MiB / 8 KiB synthetic input, stored manifest/session/local-DHT
+  files under `/var/lib/gbn-conduit/upload_sessions/<session_id>/`, preserved the
+  session across a `creator-new` rollout restart, returned 404 on the
+  `publisher-authority` admin listener, and emitted `creator_upload_session_built`
+  to Tempo with matching `chain_id`, `session_id`, `total_chunks`, and
+  `content_hash`.
+
+Live artifact directory:
+`target/k8s-smoke-artifacts/phase10-upload-session/20260508-205942-3013294`.
+
+The destructive cluster-delete wipe check was not run during this phase completion
+so the current Pass 3 cluster remains available for Phase 11; the session data is
+stored only in the local k3d PVC and the PVC has `Delete` reclaim semantics.
 
 ## Acceptance Criteria
 

@@ -65,7 +65,7 @@ Pass 3 replaces the synthetic shortcut with the documented flow:
 | 3 | SeedNewCreator API And First-Contact Join Path | `[x]` |
 | 4 | Bootstrap Payload Delivery, Local DHT Population, And Punch Fanout | `[x]` |
 | 5 | Onboarded-Creator SendDummy And Local-DHT Single-Lane Envelope Demo | `[x]` |
-| 6 | Operator Scripts And Acceptance Gate | `[ ]` |
+| 6 | Operator Scripts And Acceptance Gate | `[x]` |
 | 7 | Smoke 1 — Tracing Suite Implementation | `[ ]` |
 | 8 | Smoke 2 — Discovery / Bootup Suite Implementation | `[ ]` |
 | 9 | Smoke 3 — Route And Encryption Boundary Suite Implementation | `[ ]` |
@@ -166,6 +166,17 @@ Every major bootup transition emits `chain_id`-tagged logs and spans. The full s
 16 events, covering forward path, return path, both-side punch progress, and dummy
 delivery:
 
+Trace ownership is explicit. Every admin endpoint that starts traceable work accepts
+an operator-supplied `chain_id` through `?chain_id=...`, or through a JSON body
+`chain_id` field where the endpoint already has a request body. If both are present,
+they must match or the endpoint returns `400 bad_query`. Responses must echo the
+effective `chain_id`, and the first log/span emitted by the endpoint must use that
+same value. Operator and smoke scripts must generate a chain id before each action,
+pass it into the admin endpoint, and fail if the response or trace evidence uses a
+different id. This applies to `SeedHostCreator`, `InitializePublisherDht`,
+`SeedNewCreator`, `ResetCreatorState`, `SendDummy`, legacy `DiscoveryProbe`, and the
+future `BuildUploadSession` / `SendUpload` endpoints.
+
 Forward path (NewCreator → HostCreator → ExitBridgeA → Publisher):
 
 - host seed stored
@@ -264,6 +275,7 @@ files are not edited by Pass 3.
 The operator-facing commands are:
 
 - `SeedHostCreator`
+- `InitializePublisherDht`
 - `SeedNewCreator`
 - `DumpLocalDht`
 - `SendDummy` — single-lane envelope demo (Phase 5)
@@ -401,6 +413,13 @@ final Pass-3 acceptance gate (local-k8s + AWS walkthroughs).
 
 This phase does **not** implement the smoke test scripts themselves — those land in
 Phases 7, 8, and 9.
+
+Completed 2026-05-08. The AWS and local k8s operator scripts now share
+`_seed_actions.sh`, expose the Pass 3 commands, warn on legacy shortcuts, generate
+explicit per-action `chain_id`s, pass those IDs through traceable admin endpoints,
+and collect chain-scoped trace artifacts. The Pass 3 acceptance runner and smoke
+script placeholders are present with shell syntax validation; live k8s/AWS execution
+remains the acceptance gate for the later smoke implementation phases.
 
 ### Phase 7 - Smoke 1 - Tracing Suite Implementation
 

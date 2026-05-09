@@ -9,6 +9,16 @@ _seed_actions_json_get() {
   python3 -c "import json,sys; print(json.load(sys.stdin).get('$field',''))" 2>/dev/null || true
 }
 
+_seed_actions_chain_id() {
+  local prefix="$1" actor="${2:-operator}"
+  printf '%s-%s-%s\n' "$prefix" "$actor" "$(_now_epoch_ms)"
+}
+
+_seed_actions_path_with_chain_id() {
+  local path="$1" chain_id="$2"
+  printf '%s?chain_id=%s\n' "$path" "$chain_id"
+}
+
 _seed_actions_pick_surface() {
   local surface="$1" fallback_role="$2" i metadata found=()
   for ((i = 0; i < ${#NODE_LABELS[@]}; i++)); do
@@ -141,13 +151,48 @@ session = table.get("current_bootstrap_session") or {}
 print(f"state={table.get(\"self_onboarding_state\",\"unknown\")} bridges={len(bridges)} active={active} chain_id={session.get(\"chain_id\") or \"\"} bootstrap_session_id={session.get(\"session_id\") or \"\"}")'
 }
 
+_seed_actions_creator_state() {
+  local idx="$1"
+  _curl_admin "$idx" GET /v1/admin/local-dht | _seed_actions_json_get self_onboarding_state
+}
+
+_seed_actions_require_onboarded_creator() {
+  local idx="$1" local_dht state
+  local_dht="$(_curl_admin "$idx" GET /v1/admin/local-dht)"
+  state="$(printf '%s' "$local_dht" | _seed_actions_json_get self_onboarding_state)"
+  if [[ "$state" != "onboarded" && "$state" != "fanout_partial" ]]; then
+    echo "ERROR: selected creator is not onboarded (self_onboarding_state=${state:-unknown}). Run SeedNewCreator first." >&2
+    printf '%s\n' "$local_dht" | _pretty_json >&2
+    return 1
+  fi
+  printf '%s\n' "$local_dht"
+}
+
+do_dump_local_dht() {
+  local idx result role state
+  idx="$(_pick_node "Pick node to dump local DHT state:")"
+  result="$(_curl_admin "$idx" GET /v1/admin/local-dht)"
+  role="${NODE_ROLES[$idx]}"
+  state="$(printf '%s' "$result" | _seed_actions_json_get self_onboarding_state)"
+  if [[ "$role" != "CREATOR" ]]; then
+    echo "Node role ${role} has no creator local DHT. Role-tagged response:" >&2
+  else
+    echo "Creator local DHT summary: $(printf '%s' "$result" | _seed_actions_local_dht_summary)" >&2
+  fi
+  [[ -n "$state" && "$state" == "not_applicable" ]] && echo "State is not_applicable for this role." >&2
+  printf '%s\n' "$result" | _pretty_json
+}
+
 do_initialize_publisher_dht() {
-  local authority_idx result count active ids
+  local authority_idx result count active ids chain_id path
   authority_idx="$(_seed_actions_pick_surface authority AUTHORITY)"
+  chain_id="$(_seed_actions_chain_id initialize-publisher-dht publisher)"
+  path="$(_seed_actions_path_with_chain_id /v1/admin/publisher-dht/initialize "$chain_id")"
   echo "Initializing Publisher bridge DHT entries from active ExitBridge registry..." >&2
-  result="$(_curl_admin "$authority_idx" POST /v1/admin/publisher-dht/initialize "{}")"
+  result="$(_curl_admin "$authority_idx" POST "$path" "{}")"
   printf '%s\n' "$result" | _pretty_json
 
+  chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
   count="$(printf '%s' "$result" | _seed_actions_json_get initialized_bridge_count)"
   active="$(printf '%s' "$result" | _seed_actions_json_get active_bridge_count)"
   ids="$(printf '%s' "$result" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("bridge_ids") or []))' 2>/dev/null || true)"
@@ -158,13 +203,14 @@ do_initialize_publisher_dht() {
   if [[ "$count" != "$active" ]]; then
     echo "WARN: initialized bridge count ($count) differs from active bridge count ($active)." >&2
   fi
+  echo "  Chain ID: ${chain_id:-unknown}" >&2
   echo "  Publisher DHT initialized bridge_ids: ${ids:-unknown}" >&2
 }
 
 do_seed_host_creator() {
   local host_idx authority_idx receiver_idx bridge_idx
   local host_meta authority_meta receiver_meta bridge_meta bridge_id dht_response bridge_entry
-  local local_dht self_state host_role genesis force expiry_ms payload result chain_id yn
+  local local_dht self_state host_role genesis force expiry_ms payload result chain_id path yn
 
   host_idx="$(_pick_node "Pick creator to seed as HostCreator:" "CREATOR")"
   authority_idx="$(_seed_actions_pick_surface authority AUTHORITY)"
@@ -210,8 +256,10 @@ do_seed_host_creator() {
   expiry_ms="$(( $(_now_epoch_ms) + ${VERITAS_SEED_ENTRY_TTL_MS:-300000} ))"
   payload="$(_seed_actions_build_payload "$host_meta" "$authority_meta" "$receiver_meta" "$bridge_entry" "$genesis" "$force" "$expiry_ms")"
 
+  chain_id="$(_seed_actions_chain_id seed-host-creator "$(printf '%s' "$host_meta" | _seed_actions_json_get conduit_actor)")"
+  path="$(_seed_actions_path_with_chain_id /v1/admin/seed-host-creator "$chain_id")"
   echo "Seeding HostCreator on ${NODE_LABELS[$host_idx]}..." >&2
-  result="$(_curl_admin "$host_idx" POST /v1/admin/seed-host-creator "$payload")"
+  result="$(_curl_admin "$host_idx" POST "$path" "$payload")"
   printf '%s\n' "$result" | _pretty_json
 
   chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
@@ -231,7 +279,7 @@ do_seed_host_creator() {
 do_seed_new_creator() {
   local new_idx host_idx authority_idx
   local new_meta host_meta host_dht host_role host_entry_request host_entry_response host_entry
-  local expiry_ms host_ip host_admin_url force start_bootstrap payload result chain_id state summary deadline now yn
+  local expiry_ms host_ip host_admin_url force start_bootstrap payload result chain_id path state summary deadline now yn
 
   new_idx="$(_pick_node "Pick creator to seed as NewCreator:" "CREATOR")"
   host_idx="$(_pick_node "Pick seeded HostCreator:" "CREATOR")"
@@ -292,8 +340,10 @@ PY
   fi
 
   payload="$(_seed_actions_build_seed_new_payload "$new_meta" "$host_entry" "$start_bootstrap" "$force" "$host_admin_url")"
+  chain_id="$(_seed_actions_chain_id seed-new-creator "$(printf '%s' "$new_meta" | _seed_actions_json_get conduit_actor)")"
+  path="$(_seed_actions_path_with_chain_id /v1/admin/seed-new-creator "$chain_id")"
   echo "Seeding NewCreator on ${NODE_LABELS[$new_idx]}..." >&2
-  result="$(_curl_admin "$new_idx" POST /v1/admin/seed-new-creator "$payload")"
+  result="$(_curl_admin "$new_idx" POST "$path" "$payload")"
   printf '%s\n' "$result" | _pretty_json
 
   chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
@@ -335,16 +385,10 @@ PY
 }
 
 do_send_dummy() {
-  local idx local_dht state eligible_summary size force yn payload result chain_id assigned selected route_source ciphertext_only
+  local idx local_dht state eligible_summary size force yn payload result chain_id path assigned selected route_source ciphertext_only
 
   idx="$(_pick_node "Pick onboarded NewCreator:" "CREATOR")"
-  local_dht="$(_curl_admin "$idx" GET /v1/admin/local-dht)"
-  state="$(printf '%s' "$local_dht" | _seed_actions_json_get self_onboarding_state)"
-  if [[ "$state" != "onboarded" && "$state" != "fanout_partial" ]]; then
-    echo "ERROR: selected creator is not onboarded (self_onboarding_state=${state:-unknown}). Run SeedNewCreator first." >&2
-    printf '%s\n' "$local_dht" | _pretty_json >&2
-    return 1
-  fi
+  local_dht="$(_seed_actions_require_onboarded_creator "$idx")"
 
   eligible_summary="$(printf '%s' "$local_dht" | python3 -c 'import json,sys,time
 table=json.load(sys.stdin)
@@ -386,8 +430,10 @@ print(json.dumps({
 }, separators=(",", ":")))
 PY
 )"
+  chain_id="$(_seed_actions_chain_id send-dummy "${NODE_LABELS[$idx]%% *}")"
+  path="$(_seed_actions_path_with_chain_id /v1/admin/send-dummy "$chain_id")"
   echo "Triggering SendDummy on ${NODE_LABELS[$idx]} using local DHT route selection..." >&2
-  result="$(_curl_admin "$idx" POST /v1/admin/send-dummy "$payload")"
+  result="$(_curl_admin "$idx" POST "$path" "$payload")"
   printf '%s\n' "$result" | _pretty_json
 
   chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
@@ -411,4 +457,234 @@ PY
     read -r -p "Collect chain_id hits from recent logs now? [Y/n]: " yn
     [[ "${yn,,}" == "n" ]] || _collect_chain_traces "$chain_id"
   fi
+}
+
+do_discovery_probe() {
+  local idx result chain_id path yn
+  echo "WARN: DiscoveryProbe is deprecated for Pass 3 creator bootup." >&2
+  echo "      Use SeedHostCreator -> InitializePublisherDht -> SeedNewCreator instead." >&2
+  idx="$(_pick_node "Pick node for legacy DiscoveryProbe:")"
+  chain_id="$(_seed_actions_chain_id discovery-probe "${NODE_LABELS[$idx]%% *}")"
+  path="$(_seed_actions_path_with_chain_id /v1/admin/discovery-probe "$chain_id")"
+  result="$(_curl_admin "$idx" POST "$path" "{}")"
+  printf '%s\n' "$result" | _pretty_json
+  chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
+  if [[ -n "$chain_id" ]] && declare -F _collect_chain_traces >/dev/null 2>&1; then
+    read -r -p "Collect chain_id hits from recent logs now? [Y/n]: " yn
+    [[ "${yn,,}" == "n" ]] || _collect_chain_traces "$chain_id"
+  fi
+}
+
+do_reset_creator_state() {
+  local idx local_dht state chain confirm result reset_chain_id path
+  idx="$(_pick_node "Pick creator to reset:" "CREATOR")"
+  local_dht="$(_curl_admin "$idx" GET /v1/admin/local-dht)"
+  state="$(printf '%s' "$local_dht" | _seed_actions_json_get self_onboarding_state)"
+  chain="$(printf '%s' "$local_dht" | python3 -c 'import json,sys
+table=json.load(sys.stdin)
+session=table.get("current_bootstrap_session") or {}
+print(session.get("chain_id") or "")' 2>/dev/null || true)"
+  echo "Selected ${NODE_LABELS[$idx]} current state=${state:-unknown} chain_id=${chain:-none}" >&2
+  read -r -p "Type RESET to clear this creator state: " confirm
+  if [[ "$confirm" != "RESET" ]]; then
+    echo "reset cancelled" >&2
+    return 1
+  fi
+  reset_chain_id="$(_seed_actions_chain_id reset-creator-state "${NODE_LABELS[$idx]%% *}")"
+  path="$(_seed_actions_path_with_chain_id /v1/admin/reset-creator-state "$reset_chain_id")"
+  result="$(_curl_admin "$idx" POST "$path" "{}")"
+  printf '%s\n' "$result" | _pretty_json
+}
+
+do_collect_traces() {
+  local chain_id out_dir
+  read -r -p "chain_id to collect: " chain_id
+  if [[ -z "$chain_id" ]]; then
+    echo "ERROR: chain_id is required." >&2
+    return 1
+  fi
+  out_dir="/tmp/conduit-traces-${chain_id}"
+  mkdir -p "$out_dir"
+  printf '%s\n' "$chain_id" >"$out_dir/chain-id.txt"
+  if declare -F _write_chain_traces >/dev/null 2>&1; then
+    _write_chain_traces "$chain_id" "$out_dir"
+  elif declare -F _collect_chain_traces >/dev/null 2>&1; then
+    _collect_chain_traces "$chain_id" | tee "$out_dir/operator-trace-output.txt"
+  else
+    echo "No trace collector is available in this transport adapter." >"$out_dir/README.txt"
+  fi
+  echo "Trace artifacts: $out_dir"
+}
+
+do_build_upload_session() {
+  local idx local_dht source chunk_size synthetic_size marker inline input_path payload result chain_id admin_path session_id yn
+  idx="$(_pick_node "Pick onboarded creator for BuildUploadSession:" "CREATOR")"
+  local_dht="$(_seed_actions_require_onboarded_creator "$idx")" || return 1
+
+  read -r -p "Input source [synthetic|inline|path] [synthetic]: " source
+  source="${source:-synthetic}"
+  read -r -p "Chunk size in bytes [8192]: " chunk_size
+  chunk_size="${chunk_size:-8192}"
+  if ! [[ "$chunk_size" =~ ^[0-9]+$ ]] || ((chunk_size < 1)); then
+    echo "ERROR: chunk size must be a positive integer." >&2
+    return 1
+  fi
+
+  case "$source" in
+    synthetic)
+      read -r -p "Synthetic size in bytes [1048576]: " synthetic_size
+      synthetic_size="${synthetic_size:-1048576}"
+      read -r -p "Synthetic marker [VERITAS-SMOKE-4-PLAINTEXT]: " marker
+      marker="${marker:-VERITAS-SMOKE-4-PLAINTEXT}"
+      payload="$(SOURCE="$source" CHUNK="$chunk_size" SIZE="$synthetic_size" MARKER="$marker" python3 - <<'PY'
+import json
+import os
+print(json.dumps({
+    "input_source": os.environ["SOURCE"],
+    "synthetic_size_bytes": int(os.environ["SIZE"]),
+    "synthetic_marker": os.environ["MARKER"],
+    "chunk_size_bytes": int(os.environ["CHUNK"]),
+    "sanitization_profile": "v3-default-no-visual-anon",
+}, separators=(",", ":")))
+PY
+)"
+      ;;
+    inline)
+      read -r -p "Inline bytes as base64: " inline
+      if [[ -z "$inline" ]]; then
+        echo "ERROR: inline base64 content is required." >&2
+        return 1
+      fi
+      payload="$(SOURCE="$source" CHUNK="$chunk_size" INLINE="$inline" python3 - <<'PY'
+import json
+import os
+print(json.dumps({
+    "input_source": os.environ["SOURCE"],
+    "inline_bytes_b64": os.environ["INLINE"],
+    "chunk_size_bytes": int(os.environ["CHUNK"]),
+    "sanitization_profile": "v3-default-no-visual-anon",
+}, separators=(",", ":")))
+PY
+)"
+      ;;
+    path)
+      read -r -p "Path mounted inside creator container: " input_path
+      if [[ -z "$input_path" ]]; then
+        echo "ERROR: path is required." >&2
+        return 1
+      fi
+      payload="$(SOURCE="$source" CHUNK="$chunk_size" PATH_VALUE="$input_path" python3 - <<'PY'
+import json
+import os
+print(json.dumps({
+    "input_source": os.environ["SOURCE"],
+    "path": os.environ["PATH_VALUE"],
+    "chunk_size_bytes": int(os.environ["CHUNK"]),
+    "sanitization_profile": "v3-default-no-visual-anon",
+}, separators=(",", ":")))
+PY
+)"
+      ;;
+    *)
+      echo "ERROR: input source must be synthetic, inline, or path." >&2
+      return 1
+      ;;
+  esac
+
+  chain_id="$(_seed_actions_chain_id build-upload-session "${NODE_LABELS[$idx]%% *}")"
+  admin_path="$(_seed_actions_path_with_chain_id /v1/admin/build-upload-session "$chain_id")"
+  result="$(_curl_admin "$idx" POST "$admin_path" "$payload")"
+  printf '%s\n' "$result" | _pretty_json
+  session_id="$(printf '%s' "$result" | _seed_actions_json_get session_id)"
+  chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
+  [[ -n "$session_id" ]] && echo "  session_id: $session_id"
+  [[ -n "$chain_id" ]] && echo "  chain_id:   $chain_id"
+  if [[ -n "$session_id" ]]; then
+    read -r -p "Continue with SendUpload for this session? [y/N]: " yn
+    if [[ "${yn,,}" == "y" || "${yn,,}" == "yes" ]]; then
+      do_send_upload "$idx" "$session_id"
+    fi
+  fi
+}
+
+_seed_actions_extract_sessions() {
+  python3 -c 'import json,sys
+data=json.load(sys.stdin)
+sessions=data.get("sessions", data if isinstance(data, list) else [])
+for idx, session in enumerate(sessions, 1):
+    if isinstance(session, dict):
+        sid=session.get("session_id") or session.get("id") or ""
+        status=session.get("status") or session.get("session_status") or ""
+    else:
+        sid=str(session)
+        status=""
+    if sid:
+        print(f"{idx}\t{sid}\t{status}")'
+}
+
+do_send_upload() {
+  local idx="${1:-}" session_id="${2:-}" local_dht sessions rows row choice target_lanes force yn payload result chain_id path
+  if [[ -z "$idx" ]]; then
+    idx="$(_pick_node "Pick onboarded creator for SendUpload:" "CREATOR")"
+  fi
+  local_dht="$(_seed_actions_require_onboarded_creator "$idx")" || return 1
+
+  if [[ -z "$session_id" ]]; then
+    sessions="$(_curl_admin "$idx" GET /v1/admin/upload-sessions)"
+    printf '%s\n' "$sessions" | _pretty_json
+    mapfile -t rows < <(printf '%s' "$sessions" | _seed_actions_extract_sessions)
+    if [[ "${#rows[@]}" -gt 0 ]]; then
+      echo "Available sessions:" >&2
+      local i sid status
+      for row in "${rows[@]}"; do
+        IFS=$'\t' read -r i sid status <<<"$row"
+        printf "  [%s] %s %s\n" "$i" "$sid" "${status:+($status)}" >&2
+      done
+      read -r -p "Select session number or paste session_id: " choice
+      if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#rows[@]})); then
+        IFS=$'\t' read -r _ session_id _ <<<"${rows[$((choice - 1))]}"
+      else
+        session_id="$choice"
+      fi
+    else
+      read -r -p "session_id: " session_id
+    fi
+  fi
+  if [[ -z "$session_id" ]]; then
+    echo "ERROR: session_id is required." >&2
+    return 1
+  fi
+
+  read -r -p "Target lane count [10]: " target_lanes
+  target_lanes="${target_lanes:-10}"
+  if ! [[ "$target_lanes" =~ ^[0-9]+$ ]] || ((target_lanes < 1)); then
+    echo "ERROR: target lane count must be a positive integer." >&2
+    return 1
+  fi
+  force=null
+  read -r -p "Force lane failure bridge_ids as comma list (blank = none): " yn
+  if [[ -n "$yn" ]]; then
+    force="$(printf '%s' "$yn" | python3 -c 'import json,sys
+items=[item.strip() for item in sys.stdin.read().split(",") if item.strip()]
+print(json.dumps(items))')"
+  fi
+  payload="$(SESSION="$session_id" LANES="$target_lanes" FORCE="$force" python3 - <<'PY'
+import json
+import os
+force = json.loads(os.environ["FORCE"]) if os.environ["FORCE"] != "null" else None
+print(json.dumps({
+    "session_id": os.environ["SESSION"],
+    "target_lane_count": int(os.environ["LANES"]),
+    "lane_open_timeout_ms": 30000,
+    "chunk_ack_timeout_ms": 15000,
+    "force_lane_failure": force,
+}, separators=(",", ":")))
+PY
+)"
+  chain_id="$(_seed_actions_chain_id send-upload "${NODE_LABELS[$idx]%% *}")"
+  path="$(_seed_actions_path_with_chain_id /v1/admin/send-upload "$chain_id")"
+  result="$(_curl_admin "$idx" POST "$path" "$payload")"
+  printf '%s\n' "$result" | _pretty_json
+  chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
+  [[ -n "$chain_id" ]] && echo "  chain_id: $chain_id"
 }

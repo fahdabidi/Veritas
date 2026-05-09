@@ -603,6 +603,51 @@ fn send_dummy_from_onboarded_creator_uses_local_dht_route_and_envelope() {
 }
 
 #[test]
+fn send_dummy_from_onboarded_creator_preserves_operator_chain_id() {
+    let topology = start_topology(AdminStateKind::CreatorOnboarded);
+    let chain_id = "operator-send-dummy-chain";
+    let path = format!("/v1/admin/send-dummy?chain_id={chain_id}");
+
+    let (status, result): (u16, SendDummyResult) =
+        post_json(topology.admin.local_addr(), &path, r#"{"size":32}"#);
+
+    assert_eq!(status, 200);
+    assert_eq!(result.chain_id, chain_id);
+    assert_eq!(result.route_source, "local_dht");
+
+    let frames = topology
+        .service
+        .lock()
+        .unwrap()
+        .publisher_authority()
+        .list_frames(Some(chain_id), 10);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].chain_id.as_deref(), Some(chain_id));
+
+    topology.shutdown();
+}
+
+#[test]
+fn send_dummy_rejects_mismatched_query_and_body_chain_id() {
+    let topology = start_topology(AdminStateKind::CreatorOnboarded);
+
+    let (status, error): (u16, gbn_bridge_publisher::admin::AdminErrorResponse) = post_json(
+        topology.admin.local_addr(),
+        "/v1/admin/send-dummy?chain_id=query-chain",
+        r#"{"size":32,"chain_id":"body-chain"}"#,
+    );
+
+    assert_eq!(status, 400);
+    assert_eq!(error.error.code, "bad_query");
+    assert!(error
+        .error
+        .message
+        .contains("chain_id query parameter and request body chain_id must match"));
+
+    topology.shutdown();
+}
+
+#[test]
 fn send_dummy_force_bridge_failure_selects_second_local_dht_bridge() {
     let topology = start_topology(AdminStateKind::CreatorOnboarded);
 

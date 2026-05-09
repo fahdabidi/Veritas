@@ -117,6 +117,7 @@ Flags:
 
 ### 5.1 Build Session Response
 
+- response `chain_id` exactly matches the request query chain id;
 - `manifest.total_chunks` matches `ceil(synthetic_size / chunk_size)`.
 - `manifest.content_hash` is non-empty 32-byte base64.
 - `sanitization_report.synthetic_marker_zeroed == true`.
@@ -124,6 +125,7 @@ Flags:
 
 ### 5.2 Normal SendUpload Response
 
+- response `chain_id` exactly matches `chain_id_normal`;
 - `session_status == "completed"`.
 - `completed_chunks == total_chunks`.
 - `failed_chunks == []`.
@@ -136,6 +138,7 @@ Flags:
 
 ### 5.3 Failover SendUpload Response (if `--include-failover`)
 
+- response `chain_id` exactly matches `chain_id_failover`;
 - `session_status == "completed"`.
 - `completed_chunks == total_chunks`.
 - `failed_chunks == []`.
@@ -191,6 +194,11 @@ from Master plan §2.5:
 11. `publisher_upload_chunk_ack_returned` (one per chunk)
 12. `creator_upload_session_complete` (once per session, with `session_status =
     completed`)
+
+Every matched span must carry the same `chain_id` as the admin response and the
+same `session_id` as the build/send response for that invocation. Any orphan span
+with the expected event name but a different chain id is a failure, not extra
+evidence.
 
 ### 5.7 Persistence Behavior (Pass 3 D1)
 

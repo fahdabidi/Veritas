@@ -378,8 +378,25 @@ _collect_chain_traces() {
   done
 }
 
+_write_chain_traces() {
+  local chain_id="$1" out_dir="$2"
+  local i pod container loki_expr
+  mkdir -p "$out_dir/pod-logs"
+  loki_expr="{namespace=\"$NAMESPACE\"} |= \"$chain_id\""
+  _grafana_explore_url Tempo query "$chain_id" >"$out_dir/tempo-url.txt" || true
+  _grafana_explore_url Loki expr "$loki_expr" >"$out_dir/loki-url.txt" || true
+  for ((i = 0; i < ${#NODE_LABELS[@]}; i++)); do
+    pod="${NODE_DESCS[$i]%%:*}"
+    container="${NODE_DESCS[$i]##*:}"
+    kubectl -n "$NAMESPACE" logs --since=10m "$pod" -c "$container" 2>/dev/null |
+      grep "$chain_id" >"$out_dir/pod-logs/${pod}-${container}.log" || true
+  done
+}
+
 do_trigger_command() {
   local idx target choice payload now catalog_id lease_id reason body
+  echo "WARN: TriggerCommand is a legacy Pass-2 command-injection path." >&2
+  echo "      Prefer Pass-3 seed/upload commands for creator bootstrap validation." >&2
   idx="$(_pick_node "Pick AUTHORITY pod:" "AUTHORITY")"
   echo ""
   echo "  [1] CatalogRefresh test payload"
@@ -440,7 +457,13 @@ do_check_images() {
 }
 
 do_smoke_validation() {
+  echo "WARN: SmokeValidation invokes the legacy Pass-2 smoke wrapper." >&2
+  echo "      Use Pass3Acceptance after Phases 7, 8, 9, and 12 add the v3 smoke scripts." >&2
   "$SCRIPT_DIR/k8s-smoke.sh" --namespace "$NAMESPACE" --send-dummy
+}
+
+do_pass3_acceptance() {
+  "$SCRIPT_DIR/k8s-pass3-acceptance.sh" --namespace "$NAMESPACE"
 }
 
 do_refresh() {
@@ -486,11 +509,19 @@ main() {
       "DumpFrames" \
       "AdminMetrics" \
       "LiveMetrics" \
+      "InitializePublisherDht" \
       "SeedHostCreator" \
       "SeedNewCreator" \
+      "DumpLocalDht" \
       "SendDummy" \
+      "BuildUploadSession" \
+      "SendUpload" \
+      "ResetCreatorState" \
+      "CollectTraces" \
+      "DiscoveryProbe" \
       "TriggerCommand" \
       "CheckImages" \
+      "Pass3Acceptance" \
       "SmokeValidation" \
       "Refresh" \
       "Teardown" \
@@ -505,11 +536,19 @@ main() {
         DumpFrames) do_dump_frames ;;
         AdminMetrics) do_admin_metrics ;;
         LiveMetrics) do_live_metrics ;;
+        InitializePublisherDht) do_initialize_publisher_dht ;;
         SeedHostCreator) do_seed_host_creator ;;
         SeedNewCreator) do_seed_new_creator ;;
+        DumpLocalDht) do_dump_local_dht ;;
         SendDummy) do_send_dummy ;;
+        BuildUploadSession) do_build_upload_session ;;
+        SendUpload) do_send_upload ;;
+        ResetCreatorState) do_reset_creator_state ;;
+        CollectTraces) do_collect_traces ;;
+        DiscoveryProbe) do_discovery_probe ;;
         TriggerCommand) do_trigger_command ;;
         CheckImages) do_check_images ;;
+        Pass3Acceptance) do_pass3_acceptance ;;
         SmokeValidation) do_smoke_validation ;;
         Refresh) do_refresh ;;
         Teardown)

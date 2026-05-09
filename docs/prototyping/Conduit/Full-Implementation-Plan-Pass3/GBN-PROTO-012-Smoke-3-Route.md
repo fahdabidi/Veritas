@@ -91,6 +91,8 @@ Flags:
 
 ### 5.1 Response Shape (Both Invocations)
 
+- response `chain_id` exactly matches the request query chain id
+  (`chain_id_normal` or `chain_id_failover`);
 - `route_source == "local_dht"`;
 - `assigned_bridge_id` is non-empty;
 - `assigned_bridge_id` is present in `creator-local-dht-before.json` `bridge_entries`;
@@ -149,6 +151,10 @@ For each `chain_id`, Tempo returns spans for:
 8. `publisher_dummy_ack_returned`
 
 Total: 16 spans across the two invocations.
+
+Every matched span must carry the same `chain_id` as the corresponding
+SendDummy response. A span with the expected event name but a different chain id
+is a failure, not supporting evidence.
 
 ### 5.6 No Authority Catalog Call
 

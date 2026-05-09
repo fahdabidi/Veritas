@@ -480,8 +480,38 @@ _collect_chain_traces() {
   done
 }
 
+_write_chain_traces() {
+  local chain_id="$1" out_dir="$2"
+  local auth_lg recv_lg bridge_lg creator_lg lg safe now_ms start_ms
+  mkdir -p "$out_dir/cloudwatch" "$out_dir/xray"
+  auth_lg="$(cf_output AuthorityLogGroup)"
+  recv_lg="$(cf_output ReceiverLogGroup)"
+  bridge_lg="$(cf_output BridgeLogGroup)"
+  creator_lg="$(cf_output CreatorLogGroup)"
+  now_ms="$(_now_epoch_ms)"
+  start_ms="$((now_ms - 300000))"
+  for lg in "$auth_lg" "$recv_lg" "$bridge_lg" "$creator_lg"; do
+    [[ -z "$lg" || "$lg" == "None" ]] && continue
+    safe="$(printf '%s' "$lg" | tr '/:' '__')"
+    aws logs filter-log-events \
+      --log-group-name "$lg" \
+      --filter-pattern "\"$chain_id\"" \
+      --start-time "$start_ms" \
+      --region "$AWS_REGION" \
+      --output json >"$out_dir/cloudwatch/${safe}.json" 2>"$out_dir/cloudwatch/${safe}.err" || true
+  done
+  aws xray get-trace-summaries \
+    --region "$AWS_REGION" \
+    --start-time "$(_iso_minutes_ago 5)" \
+    --end-time "$(_iso_now)" \
+    --filter-expression "annotation.chain_id = \"$chain_id\"" \
+    --output json >"$out_dir/xray/trace-summaries.json" 2>"$out_dir/xray/trace-summaries.err" || true
+}
+
 do_trigger_command() {
   local idx target choice payload now catalog_id lease_id reason body
+  echo "WARN: TriggerCommand is a legacy Pass-2 command-injection path." >&2
+  echo "      Prefer Pass-3 seed/upload commands for creator bootstrap validation." >&2
   idx="$(_pick_node "Pick AUTHORITY node:" "AUTHORITY")"
   echo ""
   echo "  [1] CatalogRefresh test payload"
@@ -555,6 +585,8 @@ do_check_images() {
 }
 
 do_bootstrap_smoke() {
+  echo "WARN: BootstrapSmoke is deprecated for Pass 3 architecture-correct bootup." >&2
+  echo "      Use SeedHostCreator -> InitializePublisherDht -> SeedNewCreator, then the Pass-3 smoke suite." >&2
   "$SCRIPT_DIR/bootstrap-smoke.sh" --stack-name "$STACK_NAME" --region "$AWS_REGION"
 }
 
@@ -602,7 +634,13 @@ main() {
       "InitializePublisherDht" \
       "SeedHostCreator" \
       "SeedNewCreator" \
+      "DumpLocalDht" \
       "SendDummy" \
+      "BuildUploadSession" \
+      "SendUpload" \
+      "ResetCreatorState" \
+      "CollectTraces" \
+      "DiscoveryProbe" \
       "TriggerCommand" \
       "CheckImages" \
       "BootstrapSmoke" \
@@ -622,7 +660,13 @@ main() {
         InitializePublisherDht) do_initialize_publisher_dht ;;
         SeedHostCreator) do_seed_host_creator ;;
         SeedNewCreator) do_seed_new_creator ;;
+        DumpLocalDht) do_dump_local_dht ;;
         SendDummy) do_send_dummy ;;
+        BuildUploadSession) do_build_upload_session ;;
+        SendUpload) do_send_upload ;;
+        ResetCreatorState) do_reset_creator_state ;;
+        CollectTraces) do_collect_traces ;;
+        DiscoveryProbe) do_discovery_probe ;;
         TriggerCommand) do_trigger_command ;;
         CheckImages) do_check_images ;;
         BootstrapSmoke) do_bootstrap_smoke ;;

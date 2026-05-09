@@ -16,11 +16,11 @@ use gbn_bridge_creator::{
     SendDummyResult,
 };
 use gbn_bridge_protocol::{
-    BootstrapJoinReply, BootstrapSession, BridgeCommandPayload, BridgeDhtEntry, CreatorDhtEntry,
-    CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint, HostCreatorSeedState,
-    HostRoleState, LocalDiscoveryTable, NewCreatorSeedState, PendingCreator, ProtocolError,
-    PublicKeyBytes, PublisherDhtEntry, ReachabilityClass, SelfOnboardingState, TunnelPeerRole,
-    TunnelState,
+    validate_chain_id, BootstrapJoinReply, BootstrapSession, BridgeCommandPayload, BridgeDhtEntry,
+    CreatorDhtEntry, CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint,
+    HostCreatorSeedState, HostRoleState, LocalDiscoveryTable, NewCreatorSeedState, PendingCreator,
+    ProtocolError, PublicKeyBytes, PublisherDhtEntry, ReachabilityClass, SelfOnboardingState,
+    TunnelPeerRole, TunnelState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -285,10 +285,15 @@ pub struct SendDummyRequest {
     pub size: Option<usize>,
     #[serde(default)]
     pub force_bridge_failure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoveryProbeRequest {}
+pub struct DiscoveryProbeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedHostCreatorRequest {
@@ -332,10 +337,14 @@ pub struct CreatorDhtEntryResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InitializePublisherDhtRequest {}
+pub struct InitializePublisherDhtRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitializePublisherDhtResponse {
+    pub chain_id: String,
     pub active_bridge_count: usize,
     pub initialized_bridge_count: usize,
     pub publisher_dht_entry_count: usize,
@@ -702,19 +711,19 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
             None => error_response(404, "not_found", "admin route not found"),
         },
         ("POST", path) if path == AuthorityRoute::AdminInitializePublisherDht.path() => {
-            initialize_publisher_dht(state, &request.body)
+            initialize_publisher_dht(state, &request.body, query)
         }
         ("POST", path) if path == AuthorityRoute::AdminCreatorDhtEntry.path() => {
             creator_dht_entry(state, &request.body)
         }
         ("POST", path) if path == AuthorityRoute::AdminResetCreatorState.path() => {
-            reset_creator_state(state, &request.body)
+            reset_creator_state(state, &request.body, query)
         }
         ("POST", path) if path == AuthorityRoute::AdminSeedHostCreator.path() => {
-            seed_host_creator(state, &request.body)
+            seed_host_creator(state, &request.body, query)
         }
         ("POST", path) if path == AuthorityRoute::AdminSeedNewCreator.path() => {
-            seed_new_creator(state, &request.body)
+            seed_new_creator(state, &request.body, query)
         }
         ("POST", path) if path == AuthorityRoute::AdminStartBootstrap.path() => {
             start_bootstrap(state, &request.body)
@@ -723,10 +732,10 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
             host_join_relay(state, &request.body)
         }
         ("POST", path) if path == AuthorityRoute::AdminSendDummy.path() => {
-            inject_send_dummy(state, &request.body)
+            inject_send_dummy(state, &request.body, query)
         }
         ("POST", path) if path == AuthorityRoute::AdminDiscoveryProbe.path() => {
-            inject_discovery_probe(state, &request.body)
+            inject_discovery_probe(state, &request.body, query)
         }
         ("POST", path) => match admin_bridge_command_target(path) {
             Some(bridge_id) => inject_bridge_command(state, bridge_id, &request.body),
@@ -751,7 +760,7 @@ fn local_dht(state: &AdminState) -> Vec<u8> {
     }
 }
 
-fn reset_creator_state(state: &AdminState, body: &[u8]) -> Vec<u8> {
+fn reset_creator_state(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
     if !body.is_empty() {
         if let Err(error) = serde_json::from_slice::<serde_json::Value>(body) {
             return error_response(
@@ -771,14 +780,21 @@ fn reset_creator_state(state: &AdminState, body: &[u8]) -> Vec<u8> {
     };
 
     let now_ms = now_ms();
-    let chain_id = format!("reset-creator-state-{}-{now_ms}", store.actor_id());
+    let chain_id = match trace_chain_id(
+        query,
+        None,
+        format!("reset-creator-state-{}-{now_ms}", store.actor_id()),
+    ) {
+        Ok(chain_id) => chain_id,
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
     match store.reset(chain_id, now_ms) {
         Ok(response) => json_response(200, &response),
         Err(error) => error_response(500, "local_dht_reset_failed", &error.to_string()),
     }
 }
 
-fn seed_host_creator(state: &AdminState, body: &[u8]) -> Vec<u8> {
+fn seed_host_creator(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
     let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
         return error_response(
             405,
@@ -798,7 +814,14 @@ fn seed_host_creator(state: &AdminState, body: &[u8]) -> Vec<u8> {
         }
     };
     let now_ms = now_ms();
-    let proposed_chain_id = format!("seed-host-creator-{}-{now_ms}", request.host_creator_id);
+    let proposed_chain_id = match trace_chain_id(
+        query,
+        None,
+        format!("seed-host-creator-{}-{now_ms}", request.host_creator_id),
+    ) {
+        Ok(chain_id) => chain_id,
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
     emit_host_seed_event(
         "host_creator_seed_requested",
         &proposed_chain_id,
@@ -972,7 +995,7 @@ fn seed_host_creator(state: &AdminState, body: &[u8]) -> Vec<u8> {
     }
 }
 
-fn seed_new_creator(state: &AdminState, body: &[u8]) -> Vec<u8> {
+fn seed_new_creator(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
     let AdminLocalDhtSource::Creator(store) = &state.local_dht else {
         return error_response(
             405,
@@ -991,7 +1014,14 @@ fn seed_new_creator(state: &AdminState, body: &[u8]) -> Vec<u8> {
         }
     };
     let now_ms = now_ms();
-    let proposed_chain_id = format!("seed-new-creator-{}-{now_ms}", request.new_creator_id);
+    let proposed_chain_id = match trace_chain_id(
+        query,
+        None,
+        format!("seed-new-creator-{}-{now_ms}", request.new_creator_id),
+    ) {
+        Ok(chain_id) => chain_id,
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
     emit_new_seed_event(
         "new_creator_seed_requested",
         &proposed_chain_id,
@@ -1415,7 +1445,7 @@ fn host_join_relay(state: &AdminState, body: &[u8]) -> Vec<u8> {
     )
 }
 
-fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
+fn inject_send_dummy(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
     let Some(config) = &state.creator else {
         return error_response(
             501,
@@ -1427,6 +1457,7 @@ fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
         SendDummyRequest {
             size: None,
             force_bridge_failure: false,
+            chain_id: None,
         }
     } else {
         match serde_json::from_slice::<SendDummyRequest>(body) {
@@ -1458,6 +1489,15 @@ fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
             None,
         );
     };
+    let now_ms = now_ms();
+    let chain_id = match trace_chain_id(
+        query,
+        request.chain_id.as_deref(),
+        format!("send-dummy-{}-local-dht-{now_ms}", config.actor_id),
+    ) {
+        Ok(chain_id) => Some(chain_id),
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
 
     let client = CreatorClient::new(
         config.actor_id.clone(),
@@ -1466,7 +1506,7 @@ fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
     )
     .with_creator_endpoint(config.creator_ip_addr.clone(), config.udp_punch_port)
     .with_timeout(config.timeout);
-    match client.send_dummy_from_local_dht(store, size, request.force_bridge_failure) {
+    match client.send_dummy_from_local_dht(store, size, request.force_bridge_failure, chain_id) {
         Ok(result) => {
             let _chain_span =
                 metrics_otlp::chain_span("admin_send_dummy", &result.chain_id).entered();
@@ -1477,7 +1517,7 @@ fn inject_send_dummy(state: &AdminState, body: &[u8]) -> Vec<u8> {
     }
 }
 
-fn inject_discovery_probe(state: &AdminState, body: &[u8]) -> Vec<u8> {
+fn inject_discovery_probe(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
     let Some(config) = &state.creator else {
         return error_response(
             501,
@@ -1485,9 +1525,11 @@ fn inject_discovery_probe(state: &AdminState, body: &[u8]) -> Vec<u8> {
             "discovery-probe is not configured on this admin listener",
         );
     };
-    if !body.is_empty() {
+    let request = if body.is_empty() {
+        DiscoveryProbeRequest { chain_id: None }
+    } else {
         match serde_json::from_slice::<DiscoveryProbeRequest>(body) {
-            Ok(_) => {}
+            Ok(request) => request,
             Err(error) => {
                 return error_response(
                     400,
@@ -1496,7 +1538,16 @@ fn inject_discovery_probe(state: &AdminState, body: &[u8]) -> Vec<u8> {
                 )
             }
         }
-    }
+    };
+    let now_ms = now_ms();
+    let chain_id = match trace_chain_id(
+        query,
+        request.chain_id.as_deref(),
+        format!("discovery-probe-{}-{now_ms}", config.actor_id),
+    ) {
+        Ok(chain_id) => Some(chain_id),
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
 
     let client = CreatorClient::new(
         config.actor_id.clone(),
@@ -1505,7 +1556,7 @@ fn inject_discovery_probe(state: &AdminState, body: &[u8]) -> Vec<u8> {
     )
     .with_creator_endpoint(config.creator_ip_addr.clone(), config.udp_punch_port)
     .with_timeout(config.timeout);
-    match client.discovery_probe(&config.authority_url) {
+    match client.discovery_probe(&config.authority_url, chain_id) {
         Ok(result) => {
             let _chain_span =
                 metrics_otlp::chain_span("admin_discovery_probe", &result.chain_id).entered();
@@ -1553,7 +1604,7 @@ fn bridge_dht_entry(state: &AdminState, bridge_id: &str) -> Vec<u8> {
     }
 }
 
-fn initialize_publisher_dht(state: &AdminState, body: &[u8]) -> Vec<u8> {
+fn initialize_publisher_dht(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
     let Some(authority) = &state.authority else {
         return error_response(
             501,
@@ -1561,34 +1612,57 @@ fn initialize_publisher_dht(state: &AdminState, body: &[u8]) -> Vec<u8> {
             "publisher DHT initialization is only available on the publisher authority",
         );
     };
-    if !body.is_empty() {
-        if let Err(error) = serde_json::from_slice::<InitializePublisherDhtRequest>(body) {
-            return error_response(
-                400,
-                "bad_request",
-                &format!("invalid publisher-dht initialization json: {error}"),
-            );
+    let request = if body.is_empty() {
+        InitializePublisherDhtRequest { chain_id: None }
+    } else {
+        match serde_json::from_slice::<InitializePublisherDhtRequest>(body) {
+            Ok(request) => request,
+            Err(error) => {
+                return error_response(
+                    400,
+                    "bad_request",
+                    &format!("invalid publisher-dht initialization json: {error}"),
+                )
+            }
         }
-    }
+    };
+    let now_ms = now_ms();
+    let chain_id = match trace_chain_id(
+        query,
+        request.chain_id.as_deref(),
+        format!("initialize-publisher-dht-{now_ms}"),
+    ) {
+        Ok(chain_id) => chain_id,
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
     let mut service = authority
         .lock()
         .expect("authority service mutex poisoned while initializing publisher DHT");
     match service
         .publisher_authority_mut()
-        .initialize_publisher_bridge_dht(now_ms())
+        .initialize_publisher_bridge_dht(now_ms)
     {
-        Ok(summary) => json_response(
-            200,
-            &InitializePublisherDhtResponse {
-                active_bridge_count: summary.active_bridge_count,
-                initialized_bridge_count: summary.initialized_bridge_count,
-                publisher_dht_entry_count: service
-                    .publisher_authority()
-                    .publisher_bridge_dht_entry_count(),
-                stale_entry_count: summary.stale_entry_count,
-                bridge_ids: summary.bridge_ids,
-            },
-        ),
+        Ok(summary) => {
+            emit_publisher_dht_event(
+                "publisher_dht_initialized",
+                &chain_id,
+                summary.initialized_bridge_count,
+                summary.active_bridge_count,
+            );
+            json_response(
+                200,
+                &InitializePublisherDhtResponse {
+                    chain_id,
+                    active_bridge_count: summary.active_bridge_count,
+                    initialized_bridge_count: summary.initialized_bridge_count,
+                    publisher_dht_entry_count: service
+                        .publisher_authority()
+                        .publisher_bridge_dht_entry_count(),
+                    stale_entry_count: summary.stale_entry_count,
+                    bridge_ids: summary.bridge_ids,
+                },
+            )
+        }
         Err(error) => authority_error_response(error),
     }
 }
@@ -2273,6 +2347,23 @@ fn emit_join_path_event(
     );
 }
 
+fn emit_publisher_dht_event(
+    event: &'static str,
+    chain_id: &str,
+    initialized_bridge_count: usize,
+    active_bridge_count: usize,
+) {
+    let _chain_span =
+        metrics_otlp::chain_span("admin_initialize_publisher_dht", chain_id).entered();
+    metrics_otlp::record_chain_id(chain_id);
+    tracing::info!(
+        event,
+        chain_id,
+        initialized_bridge_count,
+        active_bridge_count
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedHttpUrl {
     host: String,
@@ -2386,6 +2477,40 @@ fn split_path_and_query(path: &str) -> (&str, Option<&str>) {
         Some((path, query)) => (path, Some(query)),
         None => (path, None),
     }
+}
+
+fn trace_chain_id(
+    query: Option<&str>,
+    body_chain_id: Option<&str>,
+    default_chain_id: String,
+) -> Result<String, String> {
+    let query_chain_id = parse_trace_chain_id_query(query)?;
+    match (query_chain_id, body_chain_id) {
+        (Some(query_chain_id), Some(body_chain_id)) if query_chain_id != body_chain_id => {
+            Err("chain_id query parameter and request body chain_id must match".to_string())
+        }
+        (Some(query_chain_id), _) => Ok(query_chain_id),
+        (None, Some(body_chain_id)) => {
+            validate_chain_id(body_chain_id).map_err(|error| error.to_string())?;
+            Ok(body_chain_id.to_string())
+        }
+        (None, None) => Ok(default_chain_id),
+    }
+}
+
+fn parse_trace_chain_id_query(query: Option<&str>) -> Result<Option<String>, String> {
+    let Some(query) = query else {
+        return Ok(None);
+    };
+    let mut chain_id = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key == "chain_id" && !value.is_empty() {
+            validate_chain_id(value).map_err(|error| error.to_string())?;
+            chain_id = Some(value.to_string());
+        }
+    }
+    Ok(chain_id)
 }
 
 fn env_u16(name: &str) -> Option<u16> {

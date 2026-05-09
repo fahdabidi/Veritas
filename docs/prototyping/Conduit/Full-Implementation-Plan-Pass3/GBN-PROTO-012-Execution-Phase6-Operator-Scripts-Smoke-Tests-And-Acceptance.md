@@ -1,6 +1,6 @@
 # GBN-PROTO-012 - Execution Phase 6 - Operator Scripts And Acceptance Gate
 
-**Status:** Pending
+**Status:** Completed
 **Last Updated:** 2026-05-08
 **Parent Plan:** [GBN-PROTO-012](GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
 **Depends On:** Phases 0–5 complete
@@ -26,6 +26,13 @@ The Pass 2 smoke plans (`GBN-PROTO-009`, `010`, `011`) remain frozen in
 Pass 3 smoke docs above supersede them.
 
 Update the parent plan status tracker when this phase is complete.
+
+Completed 2026-05-08. The shared operator action library is implemented and wired
+into both AWS and local k8s control scripts. Every traceable action generates an
+explicit `chain_id`, passes it through the admin request, prints the echoed id, and
+can collect chain-scoped trace artifacts. The Pass 3 acceptance runner and smoke
+script placeholders are present; live k8s/AWS execution remains part of the later
+smoke implementation gates.
 
 ---
 
@@ -97,6 +104,32 @@ pass.
 | **SendUpload** | discover creator pods → check onboarded → list sessions via `/v1/admin/upload-sessions` → prompt session selection → prompt target lane count → optionally prompt `force_lane_failure` for failover demo → POST `/v1/admin/send-upload` → print `session_status`, `lanes_used`, `completed_chunks`, progressive-timeline timestamps, `chain_id` |
 | **ResetCreatorState** | discover creator pods → confirm prompt → POST `/v1/admin/reset-creator-state` → print prior state and prior `chain_id` |
 | **CollectTraces** | prompt for `chain_id` → query Loki + Tempo (k8s) or CloudWatch + X-Ray (AWS) → write traces to `/tmp/conduit-traces-${chain_id}/` |
+
+---
+
+## Traceability And ChainID Contract
+
+Every shared menu action generates an explicit operator `chain_id` before it calls
+an admin endpoint. The path includes `?chain_id=<generated-id>` for:
+
+- `SeedHostCreator`
+- `InitializePublisherDht`
+- `SeedNewCreator`
+- `ResetCreatorState`
+- `SendDummy`
+- `DiscoveryProbe` while the legacy action remains available
+- `BuildUploadSession` and `SendUpload` when their owning phases land
+
+If an action sends a JSON body that also contains `chain_id`, the value must match
+the query parameter. A mismatch is a test failure and the endpoint must return
+`400 bad_query`; scripts must not retry with a new id because that would split the
+diagnostic trail. Responses are printed with the echoed `chain_id`, and
+`CollectTraces` uses that same value to collect Loki/Tempo or CloudWatch/X-Ray
+artifacts under `/tmp/conduit-traces-${chain_id}/`.
+
+The Pass 3 acceptance runner must preserve the generated chain ids in artifact
+directories so failures can be traced from operator action to Rust span without
+guessing which endpoint minted the id.
 
 ---
 
@@ -267,6 +300,8 @@ bash -n prototype/gbn-bridge-proto/infra/scripts/_seed_actions.sh
 bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-tracing-v3.sh
 bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-discovery-v3.sh
 bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-route-v3.sh
+bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-upload-v3.sh
+bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-pass3-acceptance.sh
 bash -n prototype/gbn-bridge-proto/infra/scripts/aws-smoke-creator-exec.sh
 
 # Cargo
@@ -282,6 +317,12 @@ cd ../gbn-proto && cargo test --workspace
 ---
 
 ## Acceptance Criteria
+
+The criteria below are the final Pass 3 acceptance gate that Phase 6 wires into
+operator tooling. Phase 6 completion itself is limited to landing the shared
+scripts, command surfaces, ChainID propagation, syntax validation, and runner
+structure. The smoke scripts exit-0 criteria are satisfied by Phases 7, 8, 9, and
+12 when those implementations replace the current placeholders.
 
 - Operator can execute the documented seed flow (`SeedHostCreator` then
   `SeedNewCreator`) and reach `onboarded` on `creator-new` from a clean cluster.

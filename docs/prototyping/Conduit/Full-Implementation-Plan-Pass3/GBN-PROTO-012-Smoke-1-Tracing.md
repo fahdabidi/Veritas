@@ -78,12 +78,15 @@ Flags:
    - 2 Publisher surfaces;
    - 10 ExitBridges;
    - 2 creators.
-3. Wait `--timeout` seconds.
-4. Run assertions.
+3. Assert every response echoes the exact generated `chain_id`, `actor_id`, and
+   `role`; any mismatch fails before observability queries run.
+4. Wait `--timeout` seconds.
+5. Run assertions.
 
 The `/v1/admin/echo-chain-id` endpoint is added in Phase 0 alongside `node-metadata`.
 It accepts `{ "chain_id": "smoke-1-..." }`, emits one log line and one span per call
-with that chain_id and the local actor_id, and returns 204. Adding this endpoint to
+with that chain_id and the local actor_id, and returns
+`{ "chain_id": "...", "actor_id": "...", "role": "..." }`. Adding this endpoint to
 the `creator-runner` binary is part of Phase 0's cluster bring-up scope.
 
 ---
@@ -96,6 +99,7 @@ For each of the 14 pod actors:
 
 - `LogQL: {namespace="veritas",actor_id="<id>"} |= "<chain_id>"` returns ≥ 1 entry.
 - The matched entry contains `actor_id`, `role`, and `chain_id` keys.
+- The indexed `chain_id` equals the response `chain_id` for that actor.
 
 ### 5.2 Tempo
 
@@ -103,6 +107,7 @@ For each of the 14 pod actors:
 
 - `traceql: { service.name="<actor_id>" && chain_id="<chain_id>" }` returns ≥ 1 span.
 - Span attributes include `chain_id`, `actor_id`, and `role`.
+- The span `chain_id` equals the response `chain_id` for that actor.
 
 ### 5.3 Prometheus
 

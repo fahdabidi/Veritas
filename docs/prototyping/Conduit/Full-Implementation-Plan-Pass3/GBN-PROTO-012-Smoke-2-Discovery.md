@@ -87,14 +87,17 @@ Flags:
 4. **SeedHostCreator**: discover Publisher and one direct ExitBridge (call this
    ExitBridgeA). Build the seed payload. POST
    `/v1/admin/seed-host-creator?chain_id=<chain_id>` to `creator-host` with
-   `bootstrap_genesis=true`. Assert response has `host_role_state=host_seeded`.
-5. **InitializePublisherDht**: POST `/v1/admin/publisher-dht/initialize` to the
-   Publisher authority surface. Assert `initialized_bridge_count == 10` and
-   `publisher_dht_entry_count == 10`.
+   `bootstrap_genesis=true`. Assert response has `host_role_state=host_seeded`
+   and echoes the same `chain_id`.
+5. **InitializePublisherDht**: POST
+   `/v1/admin/publisher-dht/initialize?chain_id=<chain_id>` to the Publisher
+   authority surface. Assert `initialized_bridge_count == 10`,
+   `publisher_dht_entry_count == 10`, and response `chain_id == <chain_id>`.
 6. **SeedNewCreator**: build the `host_creator_entry` payload from `creator-host`'s
    metadata + seed signature. POST
    `/v1/admin/seed-new-creator?chain_id=<chain_id>` to `creator-new` with
-   `start_bootstrap=true`. Assert response has `self_onboarding_state=bootstrapping`.
+   `start_bootstrap=true`. Assert response has
+   `self_onboarding_state=bootstrapping` and echoes the same `chain_id`.
 7. Poll `GET /v1/admin/local-dht` on `creator-new` every 1 s for up to
    `--bootstrap-timeout` s. Track every state transition.
 8. Stop when `self_onboarding_state` reaches a terminal state.
@@ -171,6 +174,10 @@ Seed punch and progress:
 15. `new_creator_local_dht_updated`
 16. `new_creator_bridge_entry_active` (≥ 1 occurrence; one per active bridge)
 
+Every matched span must carry the same `chain_id` echoed by SeedHostCreator,
+InitializePublisherDht, and SeedNewCreator. A span with the expected event name
+but a different chain id is a failure, not supporting evidence.
+
 ### 5.5 No Direct-Authority Shortcut
 
 Search Tempo for `traceql: { chain_id="<chain_id>" && span.name="discovery_probe" }`
@@ -178,6 +185,9 @@ within the test window. Assert ≥ 0 hits and **no spans whose `actor_id` is a
 non-creator pod and whose `event` is `creator_bootstrap_response_received`**. The
 legacy `discovery-probe` shortcut on Publisher/bridge pods would produce such spans;
 their absence proves the architecture-correct flow ran.
+
+Implementation note: the discovery-probe TraceQL query is a strict zero-hit
+assertion. Any `discovery_probe` span under the Smoke 2 `chain_id` fails the run.
 
 ---
 
@@ -206,7 +216,7 @@ Written to `/tmp/conduit-smoke-2-${chain_id}/`:
 | `creator-new` stuck in `bootstrapping` | HostCreator → Publisher path broken; check ExitBridgeA reachability |
 | `seed_tunnel_failed` | UDP punch port not exposed in k8s; check exit-bridge service ports |
 | `fanout_failed` | Publisher BridgeBatchAssign not reaching remaining bridges; check authority control session |
-| Local DHT bridge count != 9 | Publisher created bootstrap with wrong count; check `bridge_count_target` in publisher logic |
+| Local DHT bridge count != 10 | Publisher created bootstrap with wrong count; check `bridge_count_target` in publisher logic |
 | 16-event trace missing return-path events | T0.5 not implemented; Phase 4 return-path block missing |
 | All four actor ids equal | Pre-Pass-3 shortcut still in place; Phase 3 was not actually completed |
 

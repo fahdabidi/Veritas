@@ -136,11 +136,13 @@ impl CreatorClient {
     pub fn discovery_probe(
         &self,
         authority_url: &str,
+        chain_id: Option<String>,
     ) -> Result<DiscoveryProbeResult, CreatorError> {
         let started = Instant::now();
         let now_ms = now_ms();
         let request_id = format!("discovery-probe-{}-{now_ms}", self.actor_id);
-        let chain_id = default_chain_id("discovery-probe", &self.actor_id, &request_id);
+        let chain_id = chain_id
+            .unwrap_or_else(|| default_chain_id("discovery-probe", &self.actor_id, &request_id));
         let catalog_request_id = format!("{request_id}-catalog");
         let bootstrap_request_id = format!("{request_id}-bootstrap");
         let catalog_request = BridgeCatalogRequest {
@@ -306,11 +308,13 @@ impl CreatorClient {
         store: &LocalDhtStore,
         size: usize,
         force_bridge_failure: bool,
+        chain_id: Option<String>,
     ) -> Result<SendDummyResult, CreatorError> {
         let started = Instant::now();
         let now_ms = now_ms();
-        let chain_id =
-            default_chain_id("send-dummy", &self.actor_id, &format!("local-dht-{now_ms}"));
+        let chain_id = chain_id.unwrap_or_else(|| {
+            default_chain_id("send-dummy", &self.actor_id, &format!("local-dht-{now_ms}"))
+        });
         let mut snapshot = store.snapshot();
         ensure_onboarded(&snapshot)?;
         let publisher_entry = snapshot

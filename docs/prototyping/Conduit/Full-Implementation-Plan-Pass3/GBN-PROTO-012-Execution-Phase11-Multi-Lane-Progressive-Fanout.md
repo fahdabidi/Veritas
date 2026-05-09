@@ -230,10 +230,17 @@ GET  /v1/admin/upload-sessions/{session_id}/dispatch-plan
 
 ### `POST /v1/admin/send-upload`
 
+Accepts an optional `?chain_id=...` query parameter and optional JSON body
+`chain_id`. If both are present they must match or the endpoint returns
+`400 bad_query`. The response must echo the effective `chain_id`, and every lane,
+chunk, bridge-forward, receiver-ingest, and ack event for the session must carry
+that same `chain_id` plus `session_id`.
+
 Request:
 
 ```json
 {
+  "chain_id": "send-upload-smoke-4-normal",
   "session_id": "base64...",
   "target_lane_count": 10,
   "lane_open_timeout_ms": 30000,
@@ -294,9 +301,9 @@ Add `SendUpload` to the menu actions in `_seed_actions.sh`. Flow:
 4. Prompt: select session_id (most recent first).
 5. Prompt: target_lane_count (default 10).
 6. Prompt: enable forced lane failure for failover demo? (default no.)
-7. POST `/v1/admin/send-upload` with the chosen parameters.
+7. POST `/v1/admin/send-upload?chain_id=<chain_id>` with the chosen parameters.
 8. Print `session_status`, `lanes_used`, `completed_chunks`, `failed_chunks`,
-   timing fields, `chain_id`.
+   timing fields, echoed `chain_id`.
 9. Offer to fetch the dispatch plan and trace bundle.
 
 ---
@@ -323,8 +330,9 @@ event #1):
 12. `creator_upload_session_complete` (once per session, with terminal
     `session_status`)
 
-Every event includes `chain_id`, `session_id`, and `chunk_index` where
-applicable.
+Every event includes the operator-supplied `chain_id`, `session_id`, and
+`chunk_index` where applicable. Smoke 4 must reject any event whose `chain_id`
+does not match the `send-upload` response.
 
 ---
 
@@ -385,6 +393,6 @@ cargo test -p gbn-bridge-publisher --test admin_send_upload
 - Bridges see only ciphertext (the Phase 10 envelope is reused; bridge
   intercept tests confirm).
 - All 11 of Phase 11's §2.5 events appear in Tempo for at least one successful
-  session.
+  session with the same echoed `chain_id` and `session_id`.
 - V1 (`prototype/gbn-proto/**`) is unchanged.
 - Parent plan status tracker is updated.

@@ -309,12 +309,15 @@ fn initialize_publisher_dht_admin_command_materializes_registered_exit_bridges()
     .spawn()
     .unwrap();
 
-    let (status, response): (u16, InitializePublisherDhtResponse) = post_json(
-        admin.local_addr(),
-        AuthorityRoute::AdminInitializePublisherDht.path(),
-        "{}",
+    let chain_id = "phase4-publisher-dht-chain";
+    let path = format!(
+        "{}?chain_id={chain_id}",
+        AuthorityRoute::AdminInitializePublisherDht.path()
     );
+    let (status, response): (u16, InitializePublisherDhtResponse) =
+        post_json(admin.local_addr(), &path, "{}");
     assert_eq!(status, 200);
+    assert_eq!(response.chain_id, chain_id);
     assert_eq!(response.active_bridge_count, 10);
     assert_eq!(response.initialized_bridge_count, 10);
     assert_eq!(response.publisher_dht_entry_count, 10);

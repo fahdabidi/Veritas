@@ -267,10 +267,17 @@ DELETE /v1/admin/upload-sessions/{session_id}
 
 ### `POST /v1/admin/build-upload-session`
 
+Accepts an optional `?chain_id=...` query parameter and optional JSON body
+`chain_id`. If both are present they must match or the endpoint returns
+`400 bad_query`. The response must echo the effective `chain_id`, and every
+session-build log/span must use that same value together with the generated
+`session_id`.
+
 Request:
 
 ```json
 {
+  "chain_id": "build-upload-session-smoke-4-normal",
   "input_source": "synthetic",
   "synthetic_size_bytes": 1048576,
   "synthetic_marker": "VERITAS-SMOKE-4-PLAINTEXT",
@@ -344,8 +351,10 @@ Add `BuildUploadSession` to the menu actions in `_seed_actions.sh`. Flow:
 4. Prompt: chunk size (default 8 KiB).
 5. Prompt: synthetic size (default 1 MiB) and marker (default
    `VERITAS-SMOKE-4-PLAINTEXT`).
-6. POST `/v1/admin/build-upload-session` to the selected creator.
-7. Print `session_id`, chunk count, content_hash, sanitization_report, `chain_id`.
+6. POST `/v1/admin/build-upload-session?chain_id=<chain_id>` to the selected
+   creator.
+7. Print `session_id`, chunk count, content_hash, sanitization_report, echoed
+   `chain_id`.
 8. Offer to continue with `SendUpload` (Phase 11 action) or stop here.
 
 Per Master plan §2.8, all operator-script invocations require WSL2 Ubuntu.
@@ -358,6 +367,10 @@ Emit logs/spans (per Master plan §2.5 upload-pipeline events):
 
 - `creator_upload_session_built` (one per session; includes `session_id`,
   `total_chunks`, `content_hash`, `sanitization_report`)
+
+The event uses the operator-supplied `chain_id` from
+`POST /v1/admin/build-upload-session?chain_id=...`; smoke tests must fail if the
+response or trace event uses a different chain.
 
 Phase 10 emits 1 of the 12 §2.5 upload-pipeline events; Phase 11 emits the other 11.
 
@@ -412,7 +425,7 @@ cargo test -p gbn-bridge-creator --test build_upload_session
   failure.
 - Container restart preserves the session directory (Pass 3 D1 persistence).
 - Cluster destroy wipes it (Pass 3 D1).
-- The §2.5 event `creator_upload_session_built` appears in Tempo with `session_id`,
-  `total_chunks`, and `content_hash` attributes.
+- The §2.5 event `creator_upload_session_built` appears in Tempo with the echoed
+  `chain_id`, `session_id`, `total_chunks`, and `content_hash` attributes.
 - V1 (`prototype/gbn-proto/**`) is unchanged.
 - Parent plan status tracker is updated.

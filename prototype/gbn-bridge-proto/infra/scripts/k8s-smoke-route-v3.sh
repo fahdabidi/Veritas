@@ -806,5 +806,7 @@ report.extend(
 (root / "report.md").write_text("\n".join(report), encoding="utf-8")
 PY
 
+smoke_archive_report "GBN-PROTO-012-Smoke-3-Route" "$ARTIFACT_DIR/report.md"
+
 echo "Conduit Smoke 3 route/encryption validation passed."
 echo "Detailed evidence report: $ARTIFACT_DIR/report.md"

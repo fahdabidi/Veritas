@@ -21,7 +21,7 @@ Conduit references:
 - Pass 2 V2-to-V1 parity plan: [GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
 - Pass 2 local Kubernetes plan: [GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md)
 - Pass 3 architecture-correct bootstrap plan: [GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
-- Smoke 2 discovery report: [report.md](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md)
+- Smoke 2 discovery report: [GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md)
 - AWS Phase 10 validation plan: [GBN-PROTO-006-Execution-Phase10-Live-AWS-And-Mobile-Validation.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Execution-Phase10-Live-AWS-And-Mobile-Validation.md)
 - AWS test report: [GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md)
 
@@ -49,7 +49,7 @@ Current saved evidence:
 
 | Evidence | Value |
 |---|---|
-| Pass 3 Smoke 2 report | [`target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md`](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md) |
+| Pass 3 Smoke 2 report | [GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md) |
 | Smoke 2 ChainID | `smoke-2-b927fae092c0455d980beb21fc8e158e` |
 | Smoke 2 bootstrap session | `bootstrap-000010` |
 | Smoke 2 result | Publisher DHT `10/10`, NewCreator local DHT `10/10 active`, bootstrap session `completed`, ChainID pod-log evidence present |
@@ -589,7 +589,7 @@ python ../../../tools/scan_secrets.py ../../../ --fail-on-findings
 | [GBN-PROTO-012 Smoke 2](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Smoke-2-Discovery.md) | discovery and first-time bootup smoke plan |
 | [GBN-PROTO-012 Smoke 3](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Smoke-3-Route.md) | local-DHT route and encryption boundary smoke plan |
 | [GBN-PROTO-012 Smoke 4](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Smoke-4-Full-Upload.md) | full upload pipeline smoke plan |
-| [Smoke 2 Report](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md) | saved local-k8s discovery run with DHT, API, bootstrap, and ChainID evidence |
+| [Smoke 2 Report](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md) | saved local-k8s discovery run with DHT, API, bootstrap, and ChainID evidence |
 | [Phase 10 Plan](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Execution-Phase10-Live-AWS-And-Mobile-Validation.md) | live AWS/mobile validation plan |
 | [Full Implementation Test Report](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md) | canonical validation evidence report |
 | [Mobile Test Matrix](../docs/mobile-test-matrix.md) | validation scenarios and thresholds |
@@ -668,9 +668,9 @@ The current local test suite is implemented as four explicit smoke gates:
 | Smoke | Script | What it validates | Report status |
 |---|---|---|---|
 | Smoke 1 - Tracing | `infra/scripts/k8s-smoke-tracing-v3.sh` | Every actor pod emits ChainID logs/spans and Prometheus samples. | Placeholder: save latest detailed report after next run. |
-| Smoke 2 - Discovery / Bootup | `infra/scripts/k8s-smoke-discovery-v3.sh` | Publisher DHT seed, HostCreator/NewCreator bootup, NewCreator local DHT population, bootstrap session state, ChainID evidence. | Saved: [`target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md`](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md) |
-| Smoke 3 - Route / Encryption Boundary | `infra/scripts/k8s-smoke-route-v3.sh` | Complete NewCreator local-DHT preflight, Publisher/creator/ExitBridge DHT evidence, `SendDummy` route source `local_dht`, Publisher decrypt/hash validation, bridge ciphertext-only boundary, ChainID evidence, failover. | Placeholder: next run writes `target/k8s-smoke-artifacts/smoke-3-route/<run-id>/report.md`. |
-| Smoke 4 - Full Upload | `infra/scripts/k8s-smoke-upload-v3.sh` | Build upload session, Publisher/creator/ExitBridge DHT evidence, sanitize/chunk/encrypt, 10/10 ExitBridge normal fanout, receiver reconstruction, ChainID evidence across every lane, failover, persistence. | Placeholder: next run writes `target/k8s-smoke-artifacts/smoke-4-upload/<run-id>/report.md`. |
+| Smoke 2 - Discovery / Bootup | `infra/scripts/k8s-smoke-discovery-v3.sh` | Publisher DHT seed, HostCreator/NewCreator bootup, NewCreator local DHT population, bootstrap session state, ChainID evidence. | Saved: [GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md). |
+| Smoke 3 - Route / Encryption Boundary | `infra/scripts/k8s-smoke-route-v3.sh` | Complete NewCreator local-DHT preflight, Publisher/creator/ExitBridge DHT evidence, `SendDummy` route source `local_dht`, Publisher decrypt/hash validation, bridge ciphertext-only boundary, ChainID evidence, failover. | Placeholder: archive next `report.md` as `docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-3-Route-<run-id>.md`. |
+| Smoke 4 - Full Upload | `infra/scripts/k8s-smoke-upload-v3.sh` | Build upload session, Publisher/creator/ExitBridge DHT evidence, sanitize/chunk/encrypt, 10/10 ExitBridge normal fanout, receiver reconstruction, ChainID evidence across every lane, failover, persistence. | Placeholder: archive next `report.md` as `docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-4-Upload-<run-id>.md`. |
 
 Run all four gates in dependency order:
 
@@ -979,16 +979,19 @@ infra/scripts/k8s-observability-up.sh
 infra/scripts/k8s-pass3-acceptance.sh --require-observability
 ```
 
-After each smoke run, preserve the artifact directory printed by the script. The current
-saved detailed report is:
+After each smoke run, preserve the artifact directory printed by the script for local
+debugging. Report-producing smoke scripts archive the final `report.md` into the
+tracked Pass 3 test-report folder by default. Override the tracked report location
+with `VERITAS_K8S_SMOKE_REPORT_ROOT` when needed.
+The current saved detailed report is:
 
-- Smoke 2: [`target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md`](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md)
+- Smoke 2: [GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md)
 
 Report placeholders to fill after the remaining runs:
 
-- Smoke 1: `target/k8s-smoke-artifacts/smoke-1-tracing/<run-id>/report.md`
-- Smoke 3: `target/k8s-smoke-artifacts/smoke-3-route/<run-id>/report.md`
-- Smoke 4: `target/k8s-smoke-artifacts/smoke-4-upload/<run-id>/report.md`
+- Smoke 1: `docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-1-Tracing-<run-id>.md`
+- Smoke 3: `docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-3-Route-<run-id>.md`
+- Smoke 4: `docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-4-Upload-<run-id>.md`
 
 Each report should include DHT state, API completion evidence, and ChainID log/span
 evidence for every stage it claims as complete.
@@ -1137,7 +1140,7 @@ Local Pass 3 smoke sign-off:
   - ChainID pod-log evidence exists for the bootstrap stages.
 - `k8s-smoke-route-v3.sh` passes and validates complete Publisher/NewCreator/ExitBridge DHT evidence, local-DHT `SendDummy`, Publisher decrypt/hash validation, ciphertext-only bridge forwarding, receiver persistence, ChainID logs across creator/Publisher/selected bridge, and forced failover.
 - `k8s-smoke-upload-v3.sh` passes and validates complete Publisher/NewCreator/ExitBridge DHT evidence, upload session build, sanitization, per-chunk encryption, 10/10 ExitBridge normal fanout, receiver reconstruction, ChainID logs across creator/Publisher/every lane-carrying bridge, failover, and creator PVC persistence.
-- A detailed report is saved for each smoke run. Smoke 2 is currently saved at [`target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md`](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md); Smoke 1, Smoke 3, and Smoke 4 reports are placeholders until rerun.
+- A detailed report is saved for each smoke run. Smoke 2 is currently saved at [GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md); Smoke 1, Smoke 3, and Smoke 4 reports are placeholders until rerun.
 
 AWS smoke sign-off:
 

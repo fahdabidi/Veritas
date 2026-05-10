@@ -113,6 +113,29 @@ smoke_artifact_dir() {
   echo "$ARTIFACT_DIR"
 }
 
+smoke_archive_report() {
+  local report_prefix="$1" source_path="${2:-$ARTIFACT_DIR/report.md}"
+  [[ -f "$source_path" ]] || {
+    smoke_log "Report archive skipped; source report missing: $source_path"
+    return 0
+  }
+
+  local repo_root report_root run_id dest_path
+  if [[ -n "${VERITAS_REPO_ROOT:-}" ]]; then
+    repo_root="$VERITAS_REPO_ROOT"
+  elif [[ -n "${ROOT_DIR:-}" ]]; then
+    repo_root="$(cd "$ROOT_DIR/../.." && pwd)"
+  else
+    repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  fi
+  report_root="${VERITAS_K8S_SMOKE_REPORT_ROOT:-$repo_root/docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports}"
+  run_id="$(basename "$ARTIFACT_DIR")"
+  dest_path="$report_root/${report_prefix}-${run_id}.md"
+  mkdir -p "$report_root"
+  cp "$source_path" "$dest_path"
+  smoke_log "Tracked evidence report: $dest_path"
+}
+
 smoke_shell_quote() {
   local value="$1"
   printf "'%s'" "$(printf '%s' "$value" | sed "s/'/'\\\\''/g")"

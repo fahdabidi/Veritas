@@ -922,5 +922,7 @@ report = [
 (root / "report.md").write_text("\n".join(report), encoding="utf-8")
 PY
 
+smoke_archive_report "GBN-PROTO-012-Smoke-4-Upload" "$ARTIFACT_DIR/report.md"
+
 echo "Smoke 4 upload validation passed. Artifacts: $ARTIFACT_DIR"
 echo "Detailed evidence report: $ARTIFACT_DIR/report.md"

@@ -17,9 +17,13 @@ Conduit references:
 
 - System architecture: [GBN-ARCH-000-System-Architecture-V2.md](../../../docs/architecture/GBN-ARCH-000-System-Architecture-V2.md)
 - MCN architecture: [GBN-ARCH-001-Media-Creation-Network-V2.md](../../../docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md)
-- Full implementation plan: [GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)
-- Phase 10 validation plan: [GBN-PROTO-006-Execution-Phase10-Live-AWS-And-Mobile-Validation.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Execution-Phase10-Live-AWS-And-Mobile-Validation.md)
-- Test report: [GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md)
+- Pass 1 full implementation plan: [GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)
+- Pass 2 V2-to-V1 parity plan: [GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md)
+- Pass 2 local Kubernetes plan: [GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md)
+- Pass 3 architecture-correct bootstrap plan: [GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md)
+- Smoke 2 discovery report: [report.md](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md)
+- AWS Phase 10 validation plan: [GBN-PROTO-006-Execution-Phase10-Live-AWS-And-Mobile-Validation.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Execution-Phase10-Live-AWS-And-Mobile-Validation.md)
+- AWS test report: [GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md)
 
 > "Truth needs infrastructure" becomes operational here: real service boundaries, durable authority state, deployment images, AWS smoke validation, and end-to-end `chain_id` evidence.
 
@@ -31,31 +35,34 @@ This directory contains the V2-only deployment assets for the Conduit track. The
 
 Current state:
 
-- Conduit full implementation has real deployment images for `publisher-authority`, `publisher-receiver`, and `exit-bridge`.
-- The AWS full stack uses ECS/Fargate, Cloud Map service discovery, RDS Postgres, Secrets Manager, and CloudWatch Logs.
-- Phase 10 minimal AWS smoke validation has passed against `gbn-conduit-full-dev` in `us-east-1`.
-- The minimal smoke stack used one authority, one receiver, and one bridge with `DesiredBridgeCount=1`.
-- Full mobile-carrier validation is still pending and must be captured before a final production-readiness decision.
+- Pass 2 is complete locally: admin HTTP endpoints, admin command injection, metrics surfaces, the creator capability library, and interactive operator parity are implemented.
+- Pass 2 local Kubernetes is complete: k3d bring-up, Postgres, Conduit manifests, Prometheus/Grafana/Loki/Tempo, Prometheus metrics, and a kubectl-based operator script are implemented.
+- Pass 3 is complete locally: the architecture-correct first-time creator bootup path, Publisher-seeded bridge DHT, HostCreator/NewCreator seed commands, local creator DHT, local-DHT `SendDummy`, upload session build, per-chunk encryption, multi-lane progressive fanout, and Smoke 1 through Smoke 4 scripts are implemented.
+- The local k3d topology now has 14 Conduit actor pods: `publisher-authority`, `publisher-receiver`, ten `exit-bridge-*` pods, `creator-host`, and `creator-new`, plus Postgres and optional observability pods.
+- `k8s-up.sh` builds versioned local image tags, imports them into k3d, patches deployments to the exact run tag, restarts workloads, and waits for validated readiness so repeated smoke runs do not accidentally use stale images.
+- Smoke 2 has a saved detailed run report with real Publisher DHT entries, NewCreator local DHT state, API gate results, bootstrap session state, and ChainID pod-log evidence.
+- AWS ECS/Fargate remains the production-shaped deployment surface, using Cloud Map service discovery, RDS Postgres, Secrets Manager, and CloudWatch Logs.
+- Phase 10 minimal AWS smoke validation previously passed against `gbn-conduit-full-dev` in `us-east-1`; full mobile-carrier validation is still pending before production readiness.
 - Root `README.md` remains release-facing and should not be edited for Conduit implementation work until the V2 release is ready.
 
-Current minimal AWS smoke evidence:
+Current saved evidence:
 
 | Evidence | Value |
 |---|---|
-| Stack | `gbn-conduit-full-dev` |
-| Region | `us-east-1` |
-| Scope | one authority, one receiver, one bridge |
-| Bridge count | `DesiredBridgeCount=1` |
-| Image tag | `proto006-phase10-fix2` |
-| Stack status | `UPDATE_COMPLETE` |
-| ECS steady state | authority `1/1`, receiver `1/1`, bridge `1/1` |
-| Artifact directory | `/tmp/veritas-proto006-phase10-aws-artifacts-fix2` |
+| Pass 3 Smoke 2 report | [`target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md`](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md) |
+| Smoke 2 ChainID | `smoke-2-b927fae092c0455d980beb21fc8e158e` |
+| Smoke 2 bootstrap session | `bootstrap-000010` |
+| Smoke 2 result | Publisher DHT `10/10`, NewCreator local DHT `10/10 active`, bootstrap session `completed`, ChainID pod-log evidence present |
+| Prior AWS stack | `gbn-conduit-full-dev` |
+| Prior AWS region | `us-east-1` |
+| Prior AWS image tag | `proto006-phase10-fix2` |
 
 Remaining validation gap:
 
+- Run and archive detailed reports for Smoke 1, Smoke 3, and Smoke 4 using the same evidence standard as Smoke 2.
 - Run a real mobile-network path against a deployed `gbn-conduit-full-*` stack.
-- Capture explicit `chain_id` evidence with `collect-conduit-traces.sh --chain-id <id> --require-chain-id`.
-- Record bootstrap, upload/ACK, failover/churn, and batch-window observations in the Phase 10 test report.
+- Capture explicit AWS `chain_id` evidence with `collect-conduit-traces.sh --chain-id <id> --require-chain-id`.
+- Record AWS/mobile bootstrap, upload/ACK, failover/churn, and batch-window observations in the Phase 10 test report.
 
 ---
 
@@ -63,26 +70,35 @@ Remaining validation gap:
 
 ### Prerequisites
 
-Run these commands from WSL on this host. The project tooling, Docker, and valid AWS credentials are expected there.
+Run local Kubernetes and smoke commands from WSL2 Ubuntu on this host. AWS credentials are only required for the ECS/Fargate deployment path.
 
 - Rust toolchain
 - Docker with BuildKit support
-- AWS CLI v2 authenticated to the target account
 - `python3`
-- Existing VPC and at least two service subnets
-- Existing database subnets for RDS
-- Secrets Manager values for publisher and bridge signing material
+- `bash`
+- `kubectl`, `k3d`, and `helm` for the local Kubernetes path
+- AWS CLI v2 authenticated to the target account for the AWS path
+- AWS-only: existing VPC and at least two service subnets
+- AWS-only: existing database subnets for RDS
+- AWS-only: Secrets Manager values for publisher and bridge signing material
 
-Confirm the active AWS identity:
+Bootstrap missing local Kubernetes tooling from WSL:
 
 ```bash
-aws sts get-caller-identity
+cd prototype/gbn-bridge-proto
+infra/scripts/bootstrap-k8s.sh
 ```
 
 Confirm Docker is responsive:
 
 ```bash
 docker ps
+```
+
+Confirm the active AWS identity only when using the AWS path:
+
+```bash
+aws sts get-caller-identity
 ```
 
 ### 1) Validate the Conduit workspace locally
@@ -112,7 +128,49 @@ VERITAS_CONDUIT_E2E_ARTIFACT_DIR=/tmp/veritas-proto006-e2e-artifacts \
 
 This validates the local distributed control/data-path harness before spending time or money on AWS.
 
-### 3) Build and push Conduit images
+### 3) Bring up the current local Kubernetes topology
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-up.sh
+```
+
+This creates the k3d cluster, builds versioned local images, imports the exact run tag,
+applies the Conduit manifests, restarts all deployments, waits for stable workloads,
+and runs the default local smoke checks.
+
+### 4) Install local observability
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-observability-up.sh
+```
+
+Grafana is exposed at `http://localhost:30030` with local-only credentials
+`admin/admin`.
+
+### 5) Run the Pass 3 local acceptance suite
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-pass3-acceptance.sh --require-observability
+```
+
+For functional-only runs when the observability namespace is intentionally absent:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-pass3-acceptance.sh --no-require-observability
+```
+
+The acceptance runner executes, in order:
+
+1. `k8s-smoke-tracing-v3.sh`
+2. `k8s-smoke-discovery-v3.sh`
+3. `k8s-smoke-route-v3.sh`
+4. `k8s-smoke-upload-v3.sh`
+
+### 6) Build and push Conduit images for AWS
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -126,10 +184,13 @@ The script creates missing ECR repositories and pushes:
 - `gbn-conduit-full-authority`
 - `gbn-conduit-full-receiver`
 - `gbn-conduit-full-bridge`
+- `gbn-conduit-full-creator`
 
-### 4) Deploy a minimal AWS smoke stack
+### 7) Deploy an AWS smoke stack
 
-Use `DesiredBridgeCount=1` for smoke validation. Do not scale up until the one-bridge topology is steady.
+Use `DesiredBridgeCount=10` for Pass 3 architecture-correct validation so the Publisher
+can seed the full 10-entry ExitBridge DHT set. Use `DesiredBridgeCount=1` only for
+legacy minimal ECS smoke checks that do not exercise Pass 3 bootstrapping.
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -137,13 +198,14 @@ infra/scripts/deploy-conduit-full.sh \
   --region us-east-1 \
   --stack-name gbn-conduit-full-dev \
   --environment dev \
-  --desired-bridge-count 1 \
+  --desired-bridge-count 10 \
   --vpc-id vpc-REPLACE_ME \
   --service-subnet-ids subnet-REPLACE_ME_A,subnet-REPLACE_ME_B \
   --database-subnet-ids subnet-REPLACE_ME_C,subnet-REPLACE_ME_D \
   --authority-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-conduit-full-authority:proto006-phase10-fix2 \
   --receiver-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-conduit-full-receiver:proto006-phase10-fix2 \
   --bridge-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-conduit-full-bridge:proto006-phase10-fix2 \
+  --creator-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-conduit-full-creator:proto006-phase10-fix2 \
   --publisher-signing-key-secret-arn arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:publisher-signing \
   --bridge-signing-seed-secret-arn arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:bridge-signing-seed \
   --publisher-public-key-hex REPLACE_ME
@@ -157,7 +219,7 @@ Smoke-only TLS escape hatch:
 
 Use that flag only for development smoke stacks when the container image cannot validate the RDS CA chain. Production validation should provide the RDS CA bundle through `GBN_BRIDGE_POSTGRES_TLS_CA_PEM` or `GBN_BRIDGE_POSTGRES_TLS_CA_FILE` and keep invalid certificate acceptance disabled.
 
-### 5) Run AWS smoke validation
+### 8) Run AWS smoke validation
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -171,10 +233,12 @@ Expected result:
 - stack outputs print successfully
 - authority service `desired=1`, `running=1`
 - receiver service `desired=1`, `running=1`
-- bridge service `desired=1`, `running=1`
+- bridge service reaches configured desired count
+- `creator-host` service `desired=1`, `running=1`
+- `creator-new` service `desired=1`, `running=1`
 - command exits non-zero if any service is below desired running count
 
-### 6) Collect Phase 10 AWS evidence
+### 9) Collect Phase 10 AWS evidence
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -202,7 +266,7 @@ infra/scripts/mobile-validation-full.sh \
   --require-chain-id
 ```
 
-### 7) Tear down when finished
+### 10) Tear down when finished
 
 Only delete Conduit full-implementation stacks with this script:
 
@@ -236,7 +300,7 @@ The infrastructure is not just deployment plumbing. It is how Conduit proves tha
 |---|---|
 | V1 preservation | No Conduit infra task should edit or depend on `prototype/gbn-proto/**` |
 | Service boundaries first | Authority, receiver, and bridge run as separate deployed services |
-| Minimal before scaled | Validate one authority, one receiver, and one bridge before increasing bridge count |
+| Minimal before scaled | Legacy AWS smoke can still use one bridge, but Pass 3 bootstrap/upload validation requires ten bridges |
 | Evidence over assumptions | Every validation run should produce artifacts, logs, stack identity, and trace records |
 | `chain_id` continuity | Every correlated bootstrap, upload, ACK, and progress path must preserve `chain_id` |
 | Safe teardown | Conduit teardown scripts only delete `gbn-conduit-full-*` stacks |
@@ -359,6 +423,8 @@ Current AWS service discovery:
 |---|---|
 | Publisher Authority | `publisher-authority.conduit-<env>.internal:<authority-port>` |
 | Publisher Receiver | `publisher-receiver.conduit-<env>.internal:<receiver-port>` |
+| HostCreator | `creator-host.conduit-<env>.internal:9090` |
+| NewCreator | `creator-new.conduit-<env>.internal:9090` |
 | Bridge control URL | `ws://publisher-authority.conduit-<env>.internal:<authority-port>/v1/bridge/control` |
 
 Current ports:
@@ -367,6 +433,8 @@ Current ports:
 |---|---:|---|
 | Authority HTTP | `8080` | authority API and bridge control |
 | Receiver HTTP | `8081` | receiver-facing service |
+| Admin HTTP | `9090` | localhost-only admin/operator surface |
+| Metrics HTTP | `9100` | local Prometheus scrape surface for bridge and creator pods |
 | UDP punch | `443` | signed bridge punch/tunnel port |
 
 ---
@@ -378,6 +446,7 @@ Current ports:
 Validation expectations:
 
 - Creator-originated bootstrap or upload flow originates or carries one root `chain_id`.
+- Creator logs include the `chain_id` for seed, local DHT, route, encryption, and upload events.
 - Authority logs include the `chain_id` for correlated bootstrap, catalog, progress, receiver, and ACK events.
 - Bridge logs include the `chain_id` for applied commands and reported progress.
 - Receiver logs include the `chain_id` when proxying or acknowledging receiver-path traffic.
@@ -398,6 +467,10 @@ infra/scripts/collect-conduit-traces.sh \
 
 The `--require-chain-id` flag should be used for final evidence. It fails if any required service has no matching events.
 
+For local Kubernetes, use `CollectTraces` from `k8s-control-interactive.sh` or rely on
+the smoke scripts' artifact directories. Pass 3 smoke reports should preserve pod-log
+ChainID evidence even when the optional observability backend is not installed.
+
 ---
 
 ## Repository Layout
@@ -409,13 +482,16 @@ The `--require-chain-id` flag should be used for final evidence. It fails if any
 | `../Dockerfile.bridge-publisher` | legacy prototype publisher image from the earlier simulation track |
 | `../Dockerfile.publisher-authority` | builds the real Conduit publisher-authority service image |
 | `../Dockerfile.publisher-receiver` | builds the real Conduit publisher-receiver service image |
+| `../Dockerfile.creator-runner` | builds the Pass 3 creator-runner image used by `creator-host` and `creator-new` |
 | `../docker-compose.bridge-smoke.yml` | earlier BusyBox smoke-only placeholder topology |
 | `../docker-compose.conduit-e2e.yml` | local authority / receiver / bridge / Postgres topology |
 | `../docs/mobile-test-matrix.md` | Conduit mobile and AWS validation matrix |
 | `cloudformation/phase2-bridge-stack.yaml` | earlier isolated V2 bridge prototype stack |
 | `cloudformation/conduit-full-stack.yaml` | full Conduit authority / receiver / bridge / Postgres stack |
 | `cloudformation/parameters.json` | example parameter file with placeholders |
-| `scripts/` | build, deploy, smoke, validation, trace, and teardown scripts |
+| `k8s/conduit/` | local Kubernetes Conduit manifests for Publisher, ten bridges, two creators, and Postgres |
+| `k8s/observability/` | local Prometheus, Grafana, Loki, Promtail, and Tempo values/dashboards |
+| `scripts/` | build, deploy, smoke, validation, trace, operator, and teardown scripts |
 
 ---
 
@@ -425,38 +501,49 @@ The `--require-chain-id` flag should be used for final evidence. It fails if any
 |---|---|
 | Language | Rust |
 | Containers | Docker |
-| Local topology | Docker Compose and Rust e2e harness |
-| Compute | AWS ECS/Fargate |
-| Service discovery | AWS Cloud Map private DNS |
-| Database | AWS RDS Postgres |
-| Secrets | AWS Secrets Manager |
-| Logs | AWS CloudWatch Logs |
-| Image registry | AWS ECR |
-| Deployment | AWS CloudFormation |
-| Validation scripts | Bash, AWS CLI, Python helper snippets |
+| Local topology | k3d, Kubernetes manifests, Docker Compose, and Rust e2e harness |
+| Local observability | Prometheus, Grafana, Loki, Promtail, Tempo |
+| AWS compute | AWS ECS/Fargate |
+| AWS service discovery | AWS Cloud Map private DNS |
+| Database | local Kubernetes Postgres or AWS RDS Postgres |
+| Secrets | Kubernetes Secrets locally, AWS Secrets Manager in AWS |
+| Logs | pod logs and Loki locally, CloudWatch Logs in AWS |
+| Image registry | local k3d image import locally, AWS ECR in AWS |
+| Deployment | Kustomize/kubectl locally, AWS CloudFormation in AWS |
+| Validation scripts | Bash, kubectl, AWS CLI, Python helper snippets |
 
 ---
 
-## Full-Implementation Phases
+## Implementation Tracks
 
-The current infrastructure is part of GBN-PROTO-006.
+Conduit infrastructure has three implementation passes in this repository.
 
-| Phase | Status | Infra Relevance |
+| Track | Status | Infra Relevance |
 |---|---|---|
-| Phase 0 | complete | simulation baseline and gap inventory |
-| Phase 1 | complete | real publisher authority API |
-| Phase 2 | complete | durable Postgres-backed storage |
-| Phase 3 | complete | bridge control sessions |
-| Phase 4 | complete | network clients replacing in-process clients |
-| Phase 5 | complete | bootstrap distribution and fanout |
-| Phase 6 | complete | receiver and ACK path |
-| Phase 7 | complete | distributed `chain_id` propagation |
-| Phase 8 | complete | real deployment images and AWS control plane |
-| Phase 9 | complete | distributed e2e harness and fault injection |
-| Phase 10 | in validation | live AWS/mobile validation |
-| Phase 11 | pending | decision gate |
+| GBN-PROTO-006 Pass 1 | implemented; AWS/mobile acceptance still pending | real Publisher authority, receiver, bridge control, durable Postgres, AWS images/control plane, distributed e2e harness |
+| GBN-PROTO-007 Pass 2 | complete locally | V1 operator parity for V2: read-only admin endpoints, command injection, metrics, creator library, `relay-control-interactive-v2.sh` |
+| GBN-PROTO-008 Pass 2 local k8s | complete locally | k3d cluster, Kubernetes manifests, local Postgres, Prometheus/Grafana/Loki/Tempo, kubectl operator panel |
+| GBN-PROTO-012 Pass 3 | complete locally | architecture-correct HostCreator/NewCreator bootup, Publisher-seeded 10-bridge DHT, local creator DHT, local-DHT routing, upload session build, per-chunk encryption, multi-lane progressive fanout, Smoke 1-4 scripts |
 
-Phase 10 is the current infra focus. It is not enough to say the stack deployed; the stack must produce evidence.
+Pass 3 phases:
+
+| Phase | Title | Status |
+|---|---|---|
+| 0 | Creator Pod Deployment And Cluster Topology | complete |
+| 1 | Creator Local State And DHT Metadata Model | complete |
+| 2 | SeedHostCreator Admin API And Operator Command | complete |
+| 3 | SeedNewCreator API And First-Contact Join Path | complete |
+| 4 | Bootstrap Payload Delivery, Local DHT Population, And Punch Fanout | complete |
+| 5 | Onboarded-Creator SendDummy And Local-DHT Single-Lane Envelope Demo | complete |
+| 6 | Operator Scripts And Acceptance Gate | complete |
+| 7 | Smoke 1 - Tracing Suite Implementation | complete |
+| 8 | Smoke 2 - Discovery / Bootup Suite Implementation | complete |
+| 9 | Smoke 3 - Route And Encryption Boundary Suite Implementation | complete |
+| 10 | Upload Session Build And Per-Chunk Encryption Pipeline | complete |
+| 11 | Multi-Lane Progressive Fanout | complete |
+| 12 | Smoke 4 - Full Upload Pipeline Suite Implementation | complete |
+
+The active evidence gap is no longer "does the local topology exist"; it is archiving repeatable reports for every smoke gate and then repeating the same traceability standard against AWS/mobile.
 
 ---
 
@@ -475,7 +562,7 @@ Conduit validation should preserve these boundaries:
 Important limitations:
 
 - Minimal AWS smoke is not a substitute for real mobile-carrier validation.
-- One-bridge smoke does not prove multi-bridge fanout or churn behavior.
+- Legacy one-bridge AWS smoke does not prove multi-bridge fanout or churn behavior; use the Pass 3 10-bridge topology for that.
 - `--postgres-tls-accept-invalid-certs true` is not production-safe.
 - CloudWatch `chain_id` evidence proves observability, not cryptographic correctness by itself.
 
@@ -495,6 +582,14 @@ python ../../../tools/scan_secrets.py ../../../ --fail-on-findings
 | [GBN-ARCH-000 V2](../../../docs/architecture/GBN-ARCH-000-System-Architecture-V2.md) | Conduit system architecture |
 | [GBN-ARCH-001 V2](../../../docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md) | V2 MCN flow and publisher responsibilities |
 | [GBN-PROTO-006 Execution Plan](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md) | full implementation phase plan |
+| [GBN-PROTO-007 Pass 2 Plan](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/GBN-PROTO-007-Conduit-V2-V1-Parity-Execution-Plan.md) | V2-to-V1 operator parity execution plan |
+| [GBN-PROTO-008 Local k8s Plan](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/GBN-PROTO-008-Local-Kubernetes-Test-Infrastructure-Execution-Plan.md) | local Kubernetes infrastructure and observability plan |
+| [GBN-PROTO-012 Pass 3 Plan](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md) | architecture-correct creator bootup and upload pipeline plan |
+| [GBN-PROTO-012 Smoke 1](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Smoke-1-Tracing.md) | distributed tracing/logging smoke plan |
+| [GBN-PROTO-012 Smoke 2](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Smoke-2-Discovery.md) | discovery and first-time bootup smoke plan |
+| [GBN-PROTO-012 Smoke 3](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Smoke-3-Route.md) | local-DHT route and encryption boundary smoke plan |
+| [GBN-PROTO-012 Smoke 4](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/GBN-PROTO-012-Smoke-4-Full-Upload.md) | full upload pipeline smoke plan |
+| [Smoke 2 Report](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md) | saved local-k8s discovery run with DHT, API, bootstrap, and ChainID evidence |
 | [Phase 10 Plan](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Execution-Phase10-Live-AWS-And-Mobile-Validation.md) | live AWS/mobile validation plan |
 | [Full Implementation Test Report](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md) | canonical validation evidence report |
 | [Mobile Test Matrix](../docs/mobile-test-matrix.md) | validation scenarios and thresholds |
@@ -504,16 +599,28 @@ python ../../../tools/scan_secrets.py ../../../ --fail-on-findings
 ## Local Kubernetes Test Environment
 
 The local Kubernetes track mirrors the AWS full stack without creating any AWS resources.
-It runs in k3d with five Conduit pods in the `veritas` namespace:
+It runs in k3d with the Pass 3 architecture-correct topology in the `veritas` namespace:
 
 - `postgres` StatefulSet with a 1 Gi `local-path` PVC
 - `publisher-authority` Deployment
 - `publisher-receiver` Deployment
-- `exit-bridge` Deployment with three replicas
+- `exit-bridge` Deployment with ten replicas (`exit-bridge-0` through `exit-bridge-9`)
+- `creator-host` Deployment
+- `creator-new` Deployment
 
 The local manifests live under [`infra/k8s/conduit`](k8s/conduit). They keep the admin
 listener bound to `127.0.0.1:9090` inside each pod, matching the AWS isolation rule.
 Validation and operator tools reach admin routes with `kubectl exec`.
+
+The deployment validates the V2 architecture model from `GBN-ARCH-001-V2` section 3.3:
+
+1. `creator-host` is seeded with Publisher metadata and one ExitBridgeA entry.
+2. The Publisher initializes and owns a signed 10-entry ExitBridge DHT view.
+3. `creator-new` is seeded with HostCreator metadata.
+4. `creator-new` starts first-contact bootup through HostCreator and ExitBridgeA.
+5. The Publisher selects a distinct seed bridge, returns signed bootstrap entries, and records bootstrap progress.
+6. `creator-new` stores the returned bridge entries in its own local DHT and marks active tunnels.
+7. `SendDummy` and `SendUpload` route from `creator-new` local DHT state rather than from a direct Publisher catalog shortcut.
 
 ### Local Prerequisites
 
@@ -534,9 +641,11 @@ cd prototype/gbn-bridge-proto
 infra/scripts/k8s-up.sh
 ```
 
-The script creates or reuses the `veritas` k3d cluster, builds the three local images,
-imports them into k3d, applies the dev Kustomize overlay, waits for all workloads, and
-runs `k8s-smoke.sh --send-dummy` plus the Postgres-backed publisher persistence test.
+The script creates or reuses the `veritas` k3d cluster, builds local images, gives each
+build a unique run tag, imports that exact tag into k3d, patches deployments to the same
+tag, restarts workloads, waits for all workloads, and runs default local smoke validation.
+This avoids the old stale `:dev` image failure mode where k3d/containerd could keep an
+older image after a rebuild.
 
 Useful overrides:
 
@@ -552,9 +661,40 @@ Useful overrides:
 The dev overlay generates a local-only Postgres password at
 `infra/k8s/conduit/overlays/dev/password.txt`; the file is gitignored.
 
+### Pass 3 Smoke Tests
+
+The current local test suite is implemented as four explicit smoke gates:
+
+| Smoke | Script | What it validates | Report status |
+|---|---|---|---|
+| Smoke 1 - Tracing | `infra/scripts/k8s-smoke-tracing-v3.sh` | Every actor pod emits ChainID logs/spans and Prometheus samples. | Placeholder: save latest detailed report after next run. |
+| Smoke 2 - Discovery / Bootup | `infra/scripts/k8s-smoke-discovery-v3.sh` | Publisher DHT seed, HostCreator/NewCreator bootup, NewCreator local DHT population, bootstrap session state, ChainID evidence. | Saved: [`target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md`](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md) |
+| Smoke 3 - Route / Encryption Boundary | `infra/scripts/k8s-smoke-route-v3.sh` | Complete NewCreator local-DHT preflight, Publisher/creator/ExitBridge DHT evidence, `SendDummy` route source `local_dht`, Publisher decrypt/hash validation, bridge ciphertext-only boundary, ChainID evidence, failover. | Placeholder: next run writes `target/k8s-smoke-artifacts/smoke-3-route/<run-id>/report.md`. |
+| Smoke 4 - Full Upload | `infra/scripts/k8s-smoke-upload-v3.sh` | Build upload session, Publisher/creator/ExitBridge DHT evidence, sanitize/chunk/encrypt, 10/10 ExitBridge normal fanout, receiver reconstruction, ChainID evidence across every lane, failover, persistence. | Placeholder: next run writes `target/k8s-smoke-artifacts/smoke-4-upload/<run-id>/report.md`. |
+
+Run all four gates in dependency order:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-pass3-acceptance.sh --require-observability
+```
+
+If the observability namespace is intentionally absent, use:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-pass3-acceptance.sh --no-require-observability
+```
+
+Functional smoke reports should include three evidence classes:
+
+- DHT dumps from the relevant node admin API (`DumpPublisherDht`, `DumpNodeDht`, or `DumpLocalDht`). Smoke 3 and Smoke 4 require Publisher DHT, NewCreator local DHT, Publisher per-bridge DHT entries, and ExitBridge metadata/local-DHT admin responses to agree on the same expected bridge set before packet transfer begins.
+- ChainID evidence from pod logs and, when observability is required, Tempo/Loki. Smoke 3 requires creator, Publisher, and the selected ExitBridge; Smoke 4 requires creator, Publisher, and every ExitBridge lane that carried a chunk.
+- API completion entries proving each stage reached its expected terminal state, including Publisher decrypt/hash validation for Smoke 3 and Publisher receiver reconstruction/content-hash validation for Smoke 4.
+
 ### Validate Local Conduit
 
-To rerun the GBN-PROTO-007 parity smoke checks against the local topology:
+To rerun the older GBN-PROTO-007 parity smoke checks against the local topology:
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -562,9 +702,10 @@ infra/scripts/k8s-smoke.sh --send-dummy
 ```
 
 This checks namespace and rollout status, Postgres readiness, public health endpoints,
-localhost admin metrics on every Conduit pod, bridge registration, `SendDummy` from the
-authority, receiver, and all bridge pods, frame persistence by `chain_id`, and recent pod
-logs containing each generated `chain_id`.
+localhost admin metrics on Conduit pods, bridge registration, frame persistence by
+`chain_id`, and recent pod logs containing each generated `chain_id`. Treat the Pass 3
+smoke scripts as the authoritative tests for creator onboarding, local-DHT routing,
+encryption boundaries, and upload behavior.
 
 To run the host-side publisher persistence test that previously failed with local
 Postgres `ConnectionRefused`, use the Kubernetes Postgres port-forward runner:
@@ -634,16 +775,25 @@ bash prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh
 Override defaults with `VERITAS_K8S_NAMESPACE`, `VERITAS_OBS_NAMESPACE`,
 `VERITAS_GRAFANA_URL`, and `VERITAS_K8S_ADMIN_PORT`. The script discovers all running
 Conduit pods with a `veritas-role` label and presents Authority, Receiver, and Bridge
-pods in one numbered list. Every admin call goes through `kubectl exec -- curl
+pods, plus the creator pods, in one numbered list. Every admin call goes through `kubectl exec -- curl
 http://127.0.0.1:9090/...`; no public admin ingress is required.
 
 Menu items:
 
 - `Status`, `DescribePod`, `TailLogs`, `ExecShell`, and `ShowCatalog` are diagnostics.
 - `DumpBridges`, `DumpFrames`, and `AdminMetrics` call the Phase 1 admin endpoints.
+- `InitializePublisherDht` seeds/rebuilds the Publisher-owned 10-bridge DHT from active ExitBridge registrations.
+- `DumpPublisherDht` dumps the Publisher DHT table.
+- `DumpNodeDht` dumps DHT/discovery state for a selected node, including ExitBridge and Creator nodes.
+- `DumpLocalDht` dumps the selected creator's local discovery table.
+- `SeedHostCreator` prepares `creator-host` with Publisher and ExitBridgeA metadata.
+- `SeedNewCreator` starts first-contact bootup on `creator-new` through HostCreator.
+- `ResetCreatorState` clears creator-local state for repeatable bootstrap tests.
 - `LiveMetrics` prints Grafana and Prometheus access URLs for the Phase 2 stack.
-- `SendDummy` calls the Phase 4 creator endpoint, prints the returned `chain_id`, and
-  builds Grafana Tempo and Loki deep links for trace inspection.
+- `SendDummy` requires an onboarded NewCreator with Publisher encryption metadata in local DHT and sends a Publisher-encrypted dummy frame through a local-DHT-selected bridge.
+- `BuildUploadSession` builds sanitized, chunked, Publisher-encrypted upload session state.
+- `SendUpload` dispatches a built upload session through multi-lane progressive fanout; Smoke 4 requires the normal run to use all 10 local ExitBridges.
+- `CollectTraces` collects ChainID-scoped pod-log and observability evidence.
 - `TriggerCommand` queues a bridge control command through the authority admin API.
 - `CheckImages`, `SmokeValidation`, `Refresh`, and `Teardown` support local iteration.
 
@@ -680,9 +830,15 @@ Set `VERITAS_K8S_ASSUME_YES=1` for non-interactive cleanup.
 | `scripts/mobile-validation-full.sh` | runs local or AWS Phase 10 validation workflow |
 | `scripts/collect-conduit-traces.sh` | collects CloudFormation, ECS, and CloudWatch `chain_id` evidence |
 | `scripts/relay-control-interactive-v2.sh` | interactive ECS-only operator control panel |
+| `scripts/_seed_actions.sh` | shared Pass 3 operator action library used by AWS and local control scripts |
 | `scripts/bootstrap-k8s.sh` | installs local k3d, kubectl, and helm tooling |
-| `scripts/k8s-up.sh` | creates local k3d Conduit topology and runs local smoke validation |
-| `scripts/k8s-smoke.sh` | validates local Postgres, admin endpoints, bridge registration, and SendDummy |
+| `scripts/k8s-up.sh` | creates local k3d Conduit topology, builds/imports exact versioned images, restarts workloads, and runs local smoke validation |
+| `scripts/k8s-smoke.sh` | validates local Postgres, health/admin endpoints, bridge registration, and baseline parity checks |
+| `scripts/k8s-pass3-acceptance.sh` | runs Smoke 1 through Smoke 4 in dependency order |
+| `scripts/k8s-smoke-tracing-v3.sh` | Smoke 1: validates ChainID logging/tracing/metrics for every actor pod |
+| `scripts/k8s-smoke-discovery-v3.sh` | Smoke 2: validates Publisher DHT seeding and HostCreator/NewCreator bootup |
+| `scripts/k8s-smoke-route-v3.sh` | Smoke 3: validates local-DHT SendDummy, encryption boundary, and failover |
+| `scripts/k8s-smoke-upload-v3.sh` | Smoke 4: validates upload session build, per-chunk encryption, 10/10 ExitBridge normal fanout, reconstruction, failover, and persistence |
 | `scripts/k8s-test-publisher-postgres.sh` | port-forwards local k8s Postgres and runs publisher persistence tests |
 | `scripts/k8s-observability-up.sh` | installs Prometheus, Grafana, Loki, Promtail, and Tempo locally |
 | `scripts/k8s-observability-down.sh` | removes the local observability namespace and Helm releases |
@@ -719,7 +875,10 @@ Menu items:
 - `Status`, `StackOutputs`, `TailLogs`, `ExecShell`, `ShowCatalog`: diagnostics.
 - `DumpBridges`, `DumpFrames`, `AdminMetrics`: localhost admin endpoints.
 - `LiveMetrics`: CloudWatch dashboard for namespace `Veritas/Conduit`.
-- `SendDummy`: pick any node to act as creator and trace the returned `chain_id`.
+- `InitializePublisherDht`, `DumpPublisherDht`, `DumpNodeDht`, `SeedHostCreator`, `SeedNewCreator`, `DumpLocalDht`, and `ResetCreatorState`: Pass 3 bootstrap and DHT workflows.
+- `SendDummy`: run from an onboarded NewCreator and trace the returned `chain_id`.
+- `BuildUploadSession` and `SendUpload`: build and send the full Pass 3 upload pipeline.
+- `CollectTraces`: collect ChainID-scoped CloudWatch evidence.
 - `TriggerCommand`: push a bridge control payload through the authority admin endpoint.
 - `CheckImages`: compare each task's running image digest with ECR `latest`.
 - `BootstrapSmoke`, `Refresh`, `Teardown`, `Exit`: operational workflows.
@@ -732,8 +891,11 @@ Menu items:
 - Fargate service for `publisher-authority`
 - Fargate service for `publisher-receiver`
 - Fargate service for `exit-bridge`
+- Fargate service for `creator-host`
+- Fargate service for `creator-new`
 - Cloud Map private DNS namespace
 - RDS Postgres instance
+- EFS file system and access points for creator-local state
 - generated database credentials secret
 - task execution role
 - service task role
@@ -751,6 +913,7 @@ Menu items:
 | authority image URI | deployed publisher authority binary |
 | receiver image URI | deployed receiver binary |
 | bridge image URI | deployed exit bridge binary |
+| creator image URI | deployed creator-runner binary |
 | publisher signing key secret ARN | signs authority-owned catalogs and responses |
 | bridge signing seed secret ARN | signs or derives bridge identity material |
 | publisher public key hex | lets bridges and creators verify authority material |
@@ -790,13 +953,49 @@ Exit bridge:
 - `GBN_BRIDGE_POLL_INTERVAL_MS`
 - `GBN_BRIDGE_BRIDGE_SIGNING_SEED_HEX`
 
+Creator:
+
+- `GBN_BRIDGE_NODE_ID`
+- `GBN_BRIDGE_ADMIN_BIND_ADDR`
+- `GBN_CONDUIT_ACTOR`
+- `GBN_BRIDGE_AUTHORITY_URL`
+- `GBN_BRIDGE_PUBLISHER_PUBLIC_KEY_HEX`
+- `GBN_BRIDGE_STATE_DIR`
+- `GBN_BRIDGE_STACK_ENV`
+
 ---
 
 ## Typical Validation Workflow
 
-Use this sequence for Phase 10 validation.
+Use the local Pass 3 sequence for active implementation validation. Use the AWS sequence
+when validating deployed infrastructure or mobile-carrier behavior.
 
-### 1) Confirm local and AWS preflight
+### Local Pass 3 sequence
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-up.sh
+infra/scripts/k8s-observability-up.sh
+infra/scripts/k8s-pass3-acceptance.sh --require-observability
+```
+
+After each smoke run, preserve the artifact directory printed by the script. The current
+saved detailed report is:
+
+- Smoke 2: [`target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md`](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md)
+
+Report placeholders to fill after the remaining runs:
+
+- Smoke 1: `target/k8s-smoke-artifacts/smoke-1-tracing/<run-id>/report.md`
+- Smoke 3: `target/k8s-smoke-artifacts/smoke-3-route/<run-id>/report.md`
+- Smoke 4: `target/k8s-smoke-artifacts/smoke-4-upload/<run-id>/report.md`
+
+Each report should include DHT state, API completion evidence, and ChainID log/span
+evidence for every stage it claims as complete.
+
+### AWS Phase 10 sequence
+
+#### 1) Confirm local and AWS preflight
 
 ```bash
 aws sts get-caller-identity
@@ -806,7 +1005,7 @@ cargo fmt --all --check
 cargo check --workspace
 ```
 
-### 2) Run local e2e
+#### 2) Run local e2e
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -816,7 +1015,7 @@ infra/scripts/mobile-validation-full.sh \
   --artifact-dir /tmp/veritas-proto006-phase10-local-artifacts
 ```
 
-### 3) Build images
+#### 3) Build images
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -825,7 +1024,7 @@ infra/scripts/build-and-push-conduit-full.sh \
   --tag proto006-phase10-validation
 ```
 
-### 4) Deploy minimal smoke topology
+#### 4) Deploy Pass 3 smoke topology
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -833,19 +1032,20 @@ infra/scripts/deploy-conduit-full.sh \
   --region us-east-1 \
   --stack-name gbn-conduit-full-dev \
   --environment dev \
-  --desired-bridge-count 1 \
+  --desired-bridge-count 10 \
   --vpc-id vpc-REPLACE_ME \
   --service-subnet-ids subnet-REPLACE_ME_A,subnet-REPLACE_ME_B \
   --database-subnet-ids subnet-REPLACE_ME_C,subnet-REPLACE_ME_D \
   --authority-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-conduit-full-authority:proto006-phase10-validation \
   --receiver-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-conduit-full-receiver:proto006-phase10-validation \
   --bridge-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-conduit-full-bridge:proto006-phase10-validation \
+  --creator-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-conduit-full-creator:proto006-phase10-validation \
   --publisher-signing-key-secret-arn arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:publisher-signing \
   --bridge-signing-seed-secret-arn arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:bridge-signing-seed \
   --publisher-public-key-hex REPLACE_ME
 ```
 
-### 5) Run smoke
+#### 5) Run smoke
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -854,7 +1054,7 @@ infra/scripts/smoke-conduit-full.sh \
   --stack-name gbn-conduit-full-dev
 ```
 
-### 6) Run AWS evidence collection
+#### 6) Run AWS evidence collection
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -867,7 +1067,7 @@ infra/scripts/mobile-validation-full.sh \
   --mobile-context "minimal-aws-smoke"
 ```
 
-### 7) Run final mobile-chain trace capture
+#### 7) Run final mobile-chain trace capture
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -880,7 +1080,7 @@ infra/scripts/collect-conduit-traces.sh \
   --require-chain-id
 ```
 
-### 8) Update the test report
+#### 8) Update the test report
 
 Record:
 
@@ -897,7 +1097,7 @@ Record:
 
 Use [GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md).
 
-### 9) Confirm V1 preservation
+#### 9) Confirm V1 preservation
 
 From the repo root:
 
@@ -911,7 +1111,7 @@ git diff --name-only -- \
 
 Expected result: no output.
 
-### 10) Tear down if the stack is no longer needed
+#### 10) Tear down if the stack is no longer needed
 
 ```bash
 cd prototype/gbn-bridge-proto
@@ -924,16 +1124,33 @@ infra/scripts/teardown-conduit-full.sh \
 
 ## Validation Checklist
 
-Minimum smoke sign-off:
+Local Pass 3 smoke sign-off:
+
+- `k8s-up.sh` completes with the exact image tag imported into k3d and deployed.
+- `kubectl -n veritas get pods` shows `publisher-authority`, `publisher-receiver`, ten `exit-bridge-*` pods, `creator-host`, `creator-new`, and Postgres Ready.
+- `k8s-smoke-tracing-v3.sh` passes and records ChainID logs/spans/metrics for every actor pod.
+- `k8s-smoke-discovery-v3.sh` passes and validates:
+  - Publisher DHT contains ten signed active ExitBridge entries.
+  - `SeedHostCreator`, `InitializePublisherDht`, and `SeedNewCreator` APIs complete.
+  - `creator-new` local DHT contains ten active bridge entries.
+  - Publisher bootstrap session reaches `completed`.
+  - ChainID pod-log evidence exists for the bootstrap stages.
+- `k8s-smoke-route-v3.sh` passes and validates complete Publisher/NewCreator/ExitBridge DHT evidence, local-DHT `SendDummy`, Publisher decrypt/hash validation, ciphertext-only bridge forwarding, receiver persistence, ChainID logs across creator/Publisher/selected bridge, and forced failover.
+- `k8s-smoke-upload-v3.sh` passes and validates complete Publisher/NewCreator/ExitBridge DHT evidence, upload session build, sanitization, per-chunk encryption, 10/10 ExitBridge normal fanout, receiver reconstruction, ChainID logs across creator/Publisher/every lane-carrying bridge, failover, and creator PVC persistence.
+- A detailed report is saved for each smoke run. Smoke 2 is currently saved at [`target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md`](../target/k8s-smoke-artifacts/smoke-2-discovery/20260510-002230-7843/report.md); Smoke 1, Smoke 3, and Smoke 4 reports are placeholders until rerun.
+
+AWS smoke sign-off:
 
 - AWS identity is valid in WSL.
-- Docker can build and push all three Conduit images.
+- Docker can build and push authority, receiver, bridge, and creator images.
 - CloudFormation stack reaches `CREATE_COMPLETE` or `UPDATE_COMPLETE`.
 - ECS authority service is `desired=1`, `running=1`.
 - ECS receiver service is `desired=1`, `running=1`.
-- ECS bridge service is `desired=1`, `running=1`.
+- ECS bridge service reaches the configured desired count.
+- ECS `creator-host` and `creator-new` services are `desired=1`, `running=1`.
 - Authority logs show service startup.
 - Bridge logs show lease registration or renewal.
+- Creator logs show admin listener startup and node metadata availability.
 - Receiver logs are available and queryable.
 - Smoke artifact directory is preserved.
 
@@ -945,7 +1162,7 @@ Full Phase 10 sign-off:
 - Upload / ACK path succeeds from the mobile path.
 - Failover or churn scenario is executed and timed.
 - Batch-window behavior is measured.
-- A specific `chain_id` appears in authority, receiver, bridge, and validation artifacts.
+- A specific `chain_id` appears in authority, receiver, bridge, creator, and validation artifacts.
 - The Phase 10 test report is updated with evidence and anomalies.
 
 Do not mark Phase 10 complete based only on a stack deployment.
@@ -953,6 +1170,42 @@ Do not mark Phase 10 complete based only on a stack deployment.
 ---
 
 ## Troubleshooting
+
+### Local k3d cluster uses stale images
+
+Run `infra/scripts/k8s-up.sh` instead of manually restarting deployments. The script
+builds a unique image tag, imports it into k3d, patches deployments to that exact tag,
+and waits for rollout readiness. If a pod still reports old behavior, collect:
+
+```bash
+kubectl -n veritas get pods -o wide
+kubectl -n veritas describe pod POD_NAME
+kubectl -n veritas logs POD_NAME --tail=200
+```
+
+### Local bootstrap succeeds but DHT assertions fail
+
+Dump the three state surfaces before retrying:
+
+```bash
+bash prototype/gbn-bridge-proto/infra/scripts/k8s-control-interactive.sh
+```
+
+Use `DumpPublisherDht`, `DumpNodeDht`, and `DumpLocalDht`. A valid Smoke 2 run must
+show the same ten bridge IDs in the Publisher DHT, NewCreator local DHT, active tunnel
+set, and Publisher bootstrap session.
+
+### Local ChainID evidence is missing
+
+First decide whether observability is required for the run. With
+`--no-require-observability`, the smoke scripts still require pod-log ChainID evidence.
+With `--require-observability`, Loki and Tempo must also return the ChainID. Check:
+
+```bash
+kubectl -n observability get pods,svc
+kubectl -n veritas logs deploy/creator-new --tail=200
+kubectl -n veritas logs deploy/publisher-authority --tail=200
+```
 
 ### CloudFormation stack rolls back
 

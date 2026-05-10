@@ -27,13 +27,14 @@ Prove that:
    from a synthetic 1 MiB test file, chunked at 8 KiB (≈ 128 chunks).
 2. The full pipeline output is durable on `creator-new`'s container-local PVC
    (Pass 3 D1 persistence): manifest + per-chunk ciphertext blobs.
-3. `SendUpload` against the session reaches `session_status=Completed` within
-   the timeout against the 10-bridge cluster.
+3. `SendUpload` against the normal session reaches `session_status=Completed`
+   within the timeout and uses all 10 ExitBridges as lanes.
 4. Receiver reconstructs the plaintext content from the chunks; the
    `SHA-256(reassembled_plaintext)` equals `manifest.content_hash`.
 5. Every bridge that carried a chunk saw only ciphertext (plaintext marker grep
    on bridge logs returns empty for every involved bridge).
-6. ≥ 2 distinct lanes appear in `chunk_assignments` (multi-lane proof, §3.6).
+6. The normal invocation's `chunk_assignments` include all 10 ExitBridge IDs
+   from `creator-new`'s local DHT (multi-lane proof, §3.6).
 7. `first_chunk_dispatched_at_ms < all_lanes_active_at_ms` (progressive fanout,
    §3.7).
 8. With `--include-failover`, an additional run with `force_lane_failure` on one
@@ -47,14 +48,18 @@ Prove that:
 
 - WSL2 Ubuntu host (Master plan §2.8 guard at top of script).
 - Smoke 1, Smoke 2, Smoke 3 all just passed.
-- `creator-new` reports `self_onboarding_state ∈ { onboarded, fanout_partial }`.
+- `creator-new` reports `self_onboarding_state == onboarded`.
 - `creator-new` local DHT bridge entries came from the Publisher-seeded bootstrap set;
   full upload must not refresh lanes from a direct authority catalog shortcut.
 - `creator-new.publisher_entry.encryption_pub_key` is present. Smoke 4 fails fast and
   reruns Smoke 2 bootstrap if an older local-DHT snapshot predates the Publisher
   encryption metadata addition.
-- ≥ 5 active bridge entries in `creator-new`'s local DHT (failover proof needs
-  redundancy).
+- `creator-new` local DHT contains the bootstrap `publisher_entry`,
+  `host_creator_entry`, `creator_entry`, `current_bootstrap_session`, and all 10
+  signed active ExitBridge entries with matching active tunnels.
+- `--target-lane-count` must equal `--expected-bridges` (default 10), and the
+  normal synthetic upload must produce at least 10 chunks so every ExitBridge can
+  carry at least one chunk.
 
 ---
 
@@ -76,7 +81,8 @@ Flags:
 - `--require-observability`: as Smoke 1.
 - `--synthetic-size N`: synthetic test bytes (default 1 MiB).
 - `--chunk-size N`: chunk size (default 8 KiB → ~128 chunks for default size).
-- `--target-lane-count N`: passed to `send-upload` (default 10).
+- `--target-lane-count N`: passed to `send-upload` (default 10). Smoke 4 fails
+  early unless this equals `--expected-bridges`.
 - `--failover-synthetic-size N`: failover invocation byte count (default 64 KiB
   so the normal run proves the full 1 MiB path while failover remains fast).
 - `--include-failover`: also run a second invocation with
@@ -93,6 +99,10 @@ Flags:
 1. Generate `chain_id_normal = smoke-4-normal-<UUID>` and
    `chain_id_failover = smoke-4-failover-<UUID>`.
 2. Capture `local-dht` snapshot before any send: `creator-local-dht-before.json`.
+   For each invocation, also capture `dht-evidence/<invocation>-pre-send/`,
+   including the Publisher DHT table, Publisher per-bridge DHT entries,
+   HostCreator/NewCreator local DHT snapshots, and ExitBridge node
+   metadata/local-DHT admin responses.
 3. **Build session**: POST `/v1/admin/build-upload-session?chain_id=<chain_id_normal>`
    on `creator-new` with `input_source=synthetic`,
    `synthetic_size_bytes=<--synthetic-size>`,
@@ -118,7 +128,9 @@ Flags:
    - Capture → `send-upload-failover-result.json`.
    - Fetch dispatch plan → `dispatch-plan-failover.json`.
 9. Wait 5 s for trace export and receiver persistence.
-10. Run assertions.
+10. Collect ChainID-scoped pod logs from `creator-new`, Publisher
+    authority/receiver, and every lane that carried a chunk.
+11. Run assertions and write `report.md`.
 
 ---
 
@@ -138,7 +150,10 @@ Flags:
 - `session_status == "completed"`.
 - `completed_chunks == total_chunks`.
 - `failed_chunks == []`.
-- `lanes_used.length >= 2` (multi-lane proof, §3.6).
+- `lanes_used.length == 10` (or exactly `--expected-bridges`).
+- `set(lanes_used)` exactly matches the 10 active ExitBridge IDs in
+  `creator-local-dht-before.json`.
+- `lane_count_at_completion == 10` (or exactly `--expected-bridges`).
 - `force_lane_failure_used == []`.
 - `ciphertext_only_at_bridge == true`.
 - `first_chunk_dispatched_at_ms < all_lanes_active_at_ms` (progressive fanout,
@@ -152,8 +167,10 @@ Flags:
 - `completed_chunks == total_chunks`.
 - `failed_chunks == []`.
 - `force_lane_failure_used == [<chosen_bridge_id>]`.
-- `lanes_used` does not include `<chosen_bridge_id>` (or includes it only with
-  `attempts > 1` showing reroute).
+- `lanes_used` does not include `<chosen_bridge_id>`.
+- Because the local topology has exactly 10 bridges and the failover run uses a
+  smaller synthetic payload, the failover invocation must use at least
+  `min(total_chunks, target_lane_count - 1)` lanes.
 - `failover_events >= 1` in the send response and dispatch plan. The local
   prototype may fail the forced lane before assigning a chunk to it, so a
   reroute does not always imply `attempts >= 2` for a chunk assignment.
@@ -213,6 +230,11 @@ same `session_id` as the build/send response for that invocation. Any orphan spa
 with the expected event name but a different chain id is a failure, not extra
 evidence.
 
+When the optional observability backend is disabled, the script still requires
+pod-log ChainID evidence for each invocation across `creator-new`, Publisher
+authority/receiver, and every ExitBridge lane that carried a chunk before it can
+pass.
+
 ### 5.7 Persistence Behavior (Pass 3 D1)
 
 - After the normal session completes, restart the `creator-new` pod:
@@ -239,6 +261,7 @@ Written to `/tmp/conduit-smoke-4-${chain_id_normal}/`:
 
 - `pods.json`
 - `creator-local-dht-before.json`
+- `creator-local-dht-ready-summary.json`
 - `build-session-result.json`
 - `send-upload-normal-result.json`
 - `dispatch-plan-normal.json`
@@ -246,6 +269,17 @@ Written to `/tmp/conduit-smoke-4-${chain_id_normal}/`:
 - `dispatch-plan-failover.json`
 - `receiver-session-summary-normal.json`
 - `receiver-session-summary-failover.json`
+- `dht-evidence/normal-pre-send/` and `dht-evidence/failover-pre-send/`:
+  - `publisher-dht.json`
+  - `publisher-local-dht.json`
+  - `creator-host-local-dht.json`
+  - `creator-new-local-dht.json`
+  - `publisher-bridge-entry/*.json`
+  - `bridge-node-metadata/*.json`
+  - `bridge-local-dht/*.json`
+  - `dht-summary.json`
+- `chainid-evidence/normal/chainid-summary.json`
+- `chainid-evidence/failover/chainid-summary.json`
 - `bridge-logs-by-chain-id/` (logs from the lanes_used bridges)
 - `bridge-plaintext-grep.txt` (must be empty)
 - `traces-by-chain-id/` (Tempo dumps; 12 events per chain)
@@ -253,6 +287,8 @@ Written to `/tmp/conduit-smoke-4-${chain_id_normal}/`:
   bridge_id — for visual inspection of progressive ordering)
 - `upload-summary.md` (table: invocation, session_id, lanes_used,
   completed_chunks, failover_used, content_hash_match)
+- `report.md` (durable evidence report covering DHT state, API completions,
+  10-bridge fanout/reconstruction, and ChainID evidence)
 
 The receiver summaries are read from the Publisher authority because the local
 prototype forwards receiver ingress into the authority storage service. This keeps
@@ -268,7 +304,7 @@ runtime actor logs for `publisher-receiver`.
 | `session_status=Partial` after upload-timeout | Some chunks never ACKed; check bridge `frames_forwarded` per bridge_id |
 | `content_hash_match=false` | Receiver decryption broken; check ciphertext length and AAD binding |
 | Plaintext marker found in bridge logs | Phase 10 envelope not applied per chunk; check `pipeline/envelope.rs` |
-| `lanes_used.length < 2` | Lane planner not selecting multiple bridges; check Phase 11 `plan_lanes` filter |
+| Normal `lanes_used.length != 10` or bridge ID set mismatch | Lane planner/dispatcher did not use every Publisher-seeded ExitBridge; check Phase 11 `plan_lanes`, local-DHT readiness, and target lane count |
 | `first_chunk_dispatched_at_ms >= all_lanes_active_at_ms` | Dispatcher waiting for all lanes Active before sending; §3.7 progressive rule violated |
 | Failover `attempts == 1` for all chunks | `force_lane_failure` not respected by dispatcher |
 | 12 events not in Tempo | Phase 11 observability not wired |
@@ -314,7 +350,16 @@ runtime actor logs for `publisher-receiver`.
   `/v1/admin/received-upload-sessions/<session_id>`, and bridge plaintext grep
   empty.
 - All 12 §2.5 upload-pipeline events present in Tempo.
-- `lanes_used.length >= 2` and progressive timeline asserted.
+- Normal `lanes_used.length == --expected-bridges`, the normal `lanes_used` set
+  equals the 10 active ExitBridge IDs from `creator-new` local DHT, and
+  progressive timeline is asserted.
+- `dht-evidence/*/dht-summary.json` proves the Publisher DHT, NewCreator local
+  DHT, active tunnels, Publisher per-bridge DHT entries, and ExitBridge node
+  metadata agree on the same expected bridge set before each upload invocation.
+- `chainid-evidence/*/chainid-summary.json` proves each invocation's ChainID
+  appears in creator, Publisher, and every lane-carrying ExitBridge log.
+- `report.md` is written and demonstrates the three required evidence classes:
+  DHT dumps, API completions, and ChainID trace/log evidence.
 - Persistence check: post-restart `GET /v1/admin/upload-sessions` returns the
   prior session.
 - `git diff --stat -- docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/`
@@ -334,4 +379,6 @@ Validation recorded during implementation:
   `target/k8s-smoke-artifacts/smoke-4-upload/20260509-165409-24217`.
 - WSL/k3d full-size normal upload smoke:
   `target/k8s-smoke-artifacts/smoke-4-upload/20260509-165512-32301`
-  (`128/128` chunks, 9 lanes used, content hash match true).
+  (`128/128` chunks, 9 lanes used, content hash match true). This predates the
+  stricter 10/10 ExitBridge assertion and should be replaced by the next Smoke 4
+  report.

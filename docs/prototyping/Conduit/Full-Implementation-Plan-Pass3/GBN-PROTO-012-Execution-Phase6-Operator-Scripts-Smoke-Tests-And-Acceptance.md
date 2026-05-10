@@ -244,8 +244,8 @@ Expected:
   correlation.
 - Route smoke shows `route_source=local_dht`, `ciphertext_only_at_bridge=true`, and
   failover selecting a second bridge (single-lane envelope demo, Phase 5).
-- Upload smoke shows `session_status=Completed`, content_hash match, ≥ 2 distinct
-  lanes used, progressive timeline (`first_chunk_dispatched_at_ms <
+- Upload smoke shows `session_status=Completed`, content_hash match, all 10
+  ExitBridges used by the normal upload, progressive timeline (`first_chunk_dispatched_at_ms <
   all_lanes_active_at_ms`), bridge ciphertext-only, and lane failover under
   `force_lane_failure` (Phase 10 + 11).
 - Artifact bundles include chain_id-grouped trace evidence for every smoke.

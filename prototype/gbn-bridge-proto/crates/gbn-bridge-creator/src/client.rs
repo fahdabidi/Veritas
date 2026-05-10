@@ -380,9 +380,13 @@ impl CreatorClient {
         let session_id = hex_bytes(&session_id_bytes);
         let frame = synthesize_frame_with_marker(size, plaintext_marker);
         let ephemeral_private = ephemeral_private_bytes(&self.actor_id, &chain_id, now_ms);
+        let publisher_encryption_pub = publisher_entry
+            .encryption_pub_key
+            .as_ref()
+            .unwrap_or(&publisher_entry.pub_key);
         let encrypted = encrypt_for_publisher(
             &frame,
-            &publisher_entry.pub_key,
+            publisher_encryption_pub,
             publisher_entry.node_id.clone(),
             session_id_bytes,
             0,

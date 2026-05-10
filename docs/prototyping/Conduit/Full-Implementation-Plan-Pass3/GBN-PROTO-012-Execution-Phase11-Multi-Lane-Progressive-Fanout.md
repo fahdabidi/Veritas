@@ -233,9 +233,9 @@ pub struct ChunkAssignment {
 }
 ```
 
-The `chunk_assignments` field is what Smoke 4 reads to assert "≥ 2 distinct lanes
-used" and "progressive timeline" (chunk_index N's `first_dispatch_at_ms` < the
-ms when all lanes became Active).
+The `chunk_assignments` field is what Smoke 4 reads to assert "all 10 ExitBridge
+lanes used by the normal upload" and "progressive timeline" (chunk_index N's
+`first_dispatch_at_ms` < the ms when all lanes became Active).
 
 ---
 
@@ -395,7 +395,8 @@ cargo test -p gbn-bridge-publisher --test admin_send_upload
 
 - `creator-new` (state `onboarded`) can run `SendUpload` against a session built
   in Phase 10 and reach `session_status=Completed` in the 10-bridge cluster.
-- ≥ 2 distinct lane bridge_ids appear in `chunk_assignments`.
+- In the 10-bridge local smoke topology, all 10 ExitBridge IDs appear in the
+  normal upload `chunk_assignments`.
 - `first_chunk_dispatched_at_ms < all_lanes_active_at_ms` (progressive fanout
   timeline preserved).
 - Forced single-lane failover causes the chunk to reroute and the session still

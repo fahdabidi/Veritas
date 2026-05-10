@@ -2,10 +2,11 @@ use std::sync::mpsc::Sender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gbn_bridge_protocol::{
-    BootstrapJoinReply, BootstrapProgress, BootstrapProgressStage, BridgeCommandAck,
-    BridgeCommandPayload, BridgeControlCommand, BridgeControlFrame, BridgeControlHello,
-    BridgeControlKeepalive, BridgeControlProgress, BridgeControlWelcome,
-    BridgeControlWelcomeUnsigned, ProtocolError,
+    decrypt_from_creator, publisher_encryption_private_from_signing_key, BootstrapJoinReply,
+    BootstrapProgress, BootstrapProgressStage, BridgeCommandAck, BridgeCommandPayload,
+    BridgeControlCommand, BridgeControlFrame, BridgeControlHello, BridgeControlKeepalive,
+    BridgeControlProgress, BridgeControlWelcome, BridgeControlWelcomeUnsigned, EncryptedFrame,
+    ProtocolError,
 };
 use serde::Serialize;
 
@@ -653,6 +654,31 @@ impl AuthorityService {
         let frame_session_id = request.body.frame.session_id.clone();
         let frame_sequence = request.body.frame.sequence;
         let frame_payload_bytes = request.body.frame.ciphertext.len();
+        let expected_chunks = self
+            .authority
+            .upload_session(&frame_session_id)
+            .and_then(|session| session.expected_chunks);
+        let decrypted_payload_bytes = validate_receiver_encrypted_payload(
+            &request.body.frame.ciphertext,
+            publisher_encryption_private_from_signing_key(self.authority.signing_key()),
+        )
+        .map_err(map_protocol_error)?;
+        if expected_chunks == Some(1) && frame_sequence == 0 && request.body.frame.final_frame {
+            let _chain_span = crate::metrics_otlp::chain_span(
+                "publisher_dummy_payload_validated",
+                &request.chain_id,
+            )
+            .entered();
+            crate::metrics_otlp::record_chain_id(&request.chain_id);
+            tracing::info!(
+                event = "publisher_dummy_payload_validated",
+                chain_id = request.chain_id.as_str(),
+                bridge_id = request.body.via_bridge_id.as_str(),
+                session_id = frame_session_id.as_str(),
+                chunk_index = frame_sequence,
+                decrypted_payload_bytes,
+            );
+        }
         let ack = ack_service::ingest_frame(
             &mut self.authority,
             &request.chain_id,
@@ -833,6 +859,16 @@ fn map_protocol_error(error: ProtocolError) -> ServiceError {
         | ProtocolError::Envelope(_)
         | ProtocolError::Serialization(_) => ServiceError::BadRequest(error.to_string()),
     }
+}
+
+fn validate_receiver_encrypted_payload(
+    payload: &[u8],
+    publisher_encryption_private: [u8; 32],
+) -> Result<usize, ProtocolError> {
+    let encrypted: EncryptedFrame = serde_json::from_slice(payload)
+        .map_err(|error| ProtocolError::Serialization(error.to_string()))?;
+    let plaintext = decrypt_from_creator(&encrypted, publisher_encryption_private)?;
+    Ok(plaintext.len())
 }
 
 fn now_ms() -> u64 {

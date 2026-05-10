@@ -29,17 +29,18 @@ Smoke 3 success in Pass 3.
 
 Prove that:
 
-1. `creator-new` after Phase 4 reaches `onboarded` (or `fanout_partial` ≥ 5 active
-   bridges if `--allow-fanout-partial`).
+1. `creator-new` after Phase 4 reaches `onboarded` with complete bootstrap-local
+   DHT state.
 2. A SendDummy on `creator-new` selects its bridge from local DHT, not a direct
    authority catalog call.
-3. The Publisher (receiver surface) can decrypt the dummy frame and emits an
+3. The Publisher decrypts the dummy frame, validates the encrypted envelope
+   `plaintext_hash`, records payload hash validation evidence, and emits an
    `BridgeAck`.
 4. The bridge cannot decrypt the dummy frame ciphertext (§6 trust boundary held).
 5. A second SendDummy with `force_bridge_failure=true` selects a different bridge
    (failover proof per §7.1).
 6. `relay_only` bridges are not selected (T1.9).
-7. All 8 SendDummy events from Phase 5 §Observability are present in Tempo for each
+7. All 9 SendDummy events from Phase 5 §Observability are present in Tempo for each
    invocation.
 
 ---
@@ -47,11 +48,14 @@ Prove that:
 ## 2. Pre-Conditions
 
 - Smoke 1 and Smoke 2 just passed.
-- `creator-new` reports `self_onboarding_state ∈ { onboarded, fanout_partial }`.
+- `creator-new` reports `self_onboarding_state == onboarded`.
 - `creator-new` local DHT was populated from the Publisher-seeded bridge DHT set,
   with no direct authority catalog/bootstrap shortcut during `SendDummy`.
-- `creator-new` local DHT contains ≥ 2 bridge entries with `active=true` (failover
-  needs at least 2).
+- `creator-new` local DHT contains the bootstrap `publisher_entry` with
+  `encryption_pub_key`, plus non-expired `host_creator_entry`, `creator_entry`,
+  and `current_bootstrap_session`.
+- `creator-new` local DHT contains all expected ExitBridge entries, every entry is
+  signed, active, non-expired, route-eligible, and backed by an active tunnel.
 
 ---
 
@@ -81,6 +85,11 @@ Flags:
 1. Generate `chain_id_normal = smoke-3-normal-<UUID>` and
    `chain_id_failover = smoke-3-failover-<UUID>`.
 2. Capture `local-dht` snapshot before any send: `creator-local-dht-before.json`.
+   Fail before `SendDummy` unless the preflight proves the Publisher encryption
+   key and complete bootstrap DHT state are present.
+   Also capture `dht-evidence/pre-send/`, including the Publisher DHT table,
+   Publisher per-bridge DHT entries, HostCreator/NewCreator local DHT snapshots,
+   and ExitBridge node metadata/local-DHT admin responses.
 3. **Normal invocation**:
    - POST `/v1/admin/send-dummy?chain_id=<chain_id_normal>` to `creator-new` with
      `{ "size": <--message-size>, "force_bridge_failure": false,
@@ -92,11 +101,29 @@ Flags:
      "plaintext_marker": "<--plaintext-marker>" }`.
    - Capture response.
 5. Wait 5 s for trace export and receiver persistence.
-6. Run assertions.
+6. Collect ChainID-scoped pod logs from `creator-new`, the Publisher authority,
+   the Publisher receiver, and each assigned ExitBridge.
+7. Run assertions and write `report.md`.
 
 ---
 
 ## 5. Assertions
+
+### 5.0 Bootstrap Local-DHT Preflight
+
+Before any `SendDummy` call:
+
+- `creator-new.self_onboarding_state == onboarded`;
+- `publisher_entry.authority_url`, `publisher_entry.receiver_url`,
+  `publisher_entry.pub_key`, and `publisher_entry.encryption_pub_key` are present
+  and non-expired;
+- `host_creator_entry` and `creator_entry` are present, signed, active, and
+  non-expired;
+- `current_bootstrap_session.session_id` exists and
+  `current_bootstrap_session.last_state == onboarded`;
+- `bridge_entries.length == --expected-bridges`;
+- every bridge entry is signed, active, non-expired, non-`relay_only`, has an
+  ingress endpoint and capabilities, and has a matching `active_tunnels` row.
 
 ### 5.1 Response Shape (Both Invocations)
 
@@ -131,6 +158,14 @@ For each invocation's `chain_id`:
   (within ±32 bytes for AES-256-GCM tag/header).
 - Receiver `frames_accepted` counter increased by 1.
 - Receiver `bytes_ingested` counter increased by the ciphertext size.
+- `GET /v1/admin/received-dummy-frames/<chain_id>` on the Publisher authority
+  reports:
+  - `frame_count == 1`;
+  - `validated_frame_count == 1`;
+  - `payload_hash_match == true`;
+  - `decrypt_errors == []`;
+  - `frames[0].encrypted_payload_hash == frames[0].decrypted_payload_hash`;
+  - `frames[0].decrypted_payload_bytes == --message-size`.
 
 ### 5.4 Bridge Ciphertext-Only Assertion
 
@@ -146,7 +181,7 @@ For each invocation:
   ciphertext (this test runs in CI; Smoke 3 only verifies the runtime log
   property).
 
-### 5.5 Trace Coverage (8 Events Per Invocation)
+### 5.5 Trace Coverage (9 Events Per Invocation)
 
 For each `chain_id`, Tempo returns spans for:
 
@@ -157,13 +192,18 @@ For each `chain_id`, Tempo returns spans for:
 5. `creator_dummy_frame_sent`
 6. `bridge_dummy_frame_forwarded`
 7. `receiver_dummy_frame_ingested`
-8. `publisher_dummy_ack_returned`
+8. `publisher_dummy_payload_validated`
+9. `publisher_dummy_ack_returned`
 
-Total: 16 spans across the two invocations.
+Total: 18 spans across the two invocations.
 
 Every matched span must carry the same `chain_id` as the corresponding
 SendDummy response. A span with the expected event name but a different chain id
 is a failure, not supporting evidence.
+
+When the optional observability backend is disabled, the script still requires
+pod-log ChainID evidence for each invocation across `creator-new`, Publisher
+authority/receiver, and the assigned ExitBridge before it can pass.
 
 ### 5.6 No Authority Catalog Call
 
@@ -182,17 +222,34 @@ Written to
 
 - `pods.json`
 - `creator-local-dht-before.json`
+- `creator-local-dht-ready-summary.json`
 - `creator-local-dht-after-normal.json`
 - `creator-local-dht-after-failover.json`
 - `send-dummy-normal-result.json`
 - `send-dummy-failover-result.json`
 - `frames-by-chain-id.json` (one entry per chain)
+- `received-dummy-normal.json`
+- `received-dummy-failover.json`
+- `dht-evidence/pre-send/`:
+  - `publisher-dht.json`
+  - `publisher-local-dht.json`
+  - `creator-host-local-dht.json`
+  - `creator-new-local-dht.json`
+  - `publisher-bridge-entry/*.json`
+  - `bridge-node-metadata/*.json`
+  - `bridge-local-dht/*.json`
+  - `dht-summary.json`
+- `chainid-evidence/normal/chainid-summary.json`
+- `chainid-evidence/failover/chainid-summary.json`
 - `bridge-logs-by-chain-id/` (logs from the assigned bridges)
-- `traces-by-chain-id/` (Tempo dumps; 8 spans per chain)
+- `traces-by-chain-id/` (Tempo dumps; 9 spans per chain)
 - `bridge-plaintext-grep.txt` (output of grep for the plaintext marker — must be
   empty)
 - `route-summary.md` (table: invocation, chain_id, assigned_bridge_id, route_source,
-  ciphertext_only, force_bridge_failure_used)
+  ciphertext_only, payload_hash_match, validated_frame_count,
+  force_bridge_failure_used)
+- `report.md` (durable evidence report covering DHT state, API completions,
+  Publisher decrypt/hash validation, and ChainID evidence)
 
 ---
 
@@ -205,7 +262,7 @@ Written to
 | Failover assigned same bridge as normal | `force_bridge_failure` not respecting suspect TTL; T1.11 broken |
 | Receiver `frames_accepted` did not increase | BridgeData forwarding broken or AEAD decryption failing |
 | `relay_only` bridge selected | T1.9 filter missing in Phase 5 route selector |
-| 8 events missing from Tempo | Phase 5 observability not wired; instrumentation gap |
+| 9 events missing from Tempo | Phase 5 observability not wired; instrumentation gap |
 | Direct authority catalog span found | SendDummy fallback path is reachable; Phase 5 §Required Behavior step 8 violated |
 
 ---
@@ -227,7 +284,9 @@ Written to
    `send-dummy` request body). Default value `VERITAS-SMOKE-3-PLAINTEXT`.
 3. Extend `k8s-smoke-common.sh` with `frames_by_chain_id(chain_id)` Publisher-receiver
    helper.
-4. WSL2 guard at top of script.
+4. Extend `k8s-smoke-common.sh` with
+   `received_dummy_frame(chain_id)` Publisher hash-validation helper.
+5. WSL2 guard at top of script.
 
 ---
 
@@ -236,7 +295,18 @@ Written to
 - `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-route-v3.sh` passes.
 - Against a Smoke-2-green cluster, the script exits 0 with two distinct
   `assigned_bridge_id`s and ciphertext-only bridge logs.
-- All 16 spans (8 per invocation) present in Tempo.
+- The pre-send local-DHT preflight proves the Publisher encryption key, HostCreator
+  entry, Creator entry, bootstrap session, and all expected active bridge entries
+  are present on `creator-new`.
+- `dht-evidence/pre-send/dht-summary.json` proves the Publisher DHT,
+  NewCreator local DHT, active tunnels, Publisher per-bridge DHT entries, and
+  ExitBridge node metadata agree on the same expected bridge set.
+- `chainid-evidence/*/chainid-summary.json` proves each invocation's ChainID
+  appears in creator, Publisher, and assigned ExitBridge logs.
+- `report.md` is written and demonstrates the three required evidence classes:
+  DHT dumps, API completions, and ChainID trace/log evidence.
+- All 18 spans (9 per invocation) present in Tempo.
+- Publisher dummy payload hash validation succeeds for both invocations.
 - Bridge plaintext grep returns empty.
 - `git diff --stat -- docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/` is empty.
 - V1 (`prototype/gbn-proto/**`) is unchanged.

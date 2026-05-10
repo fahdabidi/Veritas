@@ -116,7 +116,7 @@ Each phase must update this status tracker when completed.
 | §3.5 Per-chunk encryption missing | Phase 5 only encrypts a single dummy frame | Per-chunk X25519 + HKDF + AES-256-GCM with AAD = `session_id || chunk_index || total_chunks || plaintext_hash`; bridge cannot decrypt any chunk | 10 |
 | §3.6 Multi-lane upload missing | Phase 5 SendDummy uses one bridge | Creator selects N upload lanes from local DHT (target N=10), opens `BridgeOpen` per lane, disperses chunks across lanes, tracks per-chunk per-lane ACK | 11 |
 | §3.7 Progressive fanout missing | No lane-becomes-active staged dispatch; no reuse when fewer than 10 lanes | Chunks start flowing as each lane becomes active; reuse already-active lanes if fewer than 10 active before timeout; failover reroutes pending chunks to remaining active lanes | 11 |
-| Full upload pipeline not validated | No smoke covers sanitize → chunk → encrypt → multi-lane → receiver reconstruct | New `k8s-smoke-upload-v3.sh` (Smoke 4) drives `BuildUploadSession` + `SendUpload`; asserts content_hash match, ciphertext-only at every bridge, ≥ 2 distinct lanes used, progressive timeline | 12 |
+| Full upload pipeline not validated | No smoke covers sanitize → chunk → encrypt → multi-lane → receiver reconstruct | New `k8s-smoke-upload-v3.sh` (Smoke 4) drives `BuildUploadSession` + `SendUpload`; asserts content_hash match, ciphertext-only at every bridge, all 10 ExitBridges used in the normal upload, progressive timeline | 12 |
 
 ---
 
@@ -207,6 +207,7 @@ sides notify the Publisher"):
 Onboarded-creator single-lane envelope demo (Phase 5, sections 3.5 / 3.6):
 
 - route selected from local DHT
+- Publisher dummy payload hash validated
 - dummy frame delivered
 
 Upload pipeline (Phase 10 / Phase 11, sections 3.4, 3.5, 3.6, 3.7):
@@ -224,7 +225,7 @@ Upload pipeline (Phase 10 / Phase 11, sections 3.4, 3.5, 3.6, 3.7):
 - publisher upload chunk ack returned (per chunk)
 - creator upload session complete (once per session, when all chunks ACKed)
 
-This brings the §2.5 event total to 36 (16 bootup + 8 single-lane envelope + 12 upload
+This brings the §2.5 event total to 37 (16 bootup + 9 single-lane envelope + 12 upload
 pipeline), all `chain_id` and `bootstrap_session_id`/`upload_session_id` correlated.
 
 ### 2.6 V1 Preservation Rule
@@ -497,8 +498,8 @@ absent after local k3d cluster recreation.
 
 Implement `infra/scripts/k8s-smoke-upload-v3.sh`. Drives `BuildUploadSession` then
 `SendUpload` against `creator-new`. Asserts: full content reconstruction at receiver
-(content_hash matches), bridges saw only ciphertext for every chunk, ≥ 2 distinct
-lanes used, progressive fanout timeline (chunks delivered before all lanes active),
+(content_hash matches), bridges saw only ciphertext for every chunk, all 10
+ExitBridges used by the normal upload, progressive fanout timeline (chunks delivered before all lanes active),
 all 12 upload-pipeline §2.5 events present in Tempo.
 
 Status: implemented. Smoke 4 uses the Publisher-seeded local DHT, validates the
@@ -537,12 +538,13 @@ Pass 3 is complete when:
     metadata; chunker emits fixed-size chunks with per-chunk `plaintext_hash`; manifest
     builder produces a content_hash; session builder issues a `session_id`.
 14. `SendUpload` runs the full §3.5–§3.7 pipeline: per-chunk envelope encryption,
-    multi-lane dispatch across at least 2 distinct active bridges, progressive
+    multi-lane dispatch across all 10 active ExitBridges in the normal upload, progressive
     fanout (chunks start flowing before all lanes are active), lane reuse when fewer
     than 10 lanes active, and lane failover on mid-session bridge loss.
 15. Smoke 4 validates the full upload pipeline end-to-end: receiver reconstructs the
     plaintext content and the content_hash matches, every bridge sees only
-    ciphertext, ≥ 2 distinct lanes used, all 12 upload-pipeline §2.5 events present.
+    ciphertext, all 10 ExitBridges are used by the normal upload, all 12
+    upload-pipeline §2.5 events present.
 16. Local k8s validation passes for all four smoke runs.
 17. AWS ECS operator walkthrough passes when AWS validation is requested.
 

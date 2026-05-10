@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,13 +12,16 @@ use gbn_bridge_creator::{
     SendDummyResult,
 };
 use gbn_bridge_protocol::{
-    publisher_identity, BridgeCapability, BridgeDhtEntry, BridgeDhtEntryUnsigned,
-    BridgeIngressEndpoint, BridgeRegister, DhtBridgeIngressEndpoint, EncryptedFrame,
-    LocalDiscoveryTable, PublicKeyBytes, PublisherDhtEntry, ReachabilityClass, SelfOnboardingState,
-    TunnelPeerRole, TunnelState, DEFAULT_UDP_PUNCH_PORT,
+    publisher_encryption_identity, publisher_identity, BridgeCapability, BridgeDhtEntry,
+    BridgeDhtEntryUnsigned, BridgeIngressEndpoint, BridgeRegister, DhtBridgeIngressEndpoint,
+    EncryptedFrame, LocalDiscoveryTable, PublicKeyBytes, PublisherDhtEntry, ReachabilityClass,
+    SelfOnboardingState, TunnelPeerRole, TunnelState, DEFAULT_UDP_PUNCH_PORT,
 };
 use gbn_bridge_publisher::{
-    admin::{AdminCreatorConfig, AdminHttpServer, AdminState, FramesResponse, MetricsResponse},
+    admin::{
+        AdminCreatorConfig, AdminHttpServer, AdminState, FramesResponse, MetricsResponse,
+        ReceivedDummyFrameSummary,
+    },
     api::AuthorityRoute,
     AuthorityServer, PublisherAuthority, PublisherServiceConfig,
 };
@@ -140,6 +144,7 @@ fn start_fake_bridge(
     let stop_for_thread = stop.clone();
     let join = thread::spawn(move || {
         let mut buffer = vec![0_u8; 60 * 1024];
+        let mut fragments = BTreeMap::new();
         while !stop_for_thread.load(Ordering::Relaxed) {
             let (read, peer) = match socket.recv_from(&mut buffer) {
                 Ok(received) => received,
@@ -156,7 +161,8 @@ fn start_fake_bridge(
             if read == 0 {
                 continue;
             }
-            let response = fake_bridge_response(&bridge_id, &service, &buffer[..read]);
+            let response =
+                fake_bridge_response(&bridge_id, &service, &buffer[..read], &mut fragments);
             let payload = serde_json::to_vec(&response).unwrap();
             let _ = socket.send_to(&payload, peer);
         }
@@ -164,10 +170,18 @@ fn start_fake_bridge(
     FakeBridgeHandle { addr, stop, join }
 }
 
+#[derive(Debug)]
+struct PendingTestFrame {
+    sequence: u32,
+    total_fragments: u16,
+    fragments: Vec<Option<Vec<u8>>>,
+}
+
 fn fake_bridge_response(
     bridge_id: &str,
     service: &Arc<Mutex<gbn_bridge_publisher::AuthorityService>>,
     payload: &[u8],
+    fragments: &mut BTreeMap<(String, String, String), PendingTestFrame>,
 ) -> CreatorBridgeResponse {
     let request = match serde_json::from_slice::<CreatorBridgeRequest>(payload) {
         Ok(request) => request,
@@ -207,9 +221,68 @@ fn fake_bridge_response(
                 },
             }
         }
-        CreatorBridgeRequest::FrameFragment(_) => CreatorBridgeResponse::Error {
-            message: "fragmented upload frames are not used by send-dummy tests".to_string(),
-        },
+        CreatorBridgeRequest::FrameFragment(fragment) => {
+            let key = (
+                fragment.chain_id.clone(),
+                fragment.session_id.clone(),
+                fragment.frame_id.clone(),
+            );
+            let frame_bytes = match fragment.decoded_frame_bytes() {
+                Ok(bytes) => bytes,
+                Err(message) => return CreatorBridgeResponse::Error { message },
+            };
+            let pending = fragments
+                .entry(key.clone())
+                .or_insert_with(|| PendingTestFrame {
+                    sequence: fragment.sequence,
+                    total_fragments: fragment.total_fragments,
+                    fragments: vec![None; fragment.total_fragments as usize],
+                });
+            if pending.sequence != fragment.sequence
+                || pending.total_fragments != fragment.total_fragments
+                || fragment.fragment_index >= pending.total_fragments
+            {
+                return CreatorBridgeResponse::Error {
+                    message: "bad test fragment metadata".to_string(),
+                };
+            }
+            pending.fragments[fragment.fragment_index as usize] = Some(frame_bytes);
+            if pending.fragments.iter().any(Option::is_none) {
+                return CreatorBridgeResponse::FrameFragmentAccepted {
+                    chain_id: fragment.chain_id,
+                    session_id: fragment.session_id,
+                    frame_id: fragment.frame_id,
+                    fragment_index: fragment.fragment_index,
+                    total_fragments: fragment.total_fragments,
+                };
+            }
+            let completed = fragments.remove(&key).unwrap();
+            let mut frame_bytes = Vec::new();
+            for fragment in completed.fragments.into_iter().flatten() {
+                frame_bytes.extend(fragment);
+            }
+            match serde_json::from_slice::<gbn_bridge_protocol::BridgeData>(&frame_bytes) {
+                Ok(frame) => {
+                    let chain_id = frame.chain_id.clone();
+                    match service
+                        .publisher_authority_mut()
+                        .ingest_bridge_frame_with_chain_id(
+                            Some(&chain_id),
+                            bridge_id,
+                            frame,
+                            now_ms(),
+                        ) {
+                        Ok(ack) => CreatorBridgeResponse::Ack(ack),
+                        Err(error) => CreatorBridgeResponse::Error {
+                            message: error.to_string(),
+                        },
+                    }
+                }
+                Err(error) => CreatorBridgeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
         CreatorBridgeRequest::Close(close) => {
             let chain_id = close.chain_id.clone();
             let session_id = close.session_id.clone();
@@ -293,7 +366,7 @@ fn start_topology(state_kind: AdminStateKind) -> TestTopology {
                 authority_url: authority_url.clone(),
                 receiver_url: authority_url.clone(),
                 pub_key: publisher_pub.clone(),
-                encryption_pub_key: None,
+                encryption_pub_key: Some(publisher_encryption_identity(&publisher_key)),
                 entry_expiry_ms: now + 300_000,
             });
             if matches!(
@@ -602,6 +675,29 @@ fn send_dummy_from_onboarded_creator_uses_local_dht_route_and_envelope() {
     assert_eq!(encrypted.publisher_key_id, "publisher");
     assert!(!encrypted.ciphertext.is_empty());
     assert!(!encrypted.auth_tag.is_empty());
+
+    let authority_admin = AdminHttpServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        AdminState::authority(topology.service.clone()),
+        1_048_576,
+    )
+    .unwrap()
+    .spawn()
+    .unwrap();
+    let path = format!("/v1/admin/received-dummy-frames/{}", result.chain_id);
+    let (status, summary): (u16, ReceivedDummyFrameSummary) =
+        get_json(authority_admin.local_addr(), &path);
+    assert_eq!(status, 200);
+    assert_eq!(summary.chain_id, result.chain_id);
+    assert_eq!(summary.frame_count, 1);
+    assert_eq!(summary.validated_frame_count, 1);
+    assert!(summary.payload_hash_match);
+    assert!(summary.decrypt_errors.is_empty());
+    assert_eq!(summary.frames[0].via_bridge_id, "bridge-dummy");
+    assert_eq!(summary.frames[0].sequence, 0);
+    assert!(summary.frames[0].final_frame);
+    assert_eq!(summary.frames[0].decrypted_payload_bytes, 32);
+    authority_admin.join().unwrap();
 
     topology.shutdown();
 }

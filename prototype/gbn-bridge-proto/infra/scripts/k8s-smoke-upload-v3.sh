@@ -15,7 +15,7 @@ TARGET_LANE_COUNT="${VERITAS_K8S_UPLOAD_TARGET_LANE_COUNT:-10}"
 UPLOAD_TIMEOUT_SECONDS="${VERITAS_K8S_UPLOAD_TIMEOUT_SECONDS:-120}"
 TRACE_TIMEOUT_SECONDS="${VERITAS_K8S_SMOKE_TRACE_TIMEOUT:-120}"
 BOOTSTRAP_TIMEOUT_SECONDS="${VERITAS_K8S_SMOKE_BOOTSTRAP_TIMEOUT:-180}"
-MIN_ACTIVE_BRIDGES="${VERITAS_K8S_UPLOAD_MIN_ACTIVE_BRIDGES:-5}"
+MIN_ACTIVE_BRIDGES="${VERITAS_K8S_UPLOAD_MIN_ACTIVE_BRIDGES:-$EXPECTED_BRIDGES}"
 PLAINTEXT_MARKER="${VERITAS_K8S_UPLOAD_MARKER:-VERITAS-SMOKE-4-PLAINTEXT}"
 CHAIN_ID_PREFIX="${VERITAS_K8S_SMOKE_CHAIN_PREFIX:-smoke-4-}"
 INCLUDE_FAILOVER=1
@@ -39,7 +39,7 @@ Options:
   --upload-timeout N                  SendUpload timeout in seconds. Default: 120.
   --trace-timeout N                   Trace/log wait timeout in seconds. Default: 120.
   --bootstrap-timeout N               Smoke 2 fallback timeout in seconds. Default: 180.
-  --min-active-bridges N              Required local-DHT active bridge count. Default: 5.
+  --min-active-bridges N              Compatibility flag; Smoke 4 requires all expected bridges.
   --include-failover                  Run the forced-lane-failure upload. Default.
   --no-include-failover               Skip forced-lane-failure upload.
   --include-persistence-check         Restart creator-new and assert session persists. Default.
@@ -77,6 +77,12 @@ while [[ $# -gt 0 ]]; do
     *) echo "ERROR: unknown argument '$1'." >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ "$TARGET_LANE_COUNT" -ne "$EXPECTED_BRIDGES" ]]; then
+  echo "ERROR: Smoke 4 requires --target-lane-count to match --expected-bridges so the normal upload proves every ExitBridge was used." >&2
+  echo "       target_lane_count=$TARGET_LANE_COUNT expected_bridges=$EXPECTED_BRIDGES" >&2
+  exit 2
+fi
 
 uname -a | grep -i microsoft >/dev/null || {
   echo "Pass 3 tooling requires WSL2 Ubuntu" >&2
@@ -127,13 +133,13 @@ PY
 
 local_dht_ready() {
   local path="$1"
-  python3 - "$path" "$MIN_ACTIVE_BRIDGES" "$ARTIFACT_DIR/pods.json" <<'PY'
+  python3 - "$path" "$EXPECTED_BRIDGES" "$ARTIFACT_DIR/pods.json" <<'PY'
 import json
 import sys
 import time
 
-path, min_active_raw, pods_path = sys.argv[1:4]
-min_active = int(min_active_raw)
+path, expected_raw, pods_path = sys.argv[1:4]
+expected = int(expected_raw)
 data = json.load(open(path, encoding="utf-8"))
 pods = json.load(open(pods_path, encoding="utf-8"))
 pod_ip_by_name = {
@@ -142,19 +148,87 @@ pod_ip_by_name = {
     if not item.get("metadata", {}).get("deletionTimestamp")
 }
 now_ms = int(time.time() * 1000)
-if data.get("self_onboarding_state") not in {"onboarded", "fanout_partial"}:
-    raise SystemExit(1)
+
+def fail(code, **detail):
+    raise SystemExit(json.dumps({"failure": code, **detail}, sort_keys=True))
+
+def has_key(value):
+    return isinstance(value, list) and len(value) == 32
+
+def has_sig(value):
+    return isinstance(value, list) and len(value) == 64
+
+def require_creator_entry(name, expected_node_id=None):
+    entry = data.get(name) or {}
+    if not entry:
+        fail(f"missing_{name}")
+    if expected_node_id and entry.get("node_id") != expected_node_id:
+        fail(f"{name}_node_id_mismatch", actual=entry.get("node_id"), expected=expected_node_id)
+    if not entry.get("ip_addr"):
+        fail(f"{name}_missing_ip_addr", node_id=entry.get("node_id"))
+    if not has_key(entry.get("pub_key")):
+        fail(f"{name}_missing_pub_key", node_id=entry.get("node_id"))
+    if not has_sig(entry.get("publisher_sig")):
+        fail(f"{name}_missing_publisher_sig", node_id=entry.get("node_id"))
+    if int(entry.get("udp_punch_port") or 0) <= 0:
+        fail(f"{name}_invalid_udp_punch_port", node_id=entry.get("node_id"))
+    if int(entry.get("entry_expiry_ms") or 0) <= now_ms:
+        fail(f"{name}_expired", node_id=entry.get("node_id"))
+    if entry.get("active") is not True:
+        fail(f"{name}_inactive", node_id=entry.get("node_id"))
+    return entry
+
+state = data.get("self_onboarding_state")
+if state != "onboarded":
+    fail("self_onboarding_not_complete", state=state)
 publisher = data.get("publisher_entry") or {}
-if not publisher.get("encryption_pub_key"):
-    raise SystemExit(1)
+if not publisher:
+    fail("missing_publisher_entry")
+if not publisher.get("node_id"):
+    fail("publisher_entry_missing_node_id")
+if not publisher.get("authority_url"):
+    fail("publisher_entry_missing_authority_url")
+if not publisher.get("receiver_url"):
+    fail("publisher_entry_missing_receiver_url")
+if not has_key(publisher.get("pub_key")):
+    fail("publisher_entry_missing_pub_key")
+if not has_key(publisher.get("encryption_pub_key")):
+    fail("publisher_entry_missing_encryption_pub_key")
+if int(publisher.get("entry_expiry_ms") or 0) <= now_ms:
+    fail("publisher_entry_expired", entry_expiry_ms=publisher.get("entry_expiry_ms"))
+
+host_creator = require_creator_entry("host_creator_entry")
+creator = require_creator_entry("creator_entry", data.get("actor_id"))
+session = data.get("current_bootstrap_session") or {}
+if not session.get("session_id"):
+    fail("missing_current_bootstrap_session")
+if session.get("last_state") != state:
+    fail("bootstrap_session_state_mismatch", actual=session.get("last_state"), expected=state)
+
+bridges = data.get("bridge_entries") or []
+if len(bridges) != expected:
+    fail("bridge_entry_count_mismatch", actual=len(bridges), expected=expected)
 eligible = []
-for entry in data.get("bridge_entries") or []:
+seen_bridge_ids = set()
+for entry in bridges:
+    bridge_id = entry.get("bridge_id")
+    if not bridge_id:
+        fail("bridge_missing_id", entry=entry)
+    if bridge_id in seen_bridge_ids:
+        fail("duplicate_bridge_id", bridge_id=bridge_id)
+    seen_bridge_ids.add(bridge_id)
+    if not has_key(entry.get("identity_pub")):
+        fail("bridge_missing_identity_pub", bridge_id=bridge_id)
+    if not has_sig(entry.get("publisher_sig")):
+        fail("bridge_missing_publisher_sig", bridge_id=bridge_id)
+    if int(entry.get("udp_punch_port") or 0) <= 0:
+        fail("bridge_invalid_udp_punch_port", bridge_id=bridge_id)
     suspect_until = entry.get("suspect_until_ms")
     if suspect_until and int(suspect_until) > now_ms:
         continue
     if not entry.get("active"):
         continue
-    if entry.get("reachability_class") == "relay_only":
+    if entry.get("reachability_class") not in {"direct", "brokered"}:
         continue
     if int(entry.get("entry_expiry_ms") or 0) <= now_ms:
         continue
@@ -167,10 +241,33 @@ for entry in data.get("bridge_entries") or []:
     endpoint_ip = endpoints[0].get("ip_addr")
     if pod_ip and endpoint_ip != pod_ip:
         continue
+    if not entry.get("capabilities"):
+        fail("bridge_missing_capabilities", bridge_id=bridge_id)
     eligible.append(entry.get("bridge_id"))
-if len(eligible) < min_active:
-    raise SystemExit(1)
-print(json.dumps({"eligible_bridge_ids": eligible, "publisher_encryption_key_present": True}, sort_keys=True))
+if len(eligible) != expected:
+    fail("eligible_bridge_count_mismatch", actual=len(eligible), expected=expected)
+
+tunnel_bridge_ids = {
+    tunnel.get("peer_id")
+    for tunnel in data.get("active_tunnels") or []
+    if tunnel.get("peer_role") == "exit_bridge"
+}
+missing_tunnels = sorted(seen_bridge_ids - tunnel_bridge_ids)
+if missing_tunnels:
+    fail("missing_active_tunnels", bridge_ids=missing_tunnels)
+
+print(json.dumps({
+    "state": state,
+    "actor_id": data.get("actor_id"),
+    "publisher_node_id": publisher.get("node_id"),
+    "publisher_encryption_key_present": True,
+    "host_creator_id": host_creator.get("node_id"),
+    "creator_id": creator.get("node_id"),
+    "bootstrap_session_id": session.get("session_id"),
+    "bridge_count": len(bridges),
+    "eligible_bridge_ids": eligible,
+    "active_tunnel_bridge_ids": sorted(tunnel_bridge_ids),
+}, sort_keys=True))
 PY
 }
 
@@ -195,8 +292,7 @@ ensure_creator_onboarded() {
     --expected-bridges "$EXPECTED_BRIDGES" \
     --bootstrap-timeout "$BOOTSTRAP_TIMEOUT_SECONDS" \
     --trace-timeout "$TRACE_TIMEOUT_SECONDS" \
-    --min-active-bridges "$MIN_ACTIVE_BRIDGES" \
-    --allow-fanout-partial \
+    --min-active-bridges "$EXPECTED_BRIDGES" \
     "$obs_arg"
 
   smoke_discover_nodes
@@ -204,7 +300,7 @@ ensure_creator_onboarded() {
     >"$ARTIFACT_DIR/creator-local-dht-before.json"
   local_dht_ready "$ARTIFACT_DIR/creator-local-dht-before.json" \
     >"$ARTIFACT_DIR/creator-local-dht-ready-summary.json" ||
-    smoke_fail "creator-new did not have Publisher encryption metadata and $MIN_ACTIVE_BRIDGES eligible local-DHT bridges after bootstrap."
+    smoke_fail "creator-new did not have complete bootstrap local-DHT state: Publisher encryption key, HostCreator entry, Creator entry, bootstrap session, and $EXPECTED_BRIDGES active bridge entries are required."
 }
 
 build_payload() {
@@ -267,15 +363,23 @@ PY
 
 assert_send_result() {
   local label="$1" chain_id="$2" expected_chunks="$3" path="$4" force_bridge="${5:-}"
-  python3 - "$label" "$chain_id" "$expected_chunks" "$path" "$force_bridge" "$UPLOAD_TIMEOUT_SECONDS" <<'PY'
+  python3 - "$label" "$chain_id" "$expected_chunks" "$path" "$force_bridge" "$UPLOAD_TIMEOUT_SECONDS" "$TARGET_LANE_COUNT" "$ARTIFACT_DIR/creator-local-dht-before.json" <<'PY'
 import json
 import sys
-label, chain_id, expected_raw, path, force_bridge, timeout_raw = sys.argv[1:7]
+label, chain_id, expected_raw, path, force_bridge, timeout_raw, target_raw, dht_path = sys.argv[1:9]
 expected = int(expected_raw)
 timeout_ms = int(timeout_raw) * 1000
+target_lanes = int(target_raw)
 data = json.load(open(path, encoding="utf-8"))
+dht = json.load(open(dht_path, encoding="utf-8"))
 def fail(code, **detail):
     raise SystemExit(json.dumps({"label": label, "failure": code, **detail}, sort_keys=True))
+expected_bridge_ids = {
+    entry.get("bridge_id")
+    for entry in dht.get("bridge_entries") or []
+    if entry.get("active") and entry.get("reachability_class") != "relay_only"
+}
+lanes_used = set(data.get("lanes_used") or [])
 if data.get("chain_id") != chain_id:
     fail("chain_id_mismatch", actual=data.get("chain_id"), expected=chain_id)
 if str(data.get("session_status", "")).lower() != "completed":
@@ -286,8 +390,19 @@ if int(data.get("completed_chunks") or 0) != expected:
     fail("completed_chunks_mismatch", actual=data.get("completed_chunks"), expected=expected)
 if data.get("failed_chunks"):
     fail("failed_chunks_present", failed_chunks=data.get("failed_chunks"))
-if len(data.get("lanes_used") or []) < 2:
-    fail("single_lane_upload", lanes=data.get("lanes_used"))
+if label == "normal":
+    if len(lanes_used) != target_lanes:
+        fail("normal_lane_count_mismatch", lanes=sorted(lanes_used), actual=len(lanes_used), expected=target_lanes)
+    if lanes_used != expected_bridge_ids:
+        fail("normal_lanes_do_not_match_local_dht", lanes=sorted(lanes_used), expected=sorted(expected_bridge_ids))
+    if int(data.get("lane_count_at_completion") or 0) != target_lanes:
+        fail("normal_completion_lane_count_mismatch", actual=data.get("lane_count_at_completion"), expected=target_lanes)
+else:
+    if force_bridge and force_bridge in lanes_used:
+        fail("forced_bridge_carried_chunks", forced=force_bridge, lanes=sorted(lanes_used))
+    minimum = min(expected, max(2, target_lanes - 1))
+    if len(lanes_used) < minimum:
+        fail("failover_lane_count_too_low", lanes=sorted(lanes_used), actual=len(lanes_used), expected_minimum=minimum)
 if data.get("ciphertext_only_at_bridge") is not True:
     fail("ciphertext_boundary_false")
 first = data.get("first_chunk_dispatched_at_ms")
@@ -309,15 +424,24 @@ PY
 
 assert_dispatch_plan() {
   local label="$1" expected_chunks="$2" path="$3" force_bridge="${4:-}"
-  python3 - "$label" "$expected_chunks" "$path" "$force_bridge" <<'PY'
+  python3 - "$label" "$expected_chunks" "$path" "$force_bridge" "$TARGET_LANE_COUNT" "$ARTIFACT_DIR/creator-local-dht-before.json" <<'PY'
 import json
 import sys
-label, expected_raw, path, force_bridge = sys.argv[1:5]
+label, expected_raw, path, force_bridge, target_raw, dht_path = sys.argv[1:7]
 expected = int(expected_raw)
+target_lanes = int(target_raw)
 plan = json.load(open(path, encoding="utf-8"))
+dht = json.load(open(dht_path, encoding="utf-8"))
 assignments = plan.get("chunk_assignments") or []
 def fail(code, **detail):
     raise SystemExit(json.dumps({"label": label, "failure": code, **detail}, sort_keys=True))
+expected_bridge_ids = {
+    entry.get("bridge_id")
+    for entry in dht.get("bridge_entries") or []
+    if entry.get("active") and entry.get("reachability_class") != "relay_only"
+}
+if int(plan.get("target_lane_count") or 0) != target_lanes:
+    fail("plan_target_lane_count_mismatch", actual=plan.get("target_lane_count"), expected=target_lanes)
 if str(plan.get("session_status", "")).lower() != "completed":
     fail("plan_not_completed", status=plan.get("session_status"))
 if int(plan.get("completed_chunks") or 0) != expected:
@@ -325,8 +449,17 @@ if int(plan.get("completed_chunks") or 0) != expected:
 if len(assignments) < expected:
     fail("assignment_count_too_low", actual=len(assignments), expected=expected)
 acked_bridges = {a.get("assigned_bridge_id") for a in assignments if a.get("ack_at_ms") is not None}
-if len(acked_bridges) < 2:
-    fail("plan_single_lane", bridges=sorted(acked_bridges))
+if label == "normal":
+    if len(acked_bridges) != target_lanes:
+        fail("plan_normal_lane_count_mismatch", actual=len(acked_bridges), expected=target_lanes, bridges=sorted(acked_bridges))
+    if acked_bridges != expected_bridge_ids:
+        fail("plan_normal_lanes_do_not_match_local_dht", bridges=sorted(acked_bridges), expected=sorted(expected_bridge_ids))
+else:
+    if force_bridge and force_bridge in acked_bridges:
+        fail("plan_forced_bridge_carried_chunks", forced=force_bridge, bridges=sorted(acked_bridges))
+    minimum = min(expected, max(2, target_lanes - 1))
+    if len(acked_bridges) < minimum:
+        fail("plan_failover_lane_count_too_low", actual=len(acked_bridges), expected_minimum=minimum, bridges=sorted(acked_bridges))
 if force_bridge:
     if force_bridge not in (plan.get("force_lane_failure_used") or []):
         fail("forced_bridge_not_recorded", forced=force_bridge, recorded=plan.get("force_lane_failure_used"))
@@ -503,6 +636,13 @@ run_upload_case_once() {
   local label="$1" chain_id="$2" size="$3" force_bridge="${4:-}"
   local expected_chunks=$(((size + CHUNK_SIZE - 1) / CHUNK_SIZE))
   local build_body send_body session_id
+  local lanes=()
+  if [[ "$label" == "normal" && "$expected_chunks" -lt "$TARGET_LANE_COUNT" ]]; then
+    smoke_fail "Smoke 4 normal upload needs at least $TARGET_LANE_COUNT chunks so every ExitBridge can carry a chunk; got $expected_chunks chunks from size=$size chunk_size=$CHUNK_SIZE."
+  fi
+
+  echo "Collecting ${label} pre-send DHT evidence for chain_id=${chain_id}..."
+  smoke_collect_dht_evidence "$chain_id" "${label}-pre-send"
 
   build_body="$(build_payload "$size" "$CHUNK_SIZE")"
   printf '%s\n' "$build_body" >"$ARTIFACT_DIR/build-${label}-payload.json"
@@ -527,6 +667,15 @@ run_upload_case_once() {
   wait_authority_frames "$label" "$chain_id" "$((expected_chunks + 1))" "$ARTIFACT_DIR/frames-${label}.json"
   wait_received_summary "$label" "$session_id" "$expected_chunks" "$ARTIFACT_DIR/receiver-session-summary-${label}.json"
   maybe_wait_observability "$label" "$chain_id"
+  mapfile -t lanes < <(python3 - "$ARTIFACT_DIR/send-${label}-result.json" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for lane in data.get("lanes_used") or []:
+    print(lane)
+PY
+)
+  smoke_collect_chainid_log_evidence "$chain_id" "$label" "${lanes[@]}"
   printf '%s\n' "$session_id" >"$ARTIFACT_DIR/session-id-${label}.txt"
 }
 
@@ -587,6 +736,8 @@ else
   printf '{"skipped":true}\n' >"$ARTIFACT_DIR/send-failover-result.json"
   printf '{"skipped":true}\n' >"$ARTIFACT_DIR/dispatch-plan-failover.json"
   printf '{"skipped":true}\n' >"$ARTIFACT_DIR/receiver-session-summary-failover.json"
+  mkdir -p "$ARTIFACT_DIR/chainid-evidence/failover"
+  printf '{"skipped":true}\n' >"$ARTIFACT_DIR/chainid-evidence/failover/chainid-summary.json"
 fi
 
 sleep 5
@@ -637,4 +788,139 @@ summary = [
 (root / "upload-summary.md").write_text("\n".join(summary), encoding="utf-8")
 PY
 
+python3 - "$ARTIFACT_DIR" "$INCLUDE_FAILOVER" "$EXPECTED_BRIDGES" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+include_failover = sys.argv[2] == "1"
+expected_bridges = int(sys.argv[3])
+
+def load(path, default=None):
+    try:
+        return json.load(open(path, encoding="utf-8"))
+    except FileNotFoundError:
+        return {} if default is None else default
+
+def scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+def dht_rows(labels):
+    rows = []
+    for label in labels:
+        dht = load(root / "dht-evidence" / f"{label}-pre-send" / "dht-summary.json")
+        if not dht:
+            continue
+        rows.append(
+            "| {label} | {publisher} | {creator} | {active} | {tunnels} | {entries} | {metadata} | {state} |".format(
+                label=label,
+                publisher=dht.get("publisher_dht_entry_count"),
+                creator=dht.get("creator_new_dht_entry_count"),
+                active=dht.get("creator_new_active_bridge_count"),
+                tunnels=dht.get("creator_new_active_tunnel_count"),
+                entries=dht.get("publisher_per_bridge_entry_count"),
+                metadata=dht.get("bridge_metadata_count"),
+                state=dht.get("new_creator_state"),
+            )
+        )
+    return rows
+
+labels = ["normal"] + (["failover"] if include_failover else [])
+api_rows = []
+chain_rows = []
+lane_rows = []
+for label in labels:
+    build = load(root / f"build-{label}-result.json")
+    send = load(root / f"send-{label}-result.json")
+    dispatch = load(root / f"dispatch-plan-{label}.json")
+    receiver = load(root / f"receiver-session-summary-{label}.json")
+    chain = load(root / "chainid-evidence" / label / "chainid-summary.json")
+    bridge_lines = chain.get("bridge_log_lines") or {}
+    lanes_used = send.get("lanes_used") or []
+    lane_rows.append(
+        "| {label} | {count}/{expected} | {lanes} | {forced} |".format(
+            label=label,
+            count=len(lanes_used),
+            expected=expected_bridges if label == "normal" else f">={max(2, expected_bridges - 1)}",
+            lanes=", ".join(lanes_used),
+            forced=", ".join(send.get("force_lane_failure_used") or []),
+        )
+    )
+    api_rows.append(
+        "| {label} | {chain_id} | {session} | {built} | {sent} | {dispatch_chunks} | {received} | {hash_match} |".format(
+            label=label,
+            chain_id=send.get("chain_id") or build.get("chain_id"),
+            session=send.get("session_id") or build.get("session_id"),
+            built=build.get("total_chunks"),
+            sent=send.get("completed_chunks"),
+            dispatch_chunks=dispatch.get("completed_chunks"),
+            received=receiver.get("total_chunks"),
+            hash_match=receiver.get("content_hash_match"),
+        )
+    )
+    chain_rows.append(
+        "| {label} | {chain_id} | {creator} | {publisher} | {bridges} | {bridge_count} |".format(
+            label=label,
+            chain_id=chain.get("chain_id") or send.get("chain_id"),
+            creator=chain.get("creator_new_log_lines"),
+            publisher=(chain.get("publisher_authority_log_lines") or 0) + (chain.get("publisher_receiver_log_lines") or 0),
+            bridges=sum(bridge_lines.values()) if bridge_lines else 0,
+            bridge_count=len([count for count in bridge_lines.values() if count > 0]),
+        )
+    )
+
+normal_dht = load(root / "dht-evidence" / "normal-pre-send" / "dht-summary.json")
+bridge_ids = normal_dht.get("publisher_bridge_ids") or []
+report = [
+    "# Conduit Smoke 4 Detailed Evidence Report",
+    "",
+    "## DHT Evidence",
+    "",
+    "| Invocation | Publisher DHT | NewCreator DHT | Active Bridges | Active Tunnels | Publisher Per-Bridge Entries | ExitBridge Metadata | Creator State |",
+    "|---|---:|---:|---:|---:|---:|---:|---|",
+    *dht_rows(labels),
+    "",
+    f"- Publisher/NewCreator bridge IDs: `{scalar(bridge_ids)}`",
+    "- Raw DHT artifacts: `dht-evidence/<invocation>-pre-send/`.",
+    "",
+    "## API Completion And Reconstruction Evidence",
+    "",
+    "| Invocation | ChainID | Session | Built Chunks | Sent Chunks | Dispatch Chunks | Receiver Chunks | Content Hash Match |",
+    "|---|---|---|---:|---:|---:|---:|---:|",
+    *api_rows,
+    "",
+    "API artifacts: `build-*-result.json`, `send-*-result.json`, `dispatch-plan-*.json`, `frames-*.json`, and `receiver-session-summary-*.json`.",
+    "",
+    "## Lane Fanout Evidence",
+    "",
+    "| Invocation | Lanes Used | Lane IDs | Forced Failure |",
+    "|---|---:|---|---|",
+    *lane_rows,
+    "",
+    "The normal invocation must use all 10 ExitBridges; failover must exclude the forced bridge and still complete reconstruction.",
+    "",
+    "## ChainID Evidence",
+    "",
+    "| Invocation | ChainID | Creator Lines | Publisher Lines | ExitBridge Lines | ExitBridges With Evidence |",
+    "|---|---|---:|---:|---:|---:|",
+    *chain_rows,
+    "",
+    "Raw ChainID artifacts: `chainid-evidence/` plus `upload-logs/`.",
+    "",
+    "## Result",
+    "",
+    "Smoke 4 passed only after DHT snapshots, API completions, 10-bridge fanout/reconstruction evidence, and ChainID evidence were collected.",
+    "",
+]
+(root / "report.md").write_text("\n".join(report), encoding="utf-8")
+PY
+
 echo "Smoke 4 upload validation passed. Artifacts: $ARTIFACT_DIR"
+echo "Detailed evidence report: $ARTIFACT_DIR/report.md"

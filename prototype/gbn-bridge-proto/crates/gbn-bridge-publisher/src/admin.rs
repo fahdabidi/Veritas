@@ -314,6 +314,30 @@ pub struct ReceivedUploadSessionSummary {
     pub decrypt_errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceivedDummyFrameSummary {
+    pub chain_id: String,
+    pub frame_count: usize,
+    pub validated_frame_count: usize,
+    pub payload_hash_match: bool,
+    pub decrypted_total_bytes: usize,
+    pub frames: Vec<ReceivedDummyFrameValidation>,
+    pub decrypt_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceivedDummyFrameValidation {
+    pub session_id: String,
+    pub frame_id: String,
+    pub sequence: u32,
+    pub via_bridge_id: String,
+    pub final_frame: bool,
+    pub encrypted_payload_hash: String,
+    pub decrypted_payload_hash: String,
+    pub payload_hash_match: bool,
+    pub decrypted_payload_bytes: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "service", content = "snapshot")]
 pub enum MetricsResponse {
@@ -891,13 +915,16 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
         ("GET", path) if path == AuthorityRoute::AdminLocalDht.path() => local_dht(state),
         ("GET", path) => match admin_bridge_dht_entry_target(path) {
             Some(bridge_id) => bridge_dht_entry(state, bridge_id),
-            None => match received_upload_session_target(path) {
-                Some(session_id) => get_received_upload_session(state, session_id),
-                None => match upload_session_dispatch_plan_target(path) {
-                    Some(session_id) => get_creator_upload_dispatch_plan(state, session_id),
-                    None => match upload_session_target(path) {
-                        Some(session_id) => get_creator_upload_session(state, session_id),
-                        None => error_response(404, "not_found", "admin route not found"),
+            None => match received_dummy_frame_target(path) {
+                Some(chain_id) => get_received_dummy_frame(state, chain_id),
+                None => match received_upload_session_target(path) {
+                    Some(session_id) => get_received_upload_session(state, session_id),
+                    None => match upload_session_dispatch_plan_target(path) {
+                        Some(session_id) => get_creator_upload_dispatch_plan(state, session_id),
+                        None => match upload_session_target(path) {
+                            Some(session_id) => get_creator_upload_session(state, session_id),
+                            None => error_response(404, "not_found", "admin route not found"),
+                        },
                     },
                 },
             },
@@ -2386,6 +2413,106 @@ fn get_received_upload_session(state: &AdminState, session_id: &str) -> Vec<u8> 
     json_response(200, &received_upload_session_summary(record, private))
 }
 
+fn get_received_dummy_frame(state: &AdminState, chain_id: &str) -> Vec<u8> {
+    let Some(authority) = &state.authority else {
+        return error_response(
+            501,
+            "not_supported",
+            "received dummy frame validation is only available on the publisher authority",
+        );
+    };
+    let service = authority
+        .lock()
+        .expect("authority service mutex poisoned while validating received dummy frame");
+    let frames = service
+        .publisher_authority()
+        .list_frames(Some(chain_id), DEFAULT_FRAME_LIMIT);
+    let private =
+        publisher_encryption_private_from_signing_key(service.publisher_authority().signing_key());
+    let summary = received_dummy_frame_summary(chain_id, &frames, private);
+    if summary.payload_hash_match && summary.frame_count > 0 {
+        let _chain_span =
+            metrics_otlp::chain_span("publisher_dummy_payload_validated", chain_id).entered();
+        metrics_otlp::record_chain_id(chain_id);
+        tracing::info!(
+            event = "publisher_dummy_payload_validated",
+            chain_id,
+            frame_count = summary.frame_count,
+            validated_frame_count = summary.validated_frame_count,
+            decrypted_total_bytes = summary.decrypted_total_bytes,
+        );
+    } else {
+        tracing::warn!(
+            event = "publisher_dummy_payload_validation_failed",
+            chain_id,
+            frame_count = summary.frame_count,
+            validated_frame_count = summary.validated_frame_count,
+            decrypt_errors = ?summary.decrypt_errors,
+        );
+    }
+    json_response(200, &summary)
+}
+
+fn received_dummy_frame_summary(
+    chain_id: &str,
+    frame_records: &[IngestedFrameRecord],
+    publisher_encryption_private: [u8; 32],
+) -> ReceivedDummyFrameSummary {
+    let mut frames = Vec::new();
+    let mut decrypt_errors = Vec::new();
+    let mut decrypted_total_bytes = 0usize;
+
+    for frame_record in frame_records {
+        let encrypted =
+            match serde_json::from_slice::<EncryptedFrame>(&frame_record.frame.ciphertext) {
+                Ok(encrypted) => encrypted,
+                Err(error) => {
+                    decrypt_errors.push(format!(
+                        "session {} sequence {}: encrypted frame json: {error}",
+                        frame_record.frame.session_id, frame_record.frame.sequence
+                    ));
+                    continue;
+                }
+            };
+        let plaintext = match decrypt_from_creator(&encrypted, publisher_encryption_private) {
+            Ok(plaintext) => plaintext,
+            Err(error) => {
+                decrypt_errors.push(format!(
+                    "session {} sequence {}: decrypt: {error}",
+                    frame_record.frame.session_id, frame_record.frame.sequence
+                ));
+                continue;
+            }
+        };
+        let decrypted_payload_hash = Sha256::digest(&plaintext).to_vec();
+        let payload_hash_match = decrypted_payload_hash == encrypted.plaintext_hash;
+        decrypted_total_bytes += plaintext.len();
+        frames.push(ReceivedDummyFrameValidation {
+            session_id: frame_record.frame.session_id.clone(),
+            frame_id: frame_record.frame.frame_id.clone(),
+            sequence: frame_record.frame.sequence,
+            via_bridge_id: frame_record.via_bridge_id.clone(),
+            final_frame: frame_record.frame.final_frame,
+            encrypted_payload_hash: base64_encode(&encrypted.plaintext_hash),
+            decrypted_payload_hash: base64_encode(&decrypted_payload_hash),
+            payload_hash_match,
+            decrypted_payload_bytes: plaintext.len(),
+        });
+    }
+
+    ReceivedDummyFrameSummary {
+        chain_id: chain_id.to_string(),
+        frame_count: frame_records.len(),
+        validated_frame_count: frames.len(),
+        payload_hash_match: !frame_records.is_empty()
+            && decrypt_errors.is_empty()
+            && frames.iter().all(|frame| frame.payload_hash_match),
+        decrypted_total_bytes,
+        frames,
+        decrypt_errors,
+    }
+}
+
 fn received_upload_session_summary(
     record: &UploadSessionRecord,
     publisher_encryption_private: [u8; 32],
@@ -3739,6 +3866,15 @@ fn received_upload_session_target(path: &str) -> Option<&str> {
         None
     } else {
         Some(session_id)
+    }
+}
+
+fn received_dummy_frame_target(path: &str) -> Option<&str> {
+    let chain_id = path.strip_prefix("/v1/admin/received-dummy-frames/")?;
+    if chain_id.is_empty() || chain_id.contains('/') {
+        None
+    } else {
+        Some(chain_id)
     }
 }
 

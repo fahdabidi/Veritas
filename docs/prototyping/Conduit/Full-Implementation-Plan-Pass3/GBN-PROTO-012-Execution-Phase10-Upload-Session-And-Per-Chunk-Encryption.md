@@ -190,7 +190,8 @@ Steps:
    process-local monotonic counter so repeated byte-identical builds remain unique.
 4. Generate creator ephemeral X25519 keypair.
 5. Derive `upload_content_key` and `nonce_base` via X25519 + HKDF against
-   `publisher_entry.pub_key`.
+   `publisher_entry.encryption_pub_key` from the creator-local DHT. The legacy
+   `publisher_entry.pub_key` fallback is not acceptable for Smoke 4.
 6. Encrypt the manifest as chunk index `MANIFEST`.
 7. Encrypt every data chunk in order with chunk-index-derived nonce and AAD.
 8. Snapshot the current `LocalDiscoveryTable` (Phase 11 selects lanes from this
@@ -225,7 +226,7 @@ AES-256-GCM) but applied to every chunk and the manifest, with chunk-index-deriv
 nonces and AAD that binds the chunk to the session.
 
 ```text
-shared_secret      = X25519::dh(creator_ephemeral_priv, publisher_entry.pub_key)
+shared_secret      = X25519::dh(creator_ephemeral_priv, publisher_entry.encryption_pub_key)
 upload_content_key = HKDF-SHA256(shared_secret, "veritas/conduit/v2/upload-content-key", 32)
 nonce_base         = HKDF-SHA256(shared_secret, "veritas/conduit/v2/nonce", 12)
 

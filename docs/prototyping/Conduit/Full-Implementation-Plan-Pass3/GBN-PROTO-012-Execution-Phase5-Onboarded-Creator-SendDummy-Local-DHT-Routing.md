@@ -153,16 +153,19 @@ Smoke 3 can prove the §6 / §9.2 trust boundary holds in the new local-DHT rout
 creator_ephemeral_x25519_keypair = X25519::new()
 shared_secret = X25519::dh(
   creator_ephemeral_x25519_keypair.private,
-  publisher_entry.pub_key                  // X25519 pubkey from local DHT publisher_entry
+  publisher_entry.encryption_pub_key       // X25519 pubkey seeded into local DHT
 )
 hkdf_input = "veritas/conduit/v2/upload-content-key"
 upload_content_key = HKDF-SHA256(shared_secret, hkdf_input, 32 bytes)
 nonce_base = HKDF-SHA256(shared_secret, "veritas/conduit/v2/nonce", 12 bytes)
 ```
 
-The Publisher's X25519 pubkey is read from the local-DHT `publisher_entry.pub_key`
-(per Phase 1, this entry's pubkey is validated against the configured Publisher trust
-root — no `publisher_sig` is involved).
+The Publisher's X25519 pubkey is read from the local-DHT
+`publisher_entry.encryption_pub_key`. A legacy fallback may use
+`publisher_entry.pub_key`, but Smoke 3 must fail before `SendDummy` if the
+bootstrap-populated Publisher encryption key is missing. The Publisher signing
+`pub_key` remains the configured trust root for validating signed DHT entries; no
+`publisher_sig` is involved on the `publisher_entry` itself.
 
 ### Frame Build
 
@@ -247,7 +250,7 @@ and `force_bridge_failure=true` invocations.
 
 ## Observability
 
-8 events tagged with `chain_id`, `actor_id`, `route_source`, selected bridge ids,
+9 events tagged with `chain_id`, `actor_id`, `route_source`, selected bridge ids,
 ciphertext bytes count, force-failure flag:
 
 - `creator_send_dummy_requested`
@@ -259,10 +262,12 @@ ciphertext bytes count, force-failure flag:
   content)
 - `receiver_dummy_frame_ingested` (Publisher receiver surface; logs decryption
   success and plaintext_hash match)
+- `publisher_dummy_payload_validated` (Publisher authority decrypts the envelope and
+  validates the dummy payload hash)
 - `publisher_dummy_ack_returned`
 
-These cover the §2.5 traceability events 17–24 (extending the 16-event bootup list to
-24 total when SendDummy runs after onboarding).
+These cover the §2.5 traceability events 17–25 (extending the 16-event bootup list to
+25 total when SendDummy runs after onboarding).
 
 ---
 

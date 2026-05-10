@@ -832,6 +832,217 @@ smoke_received_upload_session() {
   smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/received-upload-sessions/${session_id}" >"$output"
 }
 
+smoke_received_dummy_frame() {
+  local chain_id="$1" output="$2"
+  smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/received-dummy-frames/${chain_id}" >"$output"
+}
+
+smoke_collect_dht_evidence() {
+  local chain_id="$1" label="$2" dir safe bridge_metadata bridge_id
+  dir="$ARTIFACT_DIR/dht-evidence/$label"
+  mkdir -p "$dir/bridge-local-dht" "$dir/bridge-node-metadata" "$dir/publisher-bridge-entry"
+
+  smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/publisher-dht?chain_id=${chain_id}" \
+    >"$dir/publisher-dht.json"
+  if ! smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET /v1/admin/local-dht \
+    >"$dir/publisher-local-dht.json"; then
+    printf '{"state":"unavailable","role":"publisher"}\n' >"$dir/publisher-local-dht.json"
+  fi
+  smoke_admin_curl "$CREATOR_HOST_POD" creator-runner GET /v1/admin/local-dht \
+    >"$dir/creator-host-local-dht.json"
+  smoke_admin_curl "$CREATOR_NEW_POD" creator-runner GET /v1/admin/local-dht \
+    >"$dir/creator-new-local-dht.json"
+
+  local pod
+  for pod in "${BRIDGE_PODS[@]}"; do
+    safe="$(printf '%s' "$pod" | tr -c 'A-Za-z0-9_.-' '_')"
+    if smoke_admin_curl "$pod" exit-bridge GET /v1/admin/node-metadata \
+      >"$dir/bridge-node-metadata/${safe}.json"; then
+      bridge_metadata="$dir/bridge-node-metadata/${safe}.json"
+      bridge_id="$(python3 - "$bridge_metadata" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print(data.get("actor_id") or data.get("node_id") or "")
+PY
+)"
+      if [[ -n "$bridge_id" ]]; then
+        smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/bridges/${bridge_id}/dht-entry" \
+          >"$dir/publisher-bridge-entry/${bridge_id}.json"
+      fi
+    else
+      printf '{"error":"node_metadata_unavailable","pod":%s}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$pod")" \
+        >"$dir/bridge-node-metadata/${safe}.json"
+    fi
+    if ! smoke_admin_curl "$pod" exit-bridge GET /v1/admin/local-dht \
+      >"$dir/bridge-local-dht/${safe}.json"; then
+      printf '{"state":"unavailable","role":"bridge","pod":%s}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$pod")" \
+        >"$dir/bridge-local-dht/${safe}.json"
+    fi
+  done
+
+  python3 - "$dir" "$chain_id" "$EXPECTED_BRIDGES" <<'PY'
+import glob
+import json
+import pathlib
+import sys
+import time
+
+root = pathlib.Path(sys.argv[1])
+chain_id = sys.argv[2]
+expected = int(sys.argv[3])
+now_ms = int(time.time() * 1000)
+
+def fail(code, **detail):
+    raise SystemExit(json.dumps({"failure": code, **detail}, sort_keys=True))
+
+publisher = json.load(open(root / "publisher-dht.json", encoding="utf-8"))
+creator_new = json.load(open(root / "creator-new-local-dht.json", encoding="utf-8"))
+creator_host = json.load(open(root / "creator-host-local-dht.json", encoding="utf-8"))
+publisher_entries = publisher.get("bridge_dht_entries") or []
+publisher_ids = {entry.get("bridge_id") for entry in publisher_entries if entry.get("bridge_id")}
+creator_entries = creator_new.get("bridge_entries") or []
+creator_ids = {entry.get("bridge_id") for entry in creator_entries if entry.get("bridge_id")}
+active_creator_ids = {
+    entry.get("bridge_id")
+    for entry in creator_entries
+    if entry.get("bridge_id")
+    and entry.get("active") is True
+    and entry.get("reachability_class") != "relay_only"
+    and int(entry.get("entry_expiry_ms") or 0) > now_ms
+    and int(entry.get("lease_expiry_ms") or 0) > now_ms
+}
+tunnel_ids = {
+    tunnel.get("peer_id")
+    for tunnel in creator_new.get("active_tunnels") or []
+    if tunnel.get("peer_role") == "exit_bridge"
+}
+bridge_metadata_ids = set()
+for path in glob.glob(str(root / "bridge-node-metadata" / "*.json")):
+    data = json.load(open(path, encoding="utf-8"))
+    actor_id = data.get("actor_id") or data.get("node_id")
+    if actor_id:
+        bridge_metadata_ids.add(actor_id)
+per_entry_ids = set()
+for path in glob.glob(str(root / "publisher-bridge-entry" / "*.json")):
+    data = json.load(open(path, encoding="utf-8"))
+    bridge = data.get("bridge") or data
+    bridge_id = bridge.get("bridge_id")
+    if bridge_id:
+        per_entry_ids.add(bridge_id)
+
+if publisher.get("chain_id") != chain_id:
+    fail("publisher_dht_chain_id_mismatch", actual=publisher.get("chain_id"), expected=chain_id)
+if len(publisher_ids) != expected:
+    fail("publisher_dht_count_mismatch", actual=len(publisher_ids), expected=expected, ids=sorted(publisher_ids))
+if len(creator_ids) != expected:
+    fail("creator_dht_count_mismatch", actual=len(creator_ids), expected=expected, ids=sorted(creator_ids))
+if publisher_ids != creator_ids:
+    fail("publisher_creator_dht_mismatch", publisher=sorted(publisher_ids), creator=sorted(creator_ids))
+if active_creator_ids != publisher_ids:
+    fail("creator_active_dht_mismatch", active=sorted(active_creator_ids), expected=sorted(publisher_ids))
+if not publisher_ids.issubset(tunnel_ids):
+    fail("creator_active_tunnel_mismatch", missing=sorted(publisher_ids - tunnel_ids))
+if bridge_metadata_ids and bridge_metadata_ids != publisher_ids:
+    fail("bridge_metadata_dht_mismatch", metadata=sorted(bridge_metadata_ids), publisher=sorted(publisher_ids))
+if per_entry_ids != publisher_ids:
+    fail("publisher_per_bridge_entry_mismatch", per_entry=sorted(per_entry_ids), publisher=sorted(publisher_ids))
+publisher_entry = creator_new.get("publisher_entry") or {}
+if not publisher_entry.get("encryption_pub_key"):
+    fail("creator_missing_publisher_encryption_key")
+if not creator_new.get("creator_entry"):
+    fail("creator_missing_self_dht_entry")
+if not creator_new.get("host_creator_entry"):
+    fail("creator_missing_host_dht_entry")
+if creator_new.get("self_onboarding_state") != "onboarded":
+    fail("creator_not_onboarded", state=creator_new.get("self_onboarding_state"))
+
+summary = {
+    "chain_id": chain_id,
+    "publisher_dht_entry_count": len(publisher_ids),
+    "creator_new_dht_entry_count": len(creator_ids),
+    "creator_new_active_bridge_count": len(active_creator_ids),
+    "creator_new_active_tunnel_count": len(tunnel_ids & publisher_ids),
+    "bridge_metadata_count": len(bridge_metadata_ids),
+    "publisher_per_bridge_entry_count": len(per_entry_ids),
+    "publisher_bridge_ids": sorted(publisher_ids),
+    "creator_new_bridge_ids": sorted(creator_ids),
+    "bridge_metadata_ids": sorted(bridge_metadata_ids),
+    "host_creator_state": creator_host.get("host_role_state"),
+    "new_creator_state": creator_new.get("self_onboarding_state"),
+    "publisher_encryption_key_present": True,
+}
+with open(root / "dht-summary.json", "w", encoding="utf-8") as handle:
+    json.dump(summary, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+smoke_collect_chainid_log_evidence() {
+  local chain_id="$1" label="$2"
+  shift 2
+  local dir="$ARTIFACT_DIR/chainid-evidence/$label"
+  mkdir -p "$dir/bridges"
+
+  kubectl -n "$NAMESPACE" logs "$CREATOR_NEW_POD" -c creator-runner --since=30m 2>/dev/null |
+    grep -F "$chain_id" >"$dir/creator-new.log" || true
+  kubectl -n "$NAMESPACE" logs "$AUTHORITY_POD" -c publisher-authority --since=30m 2>/dev/null |
+    grep -F "$chain_id" >"$dir/publisher-authority.log" || true
+  kubectl -n "$NAMESPACE" logs "$RECEIVER_POD" -c publisher-receiver --since=30m 2>/dev/null |
+    grep -F "$chain_id" >"$dir/publisher-receiver.log" || true
+
+  local bridge_id safe
+  for bridge_id in "$@"; do
+    [[ -n "$bridge_id" ]] || continue
+    safe="$(printf '%s' "$bridge_id" | tr -c 'A-Za-z0-9_.-' '_')"
+    kubectl -n "$NAMESPACE" logs "$bridge_id" -c exit-bridge --since=30m 2>/dev/null |
+      grep -F "$chain_id" >"$dir/bridges/${safe}.log" || true
+  done
+
+  python3 - "$dir" "$chain_id" "$@" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+chain_id = sys.argv[2]
+bridges = [value for value in sys.argv[3:] if value]
+
+def line_count(path):
+    if not path.exists():
+        return 0
+    return sum(1 for line in path.read_text(errors="ignore").splitlines() if chain_id in line)
+
+creator = line_count(root / "creator-new.log")
+authority = line_count(root / "publisher-authority.log")
+receiver = line_count(root / "publisher-receiver.log")
+bridge_counts = {}
+for bridge in bridges:
+    safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in bridge)
+    bridge_counts[bridge] = line_count(root / "bridges" / f"{safe}.log")
+missing = []
+if creator == 0:
+    missing.append("creator-new")
+if authority + receiver == 0:
+    missing.append("publisher")
+for bridge, count in bridge_counts.items():
+    if count == 0:
+        missing.append(bridge)
+if missing:
+    raise SystemExit(json.dumps({"failure": "missing_chainid_log_evidence", "chain_id": chain_id, "missing": missing}, sort_keys=True))
+summary = {
+    "chain_id": chain_id,
+    "creator_new_log_lines": creator,
+    "publisher_authority_log_lines": authority,
+    "publisher_receiver_log_lines": receiver,
+    "bridge_log_lines": bridge_counts,
+}
+with open(root / "chainid-summary.json", "w", encoding="utf-8") as handle:
+    json.dump(summary, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
 smoke_json_result_count() {
   python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(len(data.get("data", {}).get("result", data.get("traces", []))))' "$1"
 }

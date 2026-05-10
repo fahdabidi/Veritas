@@ -214,6 +214,59 @@ do_initialize_publisher_dht() {
   echo "  Publisher DHT initialized bridge_ids: ${ids:-unknown}" >&2
 }
 
+do_dump_publisher_dht() {
+  local authority_idx result count ids chain_id path
+  authority_idx="$(_seed_actions_pick_surface authority AUTHORITY)"
+  chain_id="$(_seed_actions_chain_id dump-publisher-dht publisher)"
+  path="$(_seed_actions_path_with_chain_id /v1/admin/publisher-dht "$chain_id")"
+  result="$(_curl_admin "$authority_idx" GET "$path")"
+  printf '%s\n' "$result" | _pretty_json
+
+  chain_id="$(printf '%s' "$result" | _seed_actions_json_get chain_id)"
+  count="$(printf '%s' "$result" | _seed_actions_json_get publisher_dht_entry_count)"
+  ids="$(printf '%s' "$result" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("bridge_ids") or []))' 2>/dev/null || true)"
+  echo "  Chain ID: ${chain_id:-unknown}" >&2
+  echo "  Publisher DHT entry count: ${count:-unknown}" >&2
+  echo "  Publisher DHT bridge_ids: ${ids:-unknown}" >&2
+}
+
+do_dump_node_dht() {
+  local idx role result chain_id path state count ids
+  idx="$(_pick_node "Pick node to dump role-specific DHT state:")"
+  role="${NODE_ROLES[$idx]}"
+  chain_id="$(_seed_actions_chain_id dump-node-dht "${NODE_LABELS[$idx]%% *}")"
+  case "$role" in
+    AUTHORITY)
+      path="$(_seed_actions_path_with_chain_id /v1/admin/publisher-dht "$chain_id")"
+      result="$(_curl_admin "$idx" GET "$path")"
+      printf '%s\n' "$result" | _pretty_json
+      count="$(printf '%s' "$result" | _seed_actions_json_get publisher_dht_entry_count)"
+      ids="$(printf '%s' "$result" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("bridge_ids") or []))' 2>/dev/null || true)"
+      echo "  Node role: AUTHORITY" >&2
+      echo "  DHT surface: Publisher bridge DHT" >&2
+      echo "  Chain ID: ${chain_id:-unknown}" >&2
+      echo "  Entry count: ${count:-unknown}" >&2
+      echo "  Bridge IDs: ${ids:-unknown}" >&2
+      ;;
+    CREATOR)
+      result="$(_curl_admin "$idx" GET /v1/admin/local-dht)"
+      printf '%s\n' "$result" | _pretty_json
+      echo "  Node role: CREATOR" >&2
+      echo "  DHT surface: creator local DHT" >&2
+      echo "  Summary: $(printf '%s' "$result" | _seed_actions_local_dht_summary)" >&2
+      ;;
+    *)
+      result="$(_curl_admin "$idx" GET /v1/admin/local-dht)"
+      printf '%s\n' "$result" | _pretty_json
+      state="$(printf '%s' "$result" | _seed_actions_json_get state)"
+      echo "  Node role: $role" >&2
+      echo "  DHT surface: role local DHT" >&2
+      echo "  State: ${state:-unknown}" >&2
+      echo "  Note: ExitBridge and receiver nodes do not maintain creator local DHT state in the current V2 prototype." >&2
+      ;;
+  esac
+}
+
 do_seed_host_creator() {
   local host_idx authority_idx receiver_idx bridge_idx
   local host_meta authority_meta receiver_meta bridge_meta bridge_id dht_response bridge_entry

@@ -510,6 +510,8 @@ main() {
       "AdminMetrics" \
       "LiveMetrics" \
       "InitializePublisherDht" \
+      "DumpPublisherDht" \
+      "DumpNodeDht" \
       "SeedHostCreator" \
       "SeedNewCreator" \
       "DumpLocalDht" \
@@ -537,6 +539,8 @@ main() {
         AdminMetrics) do_admin_metrics ;;
         LiveMetrics) do_live_metrics ;;
         InitializePublisherDht) do_initialize_publisher_dht ;;
+        DumpPublisherDht) do_dump_publisher_dht ;;
+        DumpNodeDht) do_dump_node_dht ;;
         SeedHostCreator) do_seed_host_creator ;;
         SeedNewCreator) do_seed_new_creator ;;
         DumpLocalDht) do_dump_local_dht ;;

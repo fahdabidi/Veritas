@@ -66,7 +66,9 @@ smoke_require_deps
 smoke_artifact_dir smoke-2-discovery >/dev/null
 trap 'status=$?; if [[ $status -ne 0 ]]; then smoke_collect_diagnostics; fi; smoke_stop_observability; echo "Artifacts: $ARTIFACT_DIR"; exit $status' EXIT
 
-mkdir -p "$ARTIFACT_DIR/tempo" "$ARTIFACT_DIR/loki" "$ARTIFACT_DIR/pod-logs"
+mkdir -p "$ARTIFACT_DIR/tempo" "$ARTIFACT_DIR/loki" "$ARTIFACT_DIR/pod-logs" "$ARTIFACT_DIR/publisher-dht"
+STEP_RESULTS="$ARTIFACT_DIR/step-results.jsonl"
+: >"$STEP_RESULTS"
 
 json_string() {
   python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
@@ -101,6 +103,27 @@ now_ms() {
 write_json_arg() {
   local raw="$1" path="$2"
   python3 -c 'import json,sys; json.dump(json.loads(sys.argv[1]), open(sys.argv[2], "w", encoding="utf-8"), indent=2, sort_keys=True); print()' "$raw" "$path" >/dev/null
+}
+
+record_step() {
+  local name="$1" endpoint="$2" expected="$3" observed="$4" artifact="$5"
+  python3 - "$STEP_RESULTS" "$name" "$endpoint" "$expected" "$observed" "$artifact" <<'PY'
+import json
+import sys
+import time
+
+path, name, endpoint, expected, observed, artifact = sys.argv[1:7]
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "recorded_at_ms": int(time.time() * 1000),
+        "step": name,
+        "endpoint": endpoint,
+        "expected": expected,
+        "observed": observed,
+        "artifact": artifact,
+        "status": "pass",
+    }, sort_keys=True) + "\n")
+PY
 }
 
 build_seed_host_payload() {
@@ -214,6 +237,26 @@ reset_creator() {
   write_json_arg "$response" "$output"
 }
 
+assert_creator_reset() {
+  local pod="$1" output="$2" response
+  response="$(smoke_admin_curl "$pod" creator-runner GET /v1/admin/local-dht)"
+  write_json_arg "$response" "$output"
+  python3 - "$output" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+table = json.load(open(path, encoding="utf-8"))
+if table.get("self_onboarding_state") != "none":
+    raise SystemExit(f"creator state was not reset: {table.get('self_onboarding_state')}")
+for key in ("publisher_entry", "creator_entry", "host_creator_entry", "current_bootstrap_session", "host_seed_state", "new_creator_seed_state"):
+    if table.get(key) is not None:
+        raise SystemExit(f"creator reset left {key} populated")
+if table.get("bridge_entries") or table.get("active_tunnels"):
+    raise SystemExit("creator reset left bridge entries or active tunnels populated")
+PY
+}
+
 wait_for_terminal_local_dht() {
   local deadline response state summary
   deadline=$((SECONDS + BOOTSTRAP_TIMEOUT_SECONDS))
@@ -248,11 +291,108 @@ PY
   return 1
 }
 
+dump_and_assert_publisher_dht() {
+  local dump_path="$ARTIFACT_DIR/publisher-dht/publisher-dht.json"
+  local per_entry_dir="$ARTIFACT_DIR/publisher-dht/per-entry"
+  mkdir -p "$per_entry_dir"
+  smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/publisher-dht?chain_id=${CHAIN_ID}" \
+    >"$dump_path"
+
+  local bridge_id safe_id
+  while IFS= read -r bridge_id; do
+    [[ -n "$bridge_id" ]] || continue
+    safe_id="$(printf '%s' "$bridge_id" | tr -c 'A-Za-z0-9_.-' '_')"
+    smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/bridges/${bridge_id}/dht-entry" \
+      >"$per_entry_dir/${safe_id}.json"
+  done < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1], encoding="utf-8")).get("bridge_ids") or []))' "$dump_path")
+
+  python3 - \
+    "$dump_path" \
+    "$ARTIFACT_DIR/initialize-publisher-dht-result.json" \
+    "$ARTIFACT_DIR/deployed-bridge-ids.json" \
+    "$per_entry_dir" \
+    "$CHAIN_ID" \
+    "$EXPECTED_BRIDGES" \
+    "$ARTIFACT_DIR/failure-evidence.json" \
+    "$ARTIFACT_DIR/publisher-dht/publisher-dht-summary.json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+dump_path, init_path, ids_path, per_entry_dir, chain_id, expected_count, failure_path, summary_path = sys.argv[1:9]
+expected_count = int(expected_count)
+now_ms = int(time.time() * 1000)
+
+def fail(code, **detail):
+    detail["code"] = code
+    json.dump(detail, open(failure_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+    raise SystemExit(f"{code}: {detail}")
+
+dump = json.load(open(dump_path, encoding="utf-8"))
+init = json.load(open(init_path, encoding="utf-8"))
+expected_ids = set(json.load(open(ids_path, encoding="utf-8")))
+entries = dump.get("bridge_dht_entries") or []
+ids = dump.get("bridge_ids") or [entry.get("bridge_id") for entry in entries]
+
+if dump.get("chain_id") != chain_id:
+    fail("publisher_dht_chain_mismatch", actual=dump.get("chain_id"), expected=chain_id)
+if len(entries) != expected_count:
+    fail("publisher_dht_entry_count_mismatch", actual=len(entries), expected=expected_count)
+if dump.get("publisher_dht_entry_count") != expected_count:
+    fail("publisher_dht_reported_count_mismatch", actual=dump.get("publisher_dht_entry_count"), expected=expected_count)
+if set(ids) != expected_ids:
+    fail("publisher_dht_id_set_mismatch", actual=sorted(ids), expected=sorted(expected_ids))
+if set(init.get("bridge_ids") or []) != expected_ids:
+    fail("publisher_dht_init_id_set_mismatch", actual=sorted(init.get("bridge_ids") or []), expected=sorted(expected_ids))
+
+by_id = {}
+for entry in entries:
+    bridge_id = entry.get("bridge_id")
+    by_id[bridge_id] = entry
+    if not bridge_id:
+        fail("publisher_dht_entry_missing_bridge_id")
+    if not entry.get("active"):
+        fail("publisher_dht_entry_inactive", bridge_id=bridge_id)
+    if not entry.get("publisher_sig"):
+        fail("publisher_dht_entry_missing_signature", bridge_id=bridge_id)
+    if int(entry.get("lease_expiry_ms") or 0) <= now_ms:
+        fail("publisher_dht_entry_lease_expired", bridge_id=bridge_id, lease_expiry_ms=entry.get("lease_expiry_ms"), now_ms=now_ms)
+    if int(entry.get("entry_expiry_ms") or 0) <= now_ms:
+        fail("publisher_dht_entry_expired", bridge_id=bridge_id, entry_expiry_ms=entry.get("entry_expiry_ms"), now_ms=now_ms)
+    if entry.get("reachability_class") not in {"direct", "brokered"}:
+        fail("publisher_dht_entry_bad_reachability", bridge_id=bridge_id, reachability_class=entry.get("reachability_class"))
+    if not entry.get("ingress_endpoints"):
+        fail("publisher_dht_entry_missing_ingress", bridge_id=bridge_id)
+    if not entry.get("capabilities"):
+        fail("publisher_dht_entry_missing_capabilities", bridge_id=bridge_id)
+
+for bridge_id in sorted(expected_ids):
+    safe_id = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in bridge_id)
+    path = Path(per_entry_dir) / f"{safe_id}.json"
+    if not path.exists():
+        fail("publisher_dht_per_entry_missing_file", bridge_id=bridge_id)
+    response = json.load(open(path, encoding="utf-8"))
+    entry = response.get("bridge")
+    if entry != by_id.get(bridge_id):
+        fail("publisher_dht_per_entry_mismatch", bridge_id=bridge_id)
+
+json.dump({
+    "chain_id": chain_id,
+    "publisher_dht_entry_count": len(entries),
+    "publisher_bridge_ids": sorted(ids),
+    "active_bridge_count": dump.get("active_bridge_count"),
+    "per_entry_fetch_count": len(list(Path(per_entry_dir).glob("*.json"))),
+}, open(summary_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+}
+
 assert_bootstrap_state() {
   python3 - \
     "$ARTIFACT_DIR/local-dht-final.json" \
     "$ARTIFACT_DIR/bootstrap-session.json" \
     "$ARTIFACT_DIR/deployed-bridge-ids.json" \
+    "$ARTIFACT_DIR/publisher-dht/publisher-dht.json" \
     "$CHAIN_ID" \
     "$BRIDGE_A_ID" \
     "$EXPECTED_BRIDGES" \
@@ -264,7 +404,7 @@ import json
 import sys
 import time
 
-local_path, session_path, ids_path, chain_id, bridge_a_id, expected_count, min_active, allow_partial, failure_path, summary_path = sys.argv[1:11]
+local_path, session_path, ids_path, publisher_path, chain_id, bridge_a_id, expected_count, min_active, allow_partial, failure_path, summary_path = sys.argv[1:12]
 expected_count = int(expected_count)
 min_active = int(min_active)
 allow_partial = allow_partial == "1"
@@ -279,6 +419,16 @@ table = json.load(open(local_path, encoding="utf-8"))
 session_response = json.load(open(session_path, encoding="utf-8"))
 session = session_response.get("bootstrap_session") or {}
 expected_ids = set(json.load(open(ids_path, encoding="utf-8")))
+publisher_dump = json.load(open(publisher_path, encoding="utf-8"))
+publisher_entries = publisher_dump.get("bridge_dht_entries") or []
+publisher_ids = set(publisher_dump.get("bridge_ids") or [entry.get("bridge_id") for entry in publisher_entries])
+
+if publisher_dump.get("chain_id") != chain_id:
+    fail("publisher_dht_chain_mismatch", actual=publisher_dump.get("chain_id"), expected=chain_id)
+if publisher_ids != expected_ids:
+    fail("publisher_dht_expected_id_mismatch", actual=sorted(publisher_ids), expected=sorted(expected_ids))
+if len(publisher_entries) != expected_count:
+    fail("publisher_dht_entry_count_mismatch", actual=len(publisher_entries), expected=expected_count)
 
 state = table.get("self_onboarding_state")
 bridges = table.get("bridge_entries") or []
@@ -325,6 +475,8 @@ for entry in bridges:
 
 if seen_ids != expected_ids:
     fail("bridge_id_set_mismatch", seen=sorted(seen_ids), expected=sorted(expected_ids))
+if seen_ids != publisher_ids:
+    fail("creator_dht_publisher_dht_id_mismatch", creator=sorted(seen_ids), publisher=sorted(publisher_ids))
 
 current = table.get("current_bootstrap_session") or {}
 bootstrap_session_id = current.get("session_id")
@@ -360,8 +512,15 @@ if not any(entry.get("bridge_id") == seed_bridge_id and entry.get("active") for 
     fail("seed_bridge_not_active", seed_bridge_id=seed_bridge_id)
 if len(session.get("bridge_ids") or []) != expected_count:
     fail("publisher_session_bridge_count_mismatch", bridge_ids=session.get("bridge_ids") or [])
-if len(((session.get("bridge_set") or {}).get("bridge_dht_entries") or [])) != expected_count:
+session_bridge_ids = set(session.get("bridge_ids") or [])
+if session_bridge_ids != publisher_ids:
+    fail("publisher_session_publisher_dht_id_mismatch", session=sorted(session_bridge_ids), publisher=sorted(publisher_ids))
+session_bridge_set_entries = ((session.get("bridge_set") or {}).get("bridge_dht_entries") or [])
+if len(session_bridge_set_entries) != expected_count:
     fail("publisher_session_bridge_set_count_mismatch")
+session_bridge_set_ids = {entry.get("bridge_id") for entry in session_bridge_set_entries}
+if session_bridge_set_ids != publisher_ids:
+    fail("publisher_session_bridge_set_publisher_dht_id_mismatch", session=sorted(session_bridge_set_ids), publisher=sorted(publisher_ids))
 
 summary = {
     "state": state,
@@ -372,6 +531,8 @@ summary = {
     "host_creator_id": host_creator_id,
     "relay_bridge_id": relay_bridge_id,
     "seed_bridge_id": seed_bridge_id,
+    "publisher_dht_entry_count": len(publisher_entries),
+    "publisher_dht_bridge_ids": sorted(publisher_ids),
 }
 json.dump(summary, open(summary_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
 PY
@@ -465,6 +626,52 @@ PY
   return 1
 }
 
+collect_bootstrap_pod_logs() {
+  local check pod rest container
+  for check in "${NODE_CHECKS[@]}"; do
+    pod="${check%%:*}"
+    rest="${check#*:}"
+    container="${rest%%:*}"
+    kubectl -n "$NAMESPACE" logs --since=20m "$pod" -c "$container" \
+      --insecure-skip-tls-verify-backend=true >"$ARTIFACT_DIR/pod-logs/${pod}.log" 2>/dev/null || true
+  done
+}
+
+assert_pod_log_bootstrap_events() {
+  python3 - "$ARTIFACT_DIR/pod-logs" "$CHAIN_ID" "$ARTIFACT_DIR/pod-log-events.json" "$ARTIFACT_DIR/pod-log-missing-events.txt" "${POD_LOG_EVENTS[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+log_dir = Path(sys.argv[1])
+chain_id = sys.argv[2]
+counts_path = sys.argv[3]
+missing_path = sys.argv[4]
+events = sys.argv[5:]
+
+lines = []
+for path in sorted(log_dir.glob("*.log")):
+    for line in path.read_text(errors="ignore").splitlines():
+        if chain_id in line:
+            lines.append(line)
+
+counts = {event: sum(1 for line in lines if event in line) for event in events}
+counts["_chain_id_line_count"] = len(lines)
+json.dump(counts, open(counts_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+missing = [event for event in events if counts.get(event, 0) < 1]
+if not lines:
+    missing.insert(0, "chain_id_absent_from_pod_logs")
+if missing:
+    with open(missing_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(missing) + "\n")
+    raise SystemExit(f"pod logs missing bootstrap ChainID evidence: {missing}")
+try:
+    Path(missing_path).unlink()
+except FileNotFoundError:
+    pass
+PY
+}
+
 BOOT_EVENTS=(
   host_creator_seed_stored
   new_creator_seed_stored
@@ -482,6 +689,19 @@ BOOT_EVENTS=(
   seed_bridge_bridge_set_returned
   new_creator_local_dht_updated
   new_creator_bridge_entry_active
+  new_creator_bootstrap_completed
+)
+
+POD_LOG_EVENTS=(
+  host_creator_seed_requested
+  host_creator_seed_stored
+  publisher_dht_initialized
+  publisher_dht_dumped
+  new_creator_seed_requested
+  new_creator_seed_stored
+  publisher_bootstrap_payload_created
+  publisher_seed_bridge_selected
+  "${BOOT_EVENTS[@]}"
 )
 
 echo "Checking Pass 3 Conduit rollout in namespace '$NAMESPACE'..."
@@ -508,6 +728,10 @@ NEW_ACTOR_ID="$(actor_id_from_metadata "$NEW_METADATA")"
 if [[ "$HOST_ACTOR_ID" != "host-creator" || "$NEW_ACTOR_ID" != "new-creator" ]]; then
   smoke_fail "expected creator actors host-creator/new-creator, got host=$HOST_ACTOR_ID new=$NEW_ACTOR_ID"
 fi
+record_step "node metadata" "GET /v1/admin/node-metadata" \
+  "authority, receiver, host-creator, and new-creator metadata available" \
+  "host=$HOST_ACTOR_ID new=$NEW_ACTOR_ID" \
+  "authority-metadata.json, receiver-metadata.json, creator-host-metadata.json, creator-new-metadata.json"
 
 DEPLOYED_BRIDGE_IDS=()
 for pod in "${BRIDGE_PODS[@]}"; do
@@ -518,6 +742,10 @@ done
 printf '%s\n' "${DEPLOYED_BRIDGE_IDS[@]}" |
   python3 -c 'import json,sys; json.dump(sorted([line.strip() for line in sys.stdin if line.strip()]), sys.stdout, indent=2); print()' \
   >"$ARTIFACT_DIR/deployed-bridge-ids.json"
+record_step "bridge metadata discovery" "GET /v1/admin/node-metadata" \
+  "$EXPECTED_BRIDGES bridge node metadata responses" \
+  "${#DEPLOYED_BRIDGE_IDS[@]} bridge ids discovered" \
+  "deployed-bridge-ids.json"
 
 BRIDGE_A_POD="${BRIDGE_PODS[0]}"
 BRIDGE_A_METADATA="$(smoke_admin_curl "$BRIDGE_A_POD" exit-bridge GET /v1/admin/node-metadata)"
@@ -528,11 +756,21 @@ echo "Smoke 2 chain_id=$CHAIN_ID HostCreator=$HOST_ACTOR_ID NewCreator=$NEW_ACTO
 echo "Resetting creator local DHT state..."
 reset_creator "$CREATOR_HOST_POD" "$CHAIN_ID" "$ARTIFACT_DIR/reset-host-creator-result.json"
 reset_creator "$CREATOR_NEW_POD" "$CHAIN_ID" "$ARTIFACT_DIR/reset-new-creator-result.json"
+assert_creator_reset "$CREATOR_HOST_POD" "$ARTIFACT_DIR/reset-host-creator-local-dht.json"
+assert_creator_reset "$CREATOR_NEW_POD" "$ARTIFACT_DIR/reset-new-creator-local-dht.json"
+record_step "creator local DHT reset" "POST /v1/admin/reset-creator-state" \
+  "host and new creator local DHT tables empty" \
+  "both creators report self_onboarding_state=none" \
+  "reset-host-creator-local-dht.json, reset-new-creator-local-dht.json"
 
 echo "Fetching Publisher-signed ExitBridgeA DHT entry..."
 smoke_admin_curl "$AUTHORITY_POD" publisher-authority GET "/v1/admin/bridges/${BRIDGE_A_ID}/dht-entry" \
   >"$ARTIFACT_DIR/bridge-a-dht-entry.json"
 BRIDGE_A_ENTRY="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1], encoding="utf-8"))["bridge"], separators=(",", ":")))' "$ARTIFACT_DIR/bridge-a-dht-entry.json")"
+record_step "exit bridge A DHT entry" "GET /v1/admin/bridges/{bridge_id}/dht-entry" \
+  "Publisher returns signed DHT entry for selected ExitBridgeA" \
+  "bridge_id=$BRIDGE_A_ID" \
+  "bridge-a-dht-entry.json"
 
 ENTRY_EXPIRY_MS="$(( $(now_ms) + ${VERITAS_SEED_ENTRY_TTL_MS:-300000} ))"
 SEED_HOST_PAYLOAD="$(build_seed_host_payload "$HOST_METADATA" "$AUTHORITY_METADATA" "$RECEIVER_METADATA" "$BRIDGE_A_ENTRY" "$ENTRY_EXPIRY_MS")"
@@ -552,6 +790,10 @@ assert data["host_creator_id"] == "host-creator", data
 assert data["host_role_state"] == "host_seeded", data
 assert data["self_onboarding_state"] == "onboarded", data
 PY
+record_step "SeedHostCreator" "POST /v1/admin/seed-host-creator" \
+  "HostCreator stores Publisher and ExitBridgeA DHT metadata" \
+  "host_creator_id=host-creator state=onboarded host_role_state=host_seeded" \
+  "seed-host-creator-result.json"
 
 echo "Initializing Publisher bridge DHT..."
 INIT_RESPONSE="$(smoke_admin_curl "$AUTHORITY_POD" publisher-authority POST "/v1/admin/publisher-dht/initialize?chain_id=${CHAIN_ID}" "{}")"
@@ -566,6 +808,17 @@ assert data["chain_id"] == chain_id, data
 assert data["initialized_bridge_count"] == expected, data
 assert data["publisher_dht_entry_count"] == expected, data
 PY
+record_step "InitializePublisherDht" "POST /v1/admin/publisher-dht/initialize" \
+  "$EXPECTED_BRIDGES active ExitBridge DHT entries stored in Publisher DHT" \
+  "initialized_bridge_count=$EXPECTED_BRIDGES publisher_dht_entry_count=$EXPECTED_BRIDGES" \
+  "initialize-publisher-dht-result.json"
+
+echo "Dumping and validating Publisher bridge DHT..."
+dump_and_assert_publisher_dht
+record_step "Publisher DHT dump" "GET /v1/admin/publisher-dht and GET /v1/admin/bridges/{bridge_id}/dht-entry" \
+  "full Publisher DHT dump and every per-bridge DHT entry match" \
+  "$EXPECTED_BRIDGES Publisher DHT entries validated" \
+  "publisher-dht/publisher-dht.json, publisher-dht/per-entry, publisher-dht/publisher-dht-summary.json"
 
 HOST_IP="${NODE_IP_BY_POD[$CREATOR_HOST_POD]:-}"
 if [[ -z "$HOST_IP" ]]; then
@@ -576,6 +829,10 @@ printf '%s' "$HOST_ENTRY_PAYLOAD" >"$ARTIFACT_DIR/host-creator-dht-sign-payload.
 HOST_ENTRY_RESPONSE="$(smoke_admin_curl "$AUTHORITY_POD" publisher-authority POST /v1/admin/creator-dht-entry "$HOST_ENTRY_PAYLOAD")"
 write_json_arg "$HOST_ENTRY_RESPONSE" "$ARTIFACT_DIR/host-creator-dht-entry.json"
 HOST_ENTRY="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1], encoding="utf-8"))["creator"], separators=(",", ":")))' "$ARTIFACT_DIR/host-creator-dht-entry.json")"
+record_step "HostCreator DHT entry" "POST /v1/admin/creator-dht-entry" \
+  "Publisher signs HostCreator DHT entry for NewCreator seed input" \
+  "host_creator_id=$HOST_ACTOR_ID" \
+  "host-creator-dht-entry.json"
 
 HOST_ADMIN_URL="http://${HOST_IP}:${ADMIN_PORT}"
 SEED_NEW_PAYLOAD="$(build_seed_new_payload "$NEW_METADATA" "$HOST_ENTRY" "$HOST_ADMIN_URL")"
@@ -588,46 +845,76 @@ BOOTSTRAP_SESSION_ID="$(json_field_from_arg "$SEED_NEW_RESPONSE" bootstrap_sessi
 if [[ -z "$BOOTSTRAP_SESSION_ID" ]]; then
   smoke_fail "SeedNewCreator did not return bootstrap_session_id"
 fi
+record_step "SeedNewCreator" "POST /v1/admin/seed-new-creator" \
+  "NewCreator starts first-contact bootstrap through HostCreator and Publisher" \
+  "bootstrap_session_id=$BOOTSTRAP_SESSION_ID" \
+  "seed-new-creator-result.json"
 
 echo "Polling creator-new local DHT until terminal state..."
 wait_for_terminal_local_dht ||
   smoke_fail "creator-new did not reach a terminal bootup state within ${BOOTSTRAP_TIMEOUT_SECONDS}s"
+record_step "NewCreator local DHT terminal state" "GET /v1/admin/local-dht" \
+  "NewCreator reaches onboarded or accepted fanout terminal state" \
+  "$(local_dht_summary_from_arg "$(cat "$ARTIFACT_DIR/local-dht-final.json")")" \
+  "local-dht-final.json, local-dht-progression.jsonl"
 
 echo "Fetching Publisher bootstrap session $BOOTSTRAP_SESSION_ID..."
 smoke_bootstrap_session_query "$CHAIN_ID" "$BOOTSTRAP_SESSION_ID" "$ARTIFACT_DIR/bootstrap-session.json"
+record_step "Publisher bootstrap session" "GET /v1/admin/bootstrap-session" \
+  "Publisher session exists and carries the same ChainID/bootstrap_session_id" \
+  "bootstrap_session_id=$BOOTSTRAP_SESSION_ID" \
+  "bootstrap-session.json"
 
 echo "Asserting local DHT and distinct actor chain..."
 assert_bootstrap_state
+record_step "Bootstrap DHT agreement" "Publisher DHT + Creator local DHT + Publisher bootstrap session" \
+  "Publisher DHT, Creator local DHT, and bootstrap session bridge ID sets match" \
+  "DHT agreement validated" \
+  "bootstrap-assertion-summary.json"
+
+echo "Collecting pod logs and validating mandatory ChainID bootstrap events..."
+collect_bootstrap_pod_logs
+assert_pod_log_bootstrap_events
+record_step "ChainID pod-log evidence" "kubectl logs --since=20m" \
+  "all required bootstrap events appear in pod logs with the Smoke 2 ChainID" \
+  "mandatory pod-log ChainID events validated" \
+  "pod-log-events.json, pod-logs/*.log"
 
 if [[ "$REQUIRE_OBSERVABILITY" -eq 1 ]]; then
-  echo "Starting Tempo port-forward and checking 16 bootstrap events..."
+  echo "Starting Tempo port-forward and checking ${#BOOT_EVENTS[@]} bootstrap events..."
   smoke_start_observability
   wait_tempo_bootstrap_events ||
-    smoke_fail "Tempo did not report all 16 Smoke 2 bootstrap events for chain_id=$CHAIN_ID within ${TRACE_TIMEOUT_SECONDS}s."
+    smoke_fail "Tempo did not report all ${#BOOT_EVENTS[@]} Smoke 2 bootstrap events for chain_id=$CHAIN_ID within ${TRACE_TIMEOUT_SECONDS}s."
 else
   printf '{}\n' >"$ARTIFACT_DIR/traces-by-event.json"
 fi
 
-for check in "${NODE_CHECKS[@]}"; do
-  pod="${check%%:*}"
-  rest="${check#*:}"
-  container="${rest%%:*}"
-  kubectl -n "$NAMESPACE" logs --since=20m "$pod" -c "$container" \
-    --insecure-skip-tls-verify-backend=true >"$ARTIFACT_DIR/pod-logs/${pod}.log" 2>/dev/null || true
-done
-
-python3 - "$ARTIFACT_DIR/bootstrap-assertion-summary.json" "$ARTIFACT_DIR/traces-by-event.json" "$ARTIFACT_DIR/summary.md" "$REQUIRE_OBSERVABILITY" <<'PY'
+python3 - "$ARTIFACT_DIR/bootstrap-assertion-summary.json" "$ARTIFACT_DIR/traces-by-event.json" "$ARTIFACT_DIR/pod-log-events.json" "$STEP_RESULTS" "$ARTIFACT_DIR/summary.md" "$REQUIRE_OBSERVABILITY" <<'PY'
 import json
 import sys
 
-summary_path, events_path, output_path, require_obs = sys.argv[1:5]
+summary_path, events_path, pod_events_path, step_results_path, output_path, require_obs = sys.argv[1:7]
 summary = json.load(open(summary_path, encoding="utf-8"))
 events = json.load(open(events_path, encoding="utf-8"))
+pod_events = json.load(open(pod_events_path, encoding="utf-8"))
+steps = [json.loads(line) for line in open(step_results_path, encoding="utf-8") if line.strip()]
 with open(output_path, "w", encoding="utf-8") as handle:
     handle.write("# Conduit Smoke 2 Discovery Summary\n\n")
     for key in ("state", "bootstrap_session_id", "new_creator_id", "host_creator_id", "relay_bridge_id", "seed_bridge_id", "bridge_count", "active_bridge_count"):
         handle.write(f"- {key}: {summary.get(key)}\n")
+    handle.write(f"- publisher_dht_entry_count: {summary.get('publisher_dht_entry_count')}\n")
     handle.write(f"- observability_required: {require_obs == '1'}\n")
+    handle.write("\n")
+    handle.write("| Step | Endpoint | Expected | Observed | Artifact |\n")
+    handle.write("|---|---|---|---|---|\n")
+    for step in steps:
+        handle.write(
+            f"| {step['step']} | `{step['endpoint']}` | {step['expected']} | {step['observed']} | `{step['artifact']}` |\n"
+        )
+    handle.write("\n")
+    handle.write("| Pod Log Event | Count |\n|---|---:|\n")
+    for key, value in pod_events.items():
+        handle.write(f"| {key} | {value} |\n")
     handle.write("\n")
     if events:
         handle.write("| Event | Tempo Count |\n|---|---:|\n")

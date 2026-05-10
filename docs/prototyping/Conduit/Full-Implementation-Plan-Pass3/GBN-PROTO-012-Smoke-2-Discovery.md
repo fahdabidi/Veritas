@@ -20,9 +20,11 @@ unchanged. The Pass 2 baseline `discovery-probe` shortcut is **not** treated as 
 Completed 2026-05-09. Phase 8 implements `k8s-smoke-discovery-v3.sh`, adds the
 Publisher authority `GET /v1/admin/bootstrap-session` inspection endpoint, and hardens
 local Tempo validation with stable memory/ballast values plus a higher TraceQL search
-limit. Live validation passed in k3d with `creator-new` onboarded, 10 active local DHT
-bridge entries, a distinct NewCreator/HostCreator/ExitBridgeA/ExitBridgeB chain, and
-all 16 bootstrap events present in Tempo.
+limit. Follow-up hardening added `GET /v1/admin/publisher-dht`, mandatory Publisher
+DHT dump/per-entry validation, mandatory ChainID pod-log validation, and a detailed
+step report. A successful Smoke 2 now requires API completion, Publisher DHT state,
+Creator local DHT state, Publisher bootstrap-session state, and ChainID evidence to
+agree.
 
 ---
 
@@ -45,11 +47,17 @@ Prove that:
    - the seed bridge entry marked `active=true`;
    - all remaining fanout bridges marked `active=true` (or at least 5 if degraded
      `fanout_partial` is acceptable).
-5. The actor chain in distributed traces matches §3.3:
+5. The Publisher DHT contains the 10 active ExitBridge DHT entries before
+   `SeedNewCreator` starts, and every per-bridge DHT entry read matches the dumped
+   Publisher DHT table.
+6. The actor chain in distributed traces matches §3.3:
    `creator-new → creator-host → ExitBridgeA → publisher-authority → ExitBridgeB →
    creator-new` (forward + return + seed handoff).
-6. All 16 bootup events from Master plan §2.5 are present in Tempo for the Smoke 2
-   bootstrap session, indexed by `chain_id` and `bootstrap_session_id`.
+7. All bootup events from Master plan §2.5, plus
+   `new_creator_bootstrap_completed`, are present in pod logs for the Smoke 2
+   `chain_id`. When observability is required, the same bootstrap events must also be
+   present in Tempo for the bootstrap session, indexed by `chain_id` and
+   `bootstrap_session_id`.
 
 ---
 
@@ -102,15 +110,19 @@ Flags:
    `/v1/admin/publisher-dht/initialize?chain_id=<chain_id>` to the Publisher
    authority surface. Assert `initialized_bridge_count == 10`,
    `publisher_dht_entry_count == 10`, and response `chain_id == <chain_id>`.
-6. **SeedNewCreator**: build the `host_creator_entry` payload from `creator-host`'s
+6. **DumpPublisherDht**: GET `/v1/admin/publisher-dht?chain_id=<chain_id>` and then
+   GET `/v1/admin/bridges/<bridge_id>/dht-entry` for every returned bridge id.
+   Assert all entries match, are signed, active, non-expired, reachable, and cover the
+   same 10 deployed ExitBridge ids.
+7. **SeedNewCreator**: build the `host_creator_entry` payload from `creator-host`'s
    metadata + seed signature. POST
    `/v1/admin/seed-new-creator?chain_id=<chain_id>` to `creator-new` with
    `start_bootstrap=true`. Assert response has
    `self_onboarding_state=bootstrapping` and echoes the same `chain_id`.
-7. Poll `GET /v1/admin/local-dht` on `creator-new` every 1 s for up to
+8. Poll `GET /v1/admin/local-dht` on `creator-new` every 1 s for up to
    `--bootstrap-timeout` s. Track every state transition.
-8. Stop when `self_onboarding_state` reaches a terminal state.
-9. Run assertions.
+9. Stop when `self_onboarding_state` reaches a terminal state.
+10. Run DHT/session assertions and mandatory pod-log ChainID assertions.
 
 ---
 
@@ -153,10 +165,11 @@ new_creator_id` must be gone. From the bootstrap session record on the Publisher
 - `seed_bridge_id != relay_bridge_id` (distinct ExitBridgeB);
 - All four ids are different.
 
-### 5.4 Trace Coverage (16 Events)
+### 5.4 Trace Coverage (17 Events)
 
-For the Smoke 2 `chain_id`, Tempo returns spans covering all 16 events from Master
-plan §2.5:
+For the Smoke 2 `chain_id`, pod logs must contain every event below. When
+`--require-observability` is enabled, Tempo must also return spans covering these
+events:
 
 Forward:
 
@@ -182,6 +195,7 @@ Seed punch and progress:
 14. `seed_bridge_bridge_set_returned`
 15. `new_creator_local_dht_updated`
 16. `new_creator_bridge_entry_active` (≥ 1 occurrence; one per active bridge)
+17. `new_creator_bootstrap_completed`
 
 Every matched span must carry the same `chain_id` echoed by SeedHostCreator,
 InitializePublisherDht, and SeedNewCreator. A span with the expected event name
@@ -208,11 +222,18 @@ Written to
 - `pods.json`
 - `chain-id.txt`
 - `seed-host-creator-result.json`
+- `initialize-publisher-dht-result.json`
+- `publisher-dht/publisher-dht.json`
+- `publisher-dht/per-entry/*.json`
+- `publisher-dht/publisher-dht-summary.json`
 - `seed-new-creator-result.json`
 - `local-dht-progression.jsonl` (one row per poll iteration)
 - `local-dht-final.json`
 - `bootstrap-session.json` (from Publisher authority)
-- `traces-by-event.json` (16 events, span counts per event)
+- `pod-log-events.json` (mandatory ChainID event counts from pod logs)
+- `pod-logs/*.log`
+- `step-results.jsonl`
+- `traces-by-event.json` (Tempo event counts when observability is required)
 - `trace-evidence.tempo-traces.json` (full trace dump)
 - `failure-evidence.json` (only if test fails: which assertion, which value)
 - `summary.md`
@@ -227,7 +248,7 @@ Written to
 | `seed_tunnel_failed` | UDP punch port not exposed in k8s; check exit-bridge service ports |
 | `fanout_failed` | Publisher BridgeBatchAssign not reaching remaining bridges; check authority control session |
 | Local DHT bridge count != 10 | Publisher created bootstrap with wrong count; check `bridge_count_target` in publisher logic |
-| 16-event trace missing return-path events | T0.5 not implemented; Phase 4 return-path block missing |
+| Bootstrap trace missing return-path events | T0.5 not implemented; Phase 4 return-path block missing |
 | Tempo search returns only a subset of events | TraceQL result limit too low; `VERITAS_TEMPO_SEARCH_LIMIT` defaults to 200 for Smoke 2 |
 | Tempo port-forward fails or pod restarts | Observability backend degraded; verify Tempo is not OOM-killed and that `tempo.memBallastSizeMbs` is below its memory limit |
 | All four actor ids equal | Pre-Pass-3 shortcut still in place; Phase 3 was not actually completed |
@@ -256,9 +277,43 @@ Written to
 
 - `bash -n prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-discovery-v3.sh` passes.
 - Against a fresh `k8s-up.sh` cluster, the script exits 0.
-- All 16 events present in Tempo.
+- Mandatory ChainID bootstrap events present in pod logs; when observability is
+  required, the same bootstrap events are present in Tempo.
 - Distinct actor chain proven.
 - Live local validation passed on 2026-05-09 with artifacts under
   `prototype/gbn-bridge-proto/target/k8s-smoke-artifacts/smoke-2-discovery/20260508-184504-1982332/`.
 - `git diff --stat -- docs/prototyping/Conduit/Full-Implementation-Plan-Pass2/` is empty.
 - V1 (`prototype/gbn-proto/**`) is unchanged.
+
+---
+
+## 11. Follow-Up Hardening
+
+Bootstrap success now requires three independent proof surfaces to agree:
+
+- DHT/state dumps: `GET /v1/admin/publisher-dht`,
+  `GET /v1/admin/bridges/<bridge_id>/dht-entry`, and
+  `GET /v1/admin/local-dht`.
+- ChainID evidence: mandatory pod-log event checks, with optional Tempo validation
+  when `--require-observability` is enabled.
+- API completions: every mutation response is written to artifacts and asserted
+  before the next step runs.
+
+Operator support:
+
+- `DumpPublisherDht` dumps the Publisher authority bridge DHT table.
+- `DumpNodeDht` is role-aware: Publisher authority returns Publisher DHT, creators
+  return creator local DHT, and ExitBridge/receiver nodes return the explicit
+  not-applicable local-DHT response for their role.
+- `CollectTraces` remains the ChainID trace/log collector across all configured
+  Conduit log groups.
+
+Smoke 2 artifacts added by this hardening:
+
+- `publisher-dht/publisher-dht.json`
+- `publisher-dht/per-entry/*.json`
+- `publisher-dht/publisher-dht-summary.json`
+- `pod-log-events.json`
+- `step-results.jsonl`
+
+The terminal bootstrap trace set now includes `new_creator_bootstrap_completed`.

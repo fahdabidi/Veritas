@@ -404,6 +404,17 @@ pub struct BridgeDhtEntryResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublisherDhtAdminResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    pub generated_at_ms: u64,
+    pub active_bridge_count: usize,
+    pub publisher_dht_entry_count: usize,
+    pub bridge_ids: Vec<String>,
+    pub bridge_dht_entries: Vec<BridgeDhtEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatorDhtEntrySignRequest {
     pub creator: CreatorDhtEntryUnsigned,
     #[serde(default = "default_true")]
@@ -873,6 +884,9 @@ fn route_request(state: &AdminState, request: HttpRequest) -> Vec<u8> {
                 Ok(query) => bootstrap_session(state, query),
                 Err(message) => error_response(400, "bad_query", &message),
             }
+        }
+        ("GET", path) if path == AuthorityRoute::AdminPublisherDht.path() => {
+            publisher_dht(state, query)
         }
         ("GET", path) if path == AuthorityRoute::AdminLocalDht.path() => local_dht(state),
         ("GET", path) => match admin_bridge_dht_entry_target(path) {
@@ -2192,6 +2206,51 @@ fn bridge_dht_entry(state: &AdminState, bridge_id: &str) -> Vec<u8> {
     }
 }
 
+fn publisher_dht(state: &AdminState, query: Option<&str>) -> Vec<u8> {
+    let Some(authority) = &state.authority else {
+        return error_response(
+            501,
+            "not_supported",
+            "publisher DHT dump is only available on the publisher authority",
+        );
+    };
+    let chain_id = match parse_trace_chain_id_query(query) {
+        Ok(chain_id) => chain_id,
+        Err(message) => return error_response(400, "bad_query", &message),
+    };
+    let generated_at_ms = now_ms();
+    let service = authority
+        .lock()
+        .expect("authority service mutex poisoned while dumping publisher DHT");
+    let bridge_dht_entries = service.publisher_authority().publisher_bridge_dht_entries();
+    let bridge_ids = bridge_dht_entries
+        .iter()
+        .map(|entry| entry.bridge_id.clone())
+        .collect::<Vec<_>>();
+    let active_bridge_count = service
+        .publisher_authority()
+        .active_bridge_count(generated_at_ms);
+    if let Some(chain_id) = chain_id.as_deref() {
+        emit_publisher_dht_event(
+            "publisher_dht_dumped",
+            chain_id,
+            bridge_dht_entries.len(),
+            active_bridge_count,
+        );
+    }
+    json_response(
+        200,
+        &PublisherDhtAdminResponse {
+            chain_id,
+            generated_at_ms,
+            active_bridge_count,
+            publisher_dht_entry_count: bridge_dht_entries.len(),
+            bridge_ids,
+            bridge_dht_entries,
+        },
+    )
+}
+
 fn initialize_publisher_dht(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec<u8> {
     let Some(authority) = &state.authority else {
         return error_response(
@@ -2890,10 +2949,20 @@ fn begin_new_creator_bootstrap(
         Some(&seed_bridge_id),
         Some(&relay.bootstrap_session_id),
     );
-    store
-        .replace(table)
-        .map(|table| (table, relay.bootstrap_session_id))
-        .map_err(|error| (500, "local_dht_bootstrap_update_failed", error.to_string()))
+    match store.replace(table) {
+        Ok(table) => {
+            emit_join_path_event(
+                "new_creator_bootstrap_completed",
+                chain_id,
+                &request.new_creator_id,
+                &request.host_creator_entry.node_id,
+                Some(&seed_bridge_id),
+                Some(&relay.bootstrap_session_id),
+            );
+            Ok((table, relay.bootstrap_session_id))
+        }
+        Err(error) => Err((500, "local_dht_bootstrap_update_failed", error.to_string())),
+    }
 }
 
 fn mark_new_creator_failed(store: &LocalDhtStore, chain_id: &str, error: &str) {

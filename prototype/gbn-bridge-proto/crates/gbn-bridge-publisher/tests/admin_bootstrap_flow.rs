@@ -17,7 +17,8 @@ use gbn_bridge_publisher::{
     admin::{
         AdminCreatorConfig, AdminErrorResponse, AdminHttpServer, AdminHttpServerHandle,
         AdminNodeMetadata, AdminState, BootstrapSessionAdminResponse,
-        InitializePublisherDhtResponse, SeedNewCreatorRequest, SeedNewCreatorResponse,
+        InitializePublisherDhtResponse, PublisherDhtAdminResponse, SeedNewCreatorRequest,
+        SeedNewCreatorResponse,
     },
     api::AuthorityRoute,
     storage::BootstrapSessionState,
@@ -336,6 +337,32 @@ fn initialize_publisher_dht_admin_command_materializes_registered_exit_bridges()
             .publisher_bridge_dht_entry_count(),
         10
     );
+    let dump_path = format!(
+        "{}?chain_id={chain_id}",
+        AuthorityRoute::AdminPublisherDht.path()
+    );
+    let (status, dump): (u16, PublisherDhtAdminResponse) = get_json(admin.local_addr(), &dump_path);
+    assert_eq!(status, 200);
+    assert_eq!(dump.chain_id.as_deref(), Some(chain_id));
+    assert_eq!(dump.active_bridge_count, 10);
+    assert_eq!(dump.publisher_dht_entry_count, 10);
+    assert_eq!(dump.bridge_dht_entries.len(), 10);
+    assert_eq!(dump.bridge_ids, response.bridge_ids);
+    for bridge_id in &dump.bridge_ids {
+        let path = format!("/v1/admin/bridges/{bridge_id}/dht-entry");
+        let (status, entry): (u16, gbn_bridge_publisher::admin::BridgeDhtEntryResponse) =
+            get_json(admin.local_addr(), &path);
+        assert_eq!(status, 200);
+        let dumped = dump
+            .bridge_dht_entries
+            .iter()
+            .find(|candidate| candidate.bridge_id == *bridge_id)
+            .expect("dump should contain bridge id returned in bridge_ids");
+        assert_eq!(&entry.bridge, dumped);
+        assert!(!entry.bridge.publisher_sig.0.is_empty());
+        assert!(!entry.bridge.ingress_endpoints.is_empty());
+        assert!(!entry.bridge.capabilities.is_empty());
+    }
 
     admin.join().unwrap();
     authority.join();

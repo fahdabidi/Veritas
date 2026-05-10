@@ -374,8 +374,33 @@ for bridge_id in sorted(expected_ids):
         fail("publisher_dht_per_entry_missing_file", bridge_id=bridge_id)
     response = json.load(open(path, encoding="utf-8"))
     entry = response.get("bridge")
-    if entry != by_id.get(bridge_id):
-        fail("publisher_dht_per_entry_mismatch", bridge_id=bridge_id)
+    expected = by_id.get(bridge_id) or {}
+    if not entry:
+        fail("publisher_dht_per_entry_missing_bridge", bridge_id=bridge_id)
+    stable_fields = [
+        "bridge_id",
+        "identity_pub",
+        "ingress_endpoints",
+        "udp_punch_port",
+        "reachability_class",
+        "capabilities",
+        "active",
+    ]
+    for field in stable_fields:
+        if entry.get(field) != expected.get(field):
+            fail(
+                "publisher_dht_per_entry_mismatch",
+                bridge_id=bridge_id,
+                field=field,
+                dump_value=expected.get(field),
+                per_entry_value=entry.get(field),
+            )
+    if not entry.get("publisher_sig"):
+        fail("publisher_dht_per_entry_missing_signature", bridge_id=bridge_id)
+    if int(entry.get("lease_expiry_ms") or 0) <= now_ms:
+        fail("publisher_dht_per_entry_lease_expired", bridge_id=bridge_id, lease_expiry_ms=entry.get("lease_expiry_ms"), now_ms=now_ms)
+    if int(entry.get("entry_expiry_ms") or 0) <= now_ms:
+        fail("publisher_dht_per_entry_expired", bridge_id=bridge_id, entry_expiry_ms=entry.get("entry_expiry_ms"), now_ms=now_ms)
 
 json.dump({
     "chain_id": chain_id,
@@ -627,13 +652,33 @@ PY
 }
 
 collect_bootstrap_pod_logs() {
-  local check pod rest container
+  local check pod rest container log_path err_path attempt uid node remote_dir remote_glob
   for check in "${NODE_CHECKS[@]}"; do
     pod="${check%%:*}"
     rest="${check#*:}"
     container="${rest%%:*}"
-    kubectl -n "$NAMESPACE" logs --since=20m "$pod" -c "$container" \
-      --insecure-skip-tls-verify-backend=true >"$ARTIFACT_DIR/pod-logs/${pod}.log" 2>/dev/null || true
+    log_path="$ARTIFACT_DIR/pod-logs/${pod}.log"
+    err_path="$ARTIFACT_DIR/pod-logs/${pod}.err"
+    : >"$log_path"
+    : >"$err_path"
+
+    for attempt in 1 2 3; do
+      if kubectl -n "$NAMESPACE" logs --since=20m "$pod" -c "$container" \
+        --insecure-skip-tls-verify-backend=true >"$log_path" 2>"$err_path"; then
+        break
+      fi
+      sleep 2
+    done
+
+    if [[ ! -s "$log_path" && -s "$err_path" ]] && command -v docker >/dev/null 2>&1; then
+      uid="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>>"$err_path" || true)"
+      node="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>>"$err_path" || true)"
+      if [[ -n "$uid" && -n "$node" ]]; then
+        remote_dir="/var/log/pods/${NAMESPACE}_${pod}_${uid}/${container}"
+        remote_glob="$(smoke_shell_quote "$remote_dir")/*.log"
+        docker exec "$node" sh -lc "cat $remote_glob" >"$log_path" 2>>"$err_path" || true
+      fi
+    fi
   done
 }
 
@@ -816,7 +861,7 @@ record_step "InitializePublisherDht" "POST /v1/admin/publisher-dht/initialize" \
 echo "Dumping and validating Publisher bridge DHT..."
 dump_and_assert_publisher_dht
 record_step "Publisher DHT dump" "GET /v1/admin/publisher-dht and GET /v1/admin/bridges/{bridge_id}/dht-entry" \
-  "full Publisher DHT dump and every per-bridge DHT entry match" \
+  "full Publisher DHT dump and every per-bridge DHT entry semantically match despite live lease renewal" \
   "$EXPECTED_BRIDGES Publisher DHT entries validated" \
   "publisher-dht/publisher-dht.json, publisher-dht/per-entry, publisher-dht/publisher-dht-summary.json"
 

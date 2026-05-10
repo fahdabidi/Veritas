@@ -77,11 +77,11 @@ spec:
             failureThreshold: 12
           resources:
             requests:
-              cpu: 75m
-              memory: 128Mi
+              cpu: 100m
+              memory: 192Mi
             limits:
-              cpu: 300m
-              memory: 256Mi
+              cpu: 500m
+              memory: 512Mi
           volumeMounts:
             - name: state
               mountPath: /var/lib/gbn-conduit

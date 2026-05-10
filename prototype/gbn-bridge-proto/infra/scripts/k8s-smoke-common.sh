@@ -4,6 +4,9 @@
 SMOKE_RETRY_ATTEMPTS="${VERITAS_K8S_SMOKE_RETRY_ATTEMPTS:-6}"
 SMOKE_RETRY_DELAY_SECONDS="${VERITAS_K8S_SMOKE_RETRY_DELAY_SECONDS:-5}"
 SMOKE_DOCKER_STABILITY_SECONDS="${VERITAS_K8S_DOCKER_STABILITY_SECONDS:-10}"
+SMOKE_K3D_NODE_STABILITY_SECONDS="${VERITAS_K8S_K3D_NODE_STABILITY_SECONDS:-30}"
+SMOKE_FLANNEL_TIMEOUT_SECONDS="${VERITAS_K8S_FLANNEL_TIMEOUT_SECONDS:-180}"
+SMOKE_WORKLOAD_STABILITY_SECONDS="${VERITAS_K8S_WORKLOAD_STABILITY_SECONDS:-30}"
 SMOKE_DIAGNOSTICS_COLLECTED=0
 
 smoke_log() {
@@ -33,6 +36,9 @@ smoke_collect_diagnostics() {
     echo "namespace=${NAMESPACE:-}"
     echo "admin_transport=${SMOKE_ADMIN_TRANSPORT:-unset}"
     echo "docker_stability_seconds=${SMOKE_DOCKER_STABILITY_SECONDS:-}"
+    echo "k3d_node_stability_seconds=${SMOKE_K3D_NODE_STABILITY_SECONDS:-}"
+    echo "flannel_timeout_seconds=${SMOKE_FLANNEL_TIMEOUT_SECONDS:-}"
+    echo "workload_stability_seconds=${SMOKE_WORKLOAD_STABILITY_SECONDS:-}"
   } >"$dir/summary.txt"
 
   kubectl cluster-info >"$dir/kubectl-cluster-info.txt" 2>&1 || true
@@ -140,6 +146,92 @@ smoke_count_running_k3d_nodes() {
     awk -v prefix="k3d-${cluster}-" '$0 ~ ("^" prefix "(server|agent)-") { count++ } END { print count + 0 }'
 }
 
+smoke_running_k3d_node_names() {
+  local cluster="${VERITAS_K3D_CLUSTER:-veritas}"
+  docker ps --format '{{.Names}}' 2>/dev/null |
+    awk -v prefix="k3d-${cluster}-" '$0 ~ ("^" prefix "(server|agent)-") { print }'
+}
+
+smoke_running_k3d_container_names() {
+  local cluster="${VERITAS_K3D_CLUSTER:-veritas}"
+  docker ps --format '{{.Names}}' 2>/dev/null |
+    awk -v prefix="k3d-${cluster}-" '$0 ~ ("^" prefix "(server|agent)-") || $0 == (prefix "serverlb") { print }'
+}
+
+smoke_k3d_start_snapshot() {
+  local names=()
+  mapfile -t names < <(smoke_running_k3d_container_names)
+  [[ "${#names[@]}" -gt 0 ]] || return 1
+  docker inspect -f '{{.Name}} running={{.State.Running}} started={{.State.StartedAt}} restarting={{.State.Restarting}}' "${names[@]}" 2>/dev/null | sort
+}
+
+smoke_wait_k3d_containers_stable() {
+  command -v docker >/dev/null 2>&1 || return 0
+  command -v k3d >/dev/null 2>&1 || return 0
+
+  local expected="${VERITAS_K3D_EXPECTED_NODE_CONTAINERS:-3}"
+  local attempt running before after
+  for ((attempt = 1; attempt <= 6; attempt++)); do
+    running="$(smoke_count_running_k3d_nodes)"
+    if [[ "$running" -lt "$expected" ]]; then
+      smoke_log "Waiting for k3d node containers ($running/$expected running)..."
+      sleep 5
+      continue
+    fi
+
+    before="$(smoke_k3d_start_snapshot || true)"
+    if [[ -z "$before" ]]; then
+      sleep 5
+      continue
+    fi
+
+    if [[ "$SMOKE_K3D_NODE_STABILITY_SECONDS" -gt 0 ]]; then
+      sleep "$SMOKE_K3D_NODE_STABILITY_SECONDS"
+    fi
+    after="$(smoke_k3d_start_snapshot || true)"
+    if [[ -n "$after" && "$before" == "$after" ]]; then
+      return 0
+    fi
+    smoke_log "k3d container start state changed during stability window; retrying..."
+  done
+
+  smoke_fail "k3d node containers did not remain stable."
+}
+
+smoke_wait_flannel_ready() {
+  command -v docker >/dev/null 2>&1 || return 0
+  command -v kubectl >/dev/null 2>&1 || return 0
+
+  local deadline=$((SECONDS + SMOKE_FLANNEL_TIMEOUT_SECONDS))
+  local nodes=() node missing
+  while ((SECONDS < deadline)); do
+    kubectl wait --for=condition=Ready node --all --timeout=10s >/dev/null 2>&1 || {
+      sleep 2
+      continue
+    }
+
+    mapfile -t nodes < <(smoke_running_k3d_node_names)
+    if [[ "${#nodes[@]}" -eq 0 ]]; then
+      sleep 2
+      continue
+    fi
+
+    missing=0
+    for node in "${nodes[@]}"; do
+      if ! docker exec "$node" sh -lc 'test -s /run/flannel/subnet.env' >/dev/null 2>&1; then
+        missing=1
+        break
+      fi
+    done
+    if [[ "$missing" -eq 0 ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  smoke_fail "k3d flannel subnet state did not become ready on every node."
+}
+
 smoke_docker_restart_count() {
   if command -v systemctl >/dev/null 2>&1; then
     systemctl show docker --property=NRestarts --value 2>/dev/null || true
@@ -187,6 +279,7 @@ smoke_ensure_k3d_nodes_running() {
     smoke_log "No running k3d node containers found; starting cluster '$cluster'..."
     k3d cluster start "$cluster" >/dev/null
   fi
+  smoke_wait_k3d_containers_stable
 }
 
 smoke_select_admin_transport() {
@@ -371,7 +464,9 @@ data=json.load(sys.stdin)
 for item in data.get("items", []):
     if item.get("metadata", {}).get("deletionTimestamp"):
         continue
-    if item.get("status", {}).get("phase") == "Running":
+    statuses=item.get("status", {}).get("containerStatuses", [])
+    ready=bool(statuses) and all(s.get("ready", False) for s in statuses)
+    if item.get("status", {}).get("phase") == "Running" and ready:
         print(item.get("metadata", {}).get("name", ""))
         break'
 }
@@ -393,6 +488,7 @@ smoke_check_rollouts() {
     smoke_fail "creator-host rollout did not complete."
   smoke_retry 3 10 kubectl -n "$NAMESPACE" rollout status deployment/creator-new --timeout=120s ||
     smoke_fail "creator-new rollout did not complete."
+  smoke_wait_conduit_workload_stability
 }
 
 smoke_ensure_cluster_api() {
@@ -401,6 +497,7 @@ smoke_ensure_cluster_api() {
 
   if smoke_retry 6 5 kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
     smoke_wait_nodes_ready
+    smoke_wait_flannel_ready
     return 0
   fi
 
@@ -412,6 +509,7 @@ smoke_ensure_cluster_api() {
     for _ in {1..90}; do
       if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
         smoke_wait_nodes_ready
+        smoke_wait_flannel_ready
         return 0
       fi
       sleep 2
@@ -424,6 +522,46 @@ smoke_ensure_cluster_api() {
 smoke_wait_nodes_ready() {
   kubectl wait --for=condition=Ready node --all --timeout=180s >/dev/null 2>&1 ||
     smoke_fail "not all k3d nodes became Ready."
+}
+
+smoke_conduit_pod_restart_snapshot() {
+  kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/part-of=veritas-conduit -o json |
+    python3 -c 'import json,sys
+data=json.load(sys.stdin)
+rows=[]
+for item in data.get("items", []):
+    name=item.get("metadata", {}).get("name", "")
+    phase=item.get("status", {}).get("phase", "")
+    statuses=item.get("status", {}).get("containerStatuses", [])
+    ready=all(s.get("ready", False) for s in statuses) if statuses else False
+    restarts=sum(int(s.get("restartCount", 0)) for s in statuses)
+    ids=",".join(sorted(str(s.get("containerID", "")) for s in statuses))
+    rows.append(f"{name} phase={phase} ready={ready} restarts={restarts} ids={ids}")
+print("\n".join(sorted(rows)))'
+}
+
+smoke_wait_conduit_workload_stability() {
+  kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l app.kubernetes.io/part-of=veritas-conduit --timeout=240s >/dev/null 2>&1 ||
+    smoke_fail "Conduit pods did not become Ready."
+
+  local before after
+  before="$(smoke_conduit_pod_restart_snapshot)"
+  if [[ "$SMOKE_WORKLOAD_STABILITY_SECONDS" -gt 0 ]]; then
+    sleep "$SMOKE_WORKLOAD_STABILITY_SECONDS"
+  fi
+  kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l app.kubernetes.io/part-of=veritas-conduit --timeout=120s >/dev/null 2>&1 ||
+    smoke_fail "Conduit pods lost readiness during stability window."
+  after="$(smoke_conduit_pod_restart_snapshot)"
+
+  if [[ "$before" != "$after" ]]; then
+    {
+      echo "# Before"
+      printf '%s\n' "$before"
+      echo "# After"
+      printf '%s\n' "$after"
+    } >&2
+    smoke_fail "Conduit pods restarted or changed container IDs during stability window."
+  fi
 }
 
 smoke_discover_nodes() {
@@ -441,7 +579,9 @@ names=[]
 for item in data.get("items", []):
     if item.get("metadata", {}).get("deletionTimestamp"):
         continue
-    if item.get("status", {}).get("phase") == "Running":
+    statuses=item.get("status", {}).get("containerStatuses", [])
+    ready=bool(statuses) and all(s.get("ready", False) for s in statuses)
+    if item.get("status", {}).get("phase") == "Running" and ready:
         names.append(item.get("metadata", {}).get("name", ""))
 print("\n".join(sorted(names)))'
     )

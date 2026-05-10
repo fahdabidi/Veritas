@@ -76,7 +76,9 @@
       "Bash(Select-Object Name)",
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\fahd_\\\\OneDrive\\\\Documents\\\\Veritas\\\\\" -Directory | Select-Object Name)",
       "PowerShell(head -20)",
-      "Bash(git restore *)"
+      "Bash(git restore *)",
+      "Bash(ls -la /mnt/c/Users/fahd_/.wslconfig 2>&1 || echo \"FILE_NOT_FOUND\")",
+      "Read(//mnt/c/Users/fahd_/**)"
     ]
   }
 }

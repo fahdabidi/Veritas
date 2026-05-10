@@ -9,7 +9,7 @@ NAMESPACE="${VERITAS_K8S_NAMESPACE:-veritas}"
 OBS_NS="${VERITAS_OBS_NAMESPACE:-observability}"
 EXPECTED_BRIDGES="${VERITAS_K8S_EXPECTED_BRIDGES:-10}"
 SYNTHETIC_SIZE="${VERITAS_K8S_UPLOAD_SYNTHETIC_SIZE:-1048576}"
-FAILOVER_SYNTHETIC_SIZE="${VERITAS_K8S_UPLOAD_FAILOVER_SYNTHETIC_SIZE:-65536}"
+FAILOVER_SYNTHETIC_SIZE="${VERITAS_K8S_UPLOAD_FAILOVER_SYNTHETIC_SIZE:-81920}"
 CHUNK_SIZE="${VERITAS_K8S_UPLOAD_CHUNK_SIZE:-8192}"
 TARGET_LANE_COUNT="${VERITAS_K8S_UPLOAD_TARGET_LANE_COUNT:-10}"
 UPLOAD_TIMEOUT_SECONDS="${VERITAS_K8S_UPLOAD_TIMEOUT_SECONDS:-120}"
@@ -33,7 +33,7 @@ Options:
   --observability-namespace NAME      Kubernetes namespace for Prometheus/Loki/Tempo.
   --expected-bridges N                Expected exit-bridge pod count. Default: 10.
   --synthetic-size N                  Normal upload synthetic bytes. Default: 1048576.
-  --failover-synthetic-size N         Failover upload synthetic bytes. Default: 65536.
+  --failover-synthetic-size N         Failover upload synthetic bytes. Default: 81920.
   --chunk-size N                      Chunk size in bytes. Default: 8192.
   --target-lane-count N               Target upload lanes. Default: 10.
   --upload-timeout N                  SendUpload timeout in seconds. Default: 120.
@@ -642,7 +642,7 @@ run_upload_case_once() {
   fi
 
   echo "Collecting ${label} pre-send DHT evidence for chain_id=${chain_id}..."
-  smoke_collect_dht_evidence "$chain_id" "${label}-pre-send"
+  smoke_collect_dht_evidence "$chain_id" "${label}-pre-send" || return 1
 
   build_body="$(build_payload "$size" "$CHUNK_SIZE")"
   printf '%s\n' "$build_body" >"$ARTIFACT_DIR/build-${label}-payload.json"
@@ -650,7 +650,7 @@ run_upload_case_once() {
     "$CREATOR_NEW_POD" creator-runner POST \
     "/v1/admin/build-upload-session?chain_id=${chain_id}" "$build_body" ||
     return 1
-  assert_build_result "$label" "$chain_id" "$expected_chunks" "$ARTIFACT_DIR/build-${label}-result.json"
+  assert_build_result "$label" "$chain_id" "$expected_chunks" "$ARTIFACT_DIR/build-${label}-result.json" || return 1
   session_id="$(json_file_field "$ARTIFACT_DIR/build-${label}-result.json" session_id)"
 
   send_body="$(send_payload "$session_id" "$force_bridge")"
@@ -659,14 +659,14 @@ run_upload_case_once() {
     "$CREATOR_NEW_POD" creator-runner POST \
     "/v1/admin/send-upload?chain_id=${chain_id}" "$send_body" ||
     return 1
-  assert_send_result "$label" "$chain_id" "$expected_chunks" "$ARTIFACT_DIR/send-${label}-result.json" "$force_bridge"
+  assert_send_result "$label" "$chain_id" "$expected_chunks" "$ARTIFACT_DIR/send-${label}-result.json" "$force_bridge" || return 1
 
-  smoke_creator_upload_dispatch_plan "$session_id" "$ARTIFACT_DIR/dispatch-plan-${label}.json"
-  assert_dispatch_plan "$label" "$expected_chunks" "$ARTIFACT_DIR/dispatch-plan-${label}.json" "$force_bridge"
+  smoke_creator_upload_dispatch_plan "$session_id" "$ARTIFACT_DIR/dispatch-plan-${label}.json" || return 1
+  assert_dispatch_plan "$label" "$expected_chunks" "$ARTIFACT_DIR/dispatch-plan-${label}.json" "$force_bridge" || return 1
 
-  wait_authority_frames "$label" "$chain_id" "$((expected_chunks + 1))" "$ARTIFACT_DIR/frames-${label}.json"
-  wait_received_summary "$label" "$session_id" "$expected_chunks" "$ARTIFACT_DIR/receiver-session-summary-${label}.json"
-  maybe_wait_observability "$label" "$chain_id"
+  wait_authority_frames "$label" "$chain_id" "$((expected_chunks + 1))" "$ARTIFACT_DIR/frames-${label}.json" || return 1
+  wait_received_summary "$label" "$session_id" "$expected_chunks" "$ARTIFACT_DIR/receiver-session-summary-${label}.json" || return 1
+  maybe_wait_observability "$label" "$chain_id" || return 1
   mapfile -t lanes < <(python3 - "$ARTIFACT_DIR/send-${label}-result.json" <<'PY'
 import json
 import sys
@@ -675,7 +675,7 @@ for lane in data.get("lanes_used") or []:
     print(lane)
 PY
 )
-  smoke_collect_chainid_log_evidence "$chain_id" "$label" "${lanes[@]}"
+  smoke_collect_chainid_log_evidence "$chain_id" "$label" "${lanes[@]}" || return 1
   printf '%s\n' "$session_id" >"$ARTIFACT_DIR/session-id-${label}.txt"
 }
 

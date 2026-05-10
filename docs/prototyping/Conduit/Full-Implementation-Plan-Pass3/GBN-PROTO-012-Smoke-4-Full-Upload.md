@@ -71,7 +71,7 @@ bash prototype/gbn-bridge-proto/infra/scripts/k8s-smoke-upload-v3.sh \
   --synthetic-size 1048576 \
   --chunk-size 8192 \
   --target-lane-count 10 \
-  --failover-synthetic-size 65536 \
+  --failover-synthetic-size 81920 \
   --include-failover \
   --upload-timeout 120
 ```
@@ -83,8 +83,9 @@ Flags:
 - `--chunk-size N`: chunk size (default 8 KiB → ~128 chunks for default size).
 - `--target-lane-count N`: passed to `send-upload` (default 10). Smoke 4 fails
   early unless this equals `--expected-bridges`.
-- `--failover-synthetic-size N`: failover invocation byte count (default 64 KiB
-  so the normal run proves the full 1 MiB path while failover remains fast).
+- `--failover-synthetic-size N`: failover invocation byte count (default 80 KiB
+  so the normal run proves the full 1 MiB path while failover remains fast and
+  has enough chunks to exercise all surviving lanes after one forced failure).
 - `--include-failover`: also run a second invocation with
   `force_lane_failure=[<one selected lane>]`. Default on.
 - `--include-persistence-check`: restart `creator-new` and assert the completed

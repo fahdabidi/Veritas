@@ -53,13 +53,19 @@ Current saved evidence:
 | Smoke 2 ChainID | `smoke-2-b927fae092c0455d980beb21fc8e158e` |
 | Smoke 2 bootstrap session | `bootstrap-000010` |
 | Smoke 2 result | Publisher DHT `10/10`, NewCreator local DHT `10/10 active`, bootstrap session `completed`, ChainID pod-log evidence present |
+| Pass 3 Smoke 3 report | [GBN-PROTO-012-Smoke-3-Route-20260510-115619-230469.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-3-Route-20260510-115619-230469.md) |
+| Smoke 3 ChainIDs | `smoke-3-normal-0f84754c31b345bd9bf8aab15fdf1f3d`, `smoke-3-failover-f02423a7a1d14ae4b6a2675c5eb2c22f` |
+| Smoke 3 result | NewCreator local-DHT `10/10 active`, normal `SendDummy` via `exit-bridge-2`, forced-failover `SendDummy` via `exit-bridge-0`, Publisher decrypt/hash validation passed |
+| Pass 3 Smoke 4 report | [GBN-PROTO-012-Smoke-4-Upload-20260510-130019-132132.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-4-Upload-20260510-130019-132132.md) |
+| Smoke 4 ChainIDs | `smoke-4-normal-978c1cae3add98de`, `smoke-4-failover-c3d8dbf53f74a473` |
+| Smoke 4 result | Normal upload `128/128` chunks over `10/10` ExitBridges, forced-failover upload `10/10` chunks over `9/9` surviving ExitBridges, receiver content-hash validation and creator persistence passed |
 | Prior AWS stack | `gbn-conduit-full-dev` |
 | Prior AWS region | `us-east-1` |
 | Prior AWS image tag | `proto006-phase10-fix2` |
 
 Remaining validation gap:
 
-- Run and archive detailed reports for Smoke 1, Smoke 3, and Smoke 4 using the same evidence standard as Smoke 2.
+- Run and archive the Smoke 1 detailed report using the same evidence standard as Smoke 2, Smoke 3, and Smoke 4.
 - Run a real mobile-network path against a deployed `gbn-conduit-full-*` stack.
 - Capture explicit AWS `chain_id` evidence with `collect-conduit-traces.sh --chain-id <id> --require-chain-id`.
 - Record AWS/mobile bootstrap, upload/ACK, failover/churn, and batch-window observations in the Phase 10 test report.
@@ -669,8 +675,8 @@ The current local test suite is implemented as four explicit smoke gates:
 |---|---|---|---|
 | Smoke 1 - Tracing | `infra/scripts/k8s-smoke-tracing-v3.sh` | Every actor pod emits ChainID logs/spans and Prometheus samples. | Placeholder: save latest detailed report after next run. |
 | Smoke 2 - Discovery / Bootup | `infra/scripts/k8s-smoke-discovery-v3.sh` | Publisher DHT seed, HostCreator/NewCreator bootup, NewCreator local DHT population, bootstrap session state, ChainID evidence. | Saved: [GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md). |
-| Smoke 3 - Route / Encryption Boundary | `infra/scripts/k8s-smoke-route-v3.sh` | Complete NewCreator local-DHT preflight, Publisher/creator/ExitBridge DHT evidence, `SendDummy` route source `local_dht`, Publisher decrypt/hash validation, bridge ciphertext-only boundary, ChainID evidence, failover. | Placeholder: archive next `report.md` as `docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-3-Route-<run-id>.md`. |
-| Smoke 4 - Full Upload | `infra/scripts/k8s-smoke-upload-v3.sh` | Build upload session, Publisher/creator/ExitBridge DHT evidence, sanitize/chunk/encrypt, 10/10 ExitBridge normal fanout, receiver reconstruction, ChainID evidence across every lane, failover, persistence. | Placeholder: archive next `report.md` as `docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-4-Upload-<run-id>.md`. |
+| Smoke 3 - Route / Encryption Boundary | `infra/scripts/k8s-smoke-route-v3.sh` | Complete NewCreator local-DHT preflight, Publisher/creator/ExitBridge DHT evidence, `SendDummy` route source `local_dht`, Publisher decrypt/hash validation, bridge ciphertext-only boundary, ChainID evidence, failover. | Saved: [GBN-PROTO-012-Smoke-3-Route-20260510-115619-230469.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-3-Route-20260510-115619-230469.md). |
+| Smoke 4 - Full Upload | `infra/scripts/k8s-smoke-upload-v3.sh` | Build upload session, Publisher/creator/ExitBridge DHT evidence, sanitize/chunk/encrypt, 10/10 ExitBridge normal fanout, receiver reconstruction, ChainID evidence across every lane, failover, persistence. | Saved: [GBN-PROTO-012-Smoke-4-Upload-20260510-130019-132132.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-4-Upload-20260510-130019-132132.md). |
 
 Run all four gates in dependency order:
 
@@ -1140,7 +1146,7 @@ Local Pass 3 smoke sign-off:
   - ChainID pod-log evidence exists for the bootstrap stages.
 - `k8s-smoke-route-v3.sh` passes and validates complete Publisher/NewCreator/ExitBridge DHT evidence, local-DHT `SendDummy`, Publisher decrypt/hash validation, ciphertext-only bridge forwarding, receiver persistence, ChainID logs across creator/Publisher/selected bridge, and forced failover.
 - `k8s-smoke-upload-v3.sh` passes and validates complete Publisher/NewCreator/ExitBridge DHT evidence, upload session build, sanitization, per-chunk encryption, 10/10 ExitBridge normal fanout, receiver reconstruction, ChainID logs across creator/Publisher/every lane-carrying bridge, failover, and creator PVC persistence.
-- A detailed report is saved for each smoke run. Smoke 2 is currently saved at [GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md); Smoke 1, Smoke 3, and Smoke 4 reports are placeholders until rerun.
+- Detailed reports are saved under `docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/`. Smoke 2 is currently saved at [GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-2-Discovery-20260510-002230-7843.md), Smoke 3 is saved at [GBN-PROTO-012-Smoke-3-Route-20260510-115619-230469.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-3-Route-20260510-115619-230469.md), and Smoke 4 is saved at [GBN-PROTO-012-Smoke-4-Upload-20260510-130019-132132.md](../../../docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports/GBN-PROTO-012-Smoke-4-Upload-20260510-130019-132132.md). Smoke 1 remains a placeholder until rerun.
 
 AWS smoke sign-off:
 

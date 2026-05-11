@@ -260,6 +260,9 @@ impl CreatorBootstrapPayload {
         self.creator_entry.verify_authority(publisher_key, now_ms)?;
         self.creator_dht_entry
             .verify_authority(publisher_key, now_ms)?;
+        if let Some(publisher_entry) = &self.publisher_entry {
+            publisher_entry.verify_trust_root(publisher_key, now_ms)?;
+        }
         self.response.verify_authority(publisher_key, now_ms)
     }
 }

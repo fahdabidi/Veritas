@@ -499,6 +499,11 @@ pub struct SeedNewCreatorResponse {
 pub struct StrictBootstrapEvidence {
     pub initial_plaintext_bridge_set_present: bool,
     pub new_creator_encryption_pub_key: PublicKeyBytes,
+    pub new_creator_dht_entry_id: String,
+    pub publisher_entry_in_bootstrap_payload: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_entry_node_id: Option<String>,
+    pub seed_bridge_dht_entry_id: String,
     pub encrypted_bootstrap_payload: BootstrapPayloadEvidence,
     pub encrypted_seed_bridge_catalog_payload: BootstrapPayloadEvidence,
     pub seed_bridge_id: String,
@@ -3073,9 +3078,16 @@ fn begin_new_creator_bootstrap(
         .map(|entry| entry.bridge_id.clone())
         .collect::<Vec<_>>();
     seed_catalog_bridge_ids.sort();
+    let publisher_entry_from_payload = bootstrap_payload.publisher_entry.clone();
     let strict_bootstrap_evidence = StrictBootstrapEvidence {
         initial_plaintext_bridge_set_present: relay.bootstrap_reply.bridge_set.is_some(),
         new_creator_encryption_pub_key: encryption_identity_from_signing_key(&config.signing_key),
+        new_creator_dht_entry_id: bootstrap_payload.creator_dht_entry.node_id.clone(),
+        publisher_entry_in_bootstrap_payload: publisher_entry_from_payload.is_some(),
+        publisher_entry_node_id: publisher_entry_from_payload
+            .as_ref()
+            .map(|entry| entry.node_id.clone()),
+        seed_bridge_dht_entry_id: seed_bridge_id.clone(),
         encrypted_bootstrap_payload: bootstrap_payload_evidence(&encrypted_bootstrap),
         encrypted_seed_bridge_catalog_payload: bootstrap_payload_evidence(&encrypted_catalog),
         seed_bridge_id: seed_bridge_id.clone(),
@@ -3152,23 +3164,25 @@ fn begin_new_creator_bootstrap(
         entry.active = true;
     }
     table.self_onboarding_state = SelfOnboardingState::Onboarded;
-    table.publisher_entry = Some(PublisherDhtEntry {
-        node_id: "publisher".to_string(),
-        authority_url: config.authority_url.clone(),
-        receiver_url: state
-            .node_metadata
-            .receiver_url
-            .clone()
-            .unwrap_or_else(|| config.authority_url.clone()),
-        pub_key: bootstrap_payload.response.publisher_pub.clone(),
-        encryption_pub_key: bootstrap_payload.response.publisher_encryption_pub.clone(),
-        entry_expiry_ms: bridge_set
-            .bridge_dht_entries
-            .iter()
-            .map(|entry| entry.entry_expiry_ms)
-            .max()
-            .unwrap_or_else(|| now_ms.saturating_add(300_000)),
-    });
+    table.publisher_entry = Some(publisher_entry_from_payload.unwrap_or_else(|| {
+        PublisherDhtEntry {
+            node_id: "publisher".to_string(),
+            authority_url: config.authority_url.clone(),
+            receiver_url: state
+                .node_metadata
+                .receiver_url
+                .clone()
+                .unwrap_or_else(|| config.authority_url.clone()),
+            pub_key: bootstrap_payload.response.publisher_pub.clone(),
+            encryption_pub_key: bootstrap_payload.response.publisher_encryption_pub.clone(),
+            entry_expiry_ms: bridge_set
+                .bridge_dht_entries
+                .iter()
+                .map(|entry| entry.entry_expiry_ms)
+                .max()
+                .unwrap_or_else(|| now_ms.saturating_add(300_000)),
+        }
+    }));
     table.current_bootstrap_session = Some(BootstrapSession {
         session_id: relay.bootstrap_session_id.clone(),
         chain_id: Some(chain_id.to_string()),

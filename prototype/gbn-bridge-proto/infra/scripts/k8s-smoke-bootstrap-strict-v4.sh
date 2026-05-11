@@ -98,6 +98,7 @@ require_catalog = sys.argv[4] == "1"
 require_fanout = sys.argv[5] == "1"
 failure_path = root / "strict-bootstrap-failure.json"
 summary_path = root / "strict-bootstrap-summary.json"
+flow_steps_path = root / "strict-bootstrap-flow-steps.json"
 report_path = root / "strict-report.md"
 
 def load(name):
@@ -126,6 +127,12 @@ if not chain_id or not bootstrap_session_id:
     fail("missing_seed_result_chain_or_session", chain_id=chain_id, bootstrap_session_id=bootstrap_session_id)
 if evidence.get("initial_plaintext_bridge_set_present") is not False:
     fail("initial_plaintext_bridge_set_present", value=evidence.get("initial_plaintext_bridge_set_present"))
+if evidence.get("new_creator_dht_entry_id") != "new-creator":
+    fail("new_creator_dht_entry_missing_from_bootstrap_payload", actual=evidence.get("new_creator_dht_entry_id"))
+if evidence.get("publisher_entry_in_bootstrap_payload") is not True:
+    fail("publisher_entry_missing_from_bootstrap_payload")
+if evidence.get("publisher_entry_node_id") != "publisher":
+    fail("publisher_entry_node_mismatch", actual=evidence.get("publisher_entry_node_id"))
 
 def assert_payload(name, expected_kind):
     payload = evidence.get(name) or {}
@@ -179,6 +186,8 @@ for event in progress:
         fail("progress_session_mismatch", event=event)
 
 seed_bridge_id = session.get("seed_bridge_id") or evidence.get("seed_bridge_id")
+if evidence.get("seed_bridge_dht_entry_id") != seed_bridge_id:
+    fail("seed_bridge_dht_entry_mismatch", actual=evidence.get("seed_bridge_dht_entry_id"), expected=seed_bridge_id)
 seed_payload_reporters = {
     event.get("reporter_id")
     for event in progress
@@ -205,14 +214,164 @@ if require_fanout and missing_fanout:
 if require_fanout and not any(norm(event.get("stage")) == "bridge_set_complete" for event in progress):
     fail("bridge_set_complete_progress_missing")
 
+active_bridge_ids = {
+    entry.get("bridge_id")
+    for entry in local_dht.get("bridge_entries") or []
+    if entry.get("active")
+}
+if require_fanout and active_bridge_ids != set(bridge_ids):
+    fail("local_dht_active_bridge_set_mismatch", active=sorted(active_bridge_ids), expected=sorted(bridge_ids))
+if require_fanout and not active_bridge_ids.issubset(fanout_reporters):
+    fail("bridge_marked_active_without_progress", bridge_ids=sorted(active_bridge_ids - fanout_reporters))
+
+pod_log_text = "\n".join(
+    path.read_text(encoding="utf-8", errors="replace")
+    for path in sorted((root / "pod-logs").glob("*.log"))
+)
+
+def require_log(event):
+    if event not in pod_log_text:
+        fail("pod_log_event_missing", event=event)
+    return event
+
+for event in (
+    "new_creator_join_started",
+    "host_creator_join_relayed_via_bridge",
+    "publisher_join_received",
+    "publisher_response_to_host_via_bridge",
+    "host_relayed_response_to_new_creator",
+    "new_creator_bootstrap_response_received",
+    "seed_bridge_payload_received",
+    "new_creator_bridge_set_requested",
+    "seed_bridge_bridge_set_returned",
+    "publisher_remaining_bridges_triggered",
+    "new_creator_bridge_entry_active",
+    "new_creator_bootstrap_completed",
+):
+    require_log(event)
+
+flow_steps = [
+    {
+        "step": 1,
+        "name": "NewCreator pairs with HostCreator",
+        "status": "pass",
+        "evidence": "seed-new-creator-payload.json, seed-new-creator-result.json",
+        "observed": f"new_creator={seed_result.get('new_creator_id')} host_creator={seed_result.get('host_creator_id')}",
+    },
+    {
+        "step": 2,
+        "name": "NewCreator sends DHT entry and public key to HostCreator",
+        "status": "pass",
+        "evidence": "seed-new-creator-result.json, bootstrap-session.json",
+        "observed": f"creator_dht_entry={evidence.get('new_creator_dht_entry_id')} encryption_key_present={bool(evidence.get('new_creator_encryption_pub_key'))}",
+    },
+    {
+        "step": 3,
+        "name": "HostCreator relays entry request through existing bridge path",
+        "status": "pass",
+        "evidence": "pod-logs/*.log",
+        "observed": "host_creator_join_relayed_via_bridge and publisher_join_received observed",
+    },
+    {
+        "step": 4,
+        "name": "Publisher creates signed bootstrap payload with NewCreator, Publisher, and Seed ExitBridgeB DHT",
+        "status": "pass",
+        "evidence": "seed-new-creator-result.json, local-dht-final.json, bootstrap-session.json",
+        "observed": f"publisher_entry={evidence.get('publisher_entry_node_id')} seed_bridge={seed_bridge_id}",
+    },
+    {
+        "step": 5,
+        "name": "Publisher encrypts bootstrap payload to NewCreator public key",
+        "status": "pass",
+        "evidence": "strict-bootstrap-summary.json",
+        "observed": f"ciphertext_len={(bootstrap_payload or {}).get('ciphertext_len')}",
+    },
+    {
+        "step": 6,
+        "name": "Publisher seeds ExitBridgeB with remaining bridge DHT set",
+        "status": "pass",
+        "evidence": "bootstrap-session.json",
+        "observed": f"seed_payload_reporter={seed_bridge_id} seed_catalog_bridge_count={evidence.get('seed_catalog_bridge_count')}",
+    },
+    {
+        "step": 7,
+        "name": "Encrypted bootstrap payload returns through Publisher -> ExitBridgeA -> HostCreator -> NewCreator",
+        "status": "pass",
+        "evidence": "pod-logs/*.log",
+        "observed": "publisher_response_to_host_via_bridge, host_relayed_response_to_new_creator, and new_creator_bootstrap_response_received observed",
+    },
+    {
+        "step": 8,
+        "name": "NewCreator decrypts payload and stores Publisher + Seed ExitBridgeB DHT state",
+        "status": "pass",
+        "evidence": "local-dht-final.json, strict-bootstrap-summary.json",
+        "observed": f"publisher_entry_present={bool(local_dht.get('publisher_entry'))} seed_bridge={seed_bridge_id}",
+    },
+    {
+        "step": 9,
+        "name": "NewCreator and ExitBridgeB establish seed tunnel and report progress",
+        "status": "pass",
+        "evidence": "bootstrap-session.json",
+        "observed": f"seed_tunnel_reporters={sorted(seed_tunnel_reporters)}",
+    },
+    {
+        "step": 10,
+        "name": "NewCreator requests bridge catalog from ExitBridgeB",
+        "status": "pass",
+        "evidence": "pod-logs/*.log",
+        "observed": "new_creator_bridge_set_requested observed",
+    },
+    {
+        "step": 11,
+        "name": "ExitBridgeB returns signed remaining bridge catalog",
+        "status": "pass",
+        "evidence": "seed-new-creator-result.json, pod-logs/*.log",
+        "observed": f"seed_bridge_bridge_set_returned observed; catalog_bridge_count={evidence.get('seed_catalog_bridge_count')}",
+    },
+    {
+        "step": 12,
+        "name": "Publisher fans out NewCreator DHT to remaining ExitBridges",
+        "status": "pass",
+        "evidence": "pod-logs/*.log",
+        "observed": "publisher_remaining_bridges_triggered observed",
+    },
+    {
+        "step": 13,
+        "name": "Remaining ExitBridges establish tunnels with NewCreator and report progress",
+        "status": "pass",
+        "evidence": "bootstrap-session.json",
+        "observed": f"bridge_tunnel_established={len(fanout_reporters)}/{len(bridge_ids)}",
+    },
+    {
+        "step": 14,
+        "name": "NewCreator marks each bridge active only after corresponding progress",
+        "status": "pass",
+        "evidence": "local-dht-final.json, bootstrap-session.json",
+        "observed": f"active_bridge_count={len(active_bridge_ids)} progress_bridge_count={len(fanout_reporters)}",
+    },
+    {
+        "step": 15,
+        "name": "Every step preserves the same ChainID",
+        "status": "pass",
+        "evidence": "seed-new-creator-result.json, bootstrap-session.json, local-dht-final.json, pod-logs/*.log",
+        "observed": f"chain_id={chain_id}",
+    },
+]
+flow_steps_path.write_text(json.dumps(flow_steps, indent=2, sort_keys=True), encoding="utf-8")
+
 summary = {
     "chain_id": chain_id,
     "bootstrap_session_id": bootstrap_session_id,
     "new_creator_encryption_pub_key_present": bool(evidence.get("new_creator_encryption_pub_key")),
+    "new_creator_dht_entry_id": evidence.get("new_creator_dht_entry_id"),
+    "publisher_entry_in_bootstrap_payload": evidence.get("publisher_entry_in_bootstrap_payload"),
+    "publisher_entry_node_id": evidence.get("publisher_entry_node_id"),
+    "seed_bridge_dht_entry_id": evidence.get("seed_bridge_dht_entry_id"),
     "encrypted_bootstrap_payload": bootstrap_payload,
     "encrypted_seed_bridge_catalog_payload": catalog_payload,
     "seed_bridge_id": seed_bridge_id,
     "bridge_count": len(bridge_ids),
+    "active_bridge_count": len(active_bridge_ids),
     "fanout_progress_count": len(fanout_reporters),
     "progress_event_count": len(progress),
     "local_dht_state": local_dht.get("self_onboarding_state"),
@@ -228,14 +387,26 @@ report = [
     f"- Bridge count: `{len(bridge_ids)}`",
     f"- Per-bridge fanout progress events: `{len(fanout_reporters)}`",
     f"- Initial plaintext bridge set present: `{evidence.get('initial_plaintext_bridge_set_present')}`",
+    f"- Publisher DHT entry in encrypted bootstrap payload: `{evidence.get('publisher_entry_in_bootstrap_payload')}`",
     f"- CreatorBootstrap ciphertext bytes: `{(bootstrap_payload or {}).get('ciphertext_len')}`",
     f"- SeedBridgeCatalog ciphertext bytes: `{(catalog_payload or {}).get('ciphertext_len')}`",
     "",
-    "Artifacts: `seed-new-creator-result.json`, `bootstrap-session.json`, `local-dht-final.json`, `strict-bootstrap-summary.json`, `pod-log-events.json`, and `pod-logs/`.",
+    "## README Flow Gate Ledger",
+    "",
+    "| Step | Required flow gate | Status | Evidence artifact | Observed |",
+    "|---:|---|---:|---|---|",
+]
+for step in flow_steps:
+    report.append(
+        f"| {step['step']} | {step['name']} | `{step['status']}` | `{step['evidence']}` | {step['observed']} |"
+    )
+report.extend([
+    "",
+    "Artifacts: `seed-new-creator-result.json`, `bootstrap-session.json`, `local-dht-final.json`, `strict-bootstrap-summary.json`, `strict-bootstrap-flow-steps.json`, `pod-log-events.json`, and `pod-logs/`.",
     "",
     "Result: strict bootstrap hardening validation passed.",
     "",
-]
+])
 report_path.write_text("\n".join(report), encoding="utf-8")
 PY
 

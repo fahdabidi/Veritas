@@ -10,7 +10,7 @@ use gbn_bridge_protocol::{
     BridgeSeedAssign, BridgeSetResponse, BridgeSetResponseUnsigned, CreatorBootstrapPayload,
     CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned, CreatorDhtEntry,
     CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint, PublicKeyBytes,
-    ReachabilityClass, SeedBridgeCatalogPayload,
+    PublisherDhtEntry, ReachabilityClass, SeedBridgeCatalogPayload,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +56,25 @@ impl AuthorityBootstrapPlan {
             Some(self.bridge_set.clone()),
         )
     }
+}
+
+fn publisher_dht_entry_from_env(
+    publisher_pub: &PublicKeyBytes,
+    signing_key: &SigningKey,
+    now_ms: u64,
+    config: &AuthorityConfig,
+) -> Option<PublisherDhtEntry> {
+    let authority_url = std::env::var("GBN_BRIDGE_AUTHORITY_URL").ok()?;
+    let receiver_url =
+        std::env::var("GBN_BRIDGE_RECEIVER_URL").unwrap_or_else(|_| authority_url.clone());
+    Some(PublisherDhtEntry {
+        node_id: "publisher".to_string(),
+        authority_url,
+        receiver_url,
+        pub_key: publisher_pub.clone(),
+        encryption_pub_key: Some(publisher_encryption_identity(signing_key)),
+        entry_expiry_ms: now_ms.saturating_add(config.bootstrap_response_ttl_ms),
+    })
 }
 
 pub fn creator_bootstrap_entry(
@@ -315,7 +334,12 @@ pub fn begin_bootstrap(
                 creator_entry: creator_entry.clone(),
                 creator_dht_entry: creator_dht_entry.clone(),
                 response: response.clone(),
-                publisher_entry: None,
+                publisher_entry: publisher_dht_entry_from_env(
+                    publisher_pub,
+                    signing_key,
+                    now_ms,
+                    config,
+                ),
             };
             let encrypted_bootstrap = encrypt_bootstrap_payload(
                 BootstrapPayloadKind::CreatorBootstrap,

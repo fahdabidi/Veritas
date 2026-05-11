@@ -168,7 +168,7 @@ Expected result:
 | 1 | Bootstrap Hardening And Validation | `[x]` |
 | 2 | Mobile Runtime Boundary And FFI | `[x]` |
 | 3 | Android Kotlin Creator App | `[x]` |
-| 4 | Local k8s Public Internet Exposure | `[ ]` |
+| 4 | Local k8s Public Internet Exposure | `[x]` |
 | 5 | Mobile To Local k8s Public Internet Validation | `[ ]` |
 | 6 | Hybrid Local-Publisher / AWS-Bridge Topology | `[ ]` |
 | 7 | Cross-Region ExitBridge Deployment | `[ ]` |

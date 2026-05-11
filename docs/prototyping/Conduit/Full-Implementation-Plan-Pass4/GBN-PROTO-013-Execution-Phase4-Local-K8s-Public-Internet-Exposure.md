@@ -1,6 +1,6 @@
 # GBN-PROTO-013 - Execution Phase 4 - Local k8s Public Internet Exposure
 
-**Status:** Pending
+**Status:** Completed
 **Last Updated:** 2026-05-11
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 **Depends On:** Phases 1-3 complete
@@ -25,6 +25,12 @@ At completion:
 - V1 remains untouched.
 
 Update the parent plan status tracker when this phase is complete.
+
+Phase 4 completion means the operator tooling, endpoint contract validation, QR/seed
+artifact generation, admin-denial checks, teardown invalidation, and fixture automation
+exist and pass. A live outside-LAN public DNS/router run still requires an operator
+provided run profile with real public hosts and is the precondition for Phase 5 mobile
+validation; Phase 4 does not claim Smoke 2 success by itself.
 
 ---
 
@@ -157,6 +163,24 @@ prototype/gbn-bridge-proto/infra/scripts/k8s-pass4-public-ingress-verify.sh
 
 It must fail if any admin listener is reachable from the public side.
 
+Implemented entrypoints:
+
+```text
+prototype/gbn-bridge-proto/infra/scripts/k8s-pass4-public-ingress-prepare.sh
+prototype/gbn-bridge-proto/infra/scripts/k8s-pass4-public-ingress-verify.sh
+prototype/gbn-bridge-proto/infra/scripts/k8s-pass4-public-ingress-down.sh
+prototype/gbn-bridge-proto/infra/scripts/k8s-pass4-public-ingress-self-test.sh
+prototype/gbn-bridge-proto/infra/pass4/public-ingress/run-profile.local-k8s-public.example.json
+```
+
+The scripts accept an operator run-profile JSON, reject non-public endpoint descriptors,
+reject public admin/private ports, generate the HostCreator bootstrap seed, generate QR
+artifacts, produce the Publisher public-DHT descriptor snapshot, verify the artifacts,
+and invalidate the temporary endpoint map during teardown. If `qrencode` is installed in
+WSL2, the QR PNG is generated as a scannable QR. Without `qrencode`, the script emits a
+deterministic placeholder PNG plus the exact QR payload text so the live operator can
+generate the scannable QR before Phase 5.
+
 ---
 
 ## Security And Teardown
@@ -198,12 +222,39 @@ infra/scripts/k8s-smoke-senddummy-strict-v4.sh --require-observability
 
 infra/scripts/k8s-pass4-public-ingress-prepare.sh \
   --profile local_k8s_public \
-  --run-id pass4-local-public-$(date +%Y%m%d-%H%M%S)
+  --run-id pass4-local-public-$(date +%Y%m%d-%H%M%S) \
+  --config infra/pass4/public-ingress/run-profile.local-k8s-public.example.json
 
 infra/scripts/k8s-pass4-public-ingress-verify.sh \
+  --artifact-dir target/pass4-public-ingress/<run-id> \
   --require-no-public-admin \
   --require-hostcreator-qr \
   --require-public-dht-endpoints
+```
+
+Fixture validation, used when no real public router/DNS mapping is available yet:
+
+```bash
+cd prototype/gbn-bridge-proto
+infra/scripts/k8s-pass4-public-ingress-self-test.sh
+
+infra/scripts/k8s-pass4-public-ingress-prepare.sh \
+  --config infra/pass4/public-ingress/run-profile.local-k8s-public.example.json \
+  --run-id phase4-fixture-20260511 \
+  --artifact-dir target/pass4-public-ingress/phase4-fixture-20260511 \
+  --skip-k8s-check \
+  --skip-network-checks
+
+infra/scripts/k8s-pass4-public-ingress-verify.sh \
+  --artifact-dir target/pass4-public-ingress/phase4-fixture-20260511 \
+  --require-no-public-admin \
+  --require-hostcreator-qr \
+  --require-public-dht-endpoints \
+  --skip-network-checks
+
+infra/scripts/k8s-pass4-public-ingress-down.sh \
+  --artifact-dir target/pass4-public-ingress/phase4-fixture-20260511 \
+  --run-id phase4-fixture-20260511
 ```
 
 Expected artifacts:

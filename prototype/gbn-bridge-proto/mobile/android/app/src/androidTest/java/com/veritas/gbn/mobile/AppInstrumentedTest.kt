@@ -1,6 +1,14 @@
 package com.veritas.gbn.mobile
 
+import android.Manifest
+import android.content.Intent
+import android.os.Build
+import android.os.SystemClock
+import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
 import androidx.test.platform.app.InstrumentationRegistry
+import com.veritas.gbn.mobile.model.CreatorActionCatalog
 import com.veritas.gbn.mobile.runtime.MobileCreatorRuntime
 import com.veritas.gbn.mobile.runtime.RuntimeConfigFactory
 import org.junit.Assert.assertNotNull
@@ -31,5 +39,95 @@ class AppInstrumentedTest {
     @Test
     fun testMainActivityClassIsAvailable() {
         assertNotNull(MainActivity::class.java)
+    }
+
+    @Test
+    fun testMainActivityOfflineValidationWorkflow() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        grantRuntimePermission(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= 33) {
+            grantRuntimePermission(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        val activity = instrumentation.startActivitySync(
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        ) as MainActivity
+        instrumentation.waitForIdleSync()
+
+        val root = activity.window.decorView
+        val requiredIds = CreatorActionCatalog.requiredButtonIds + setOf(
+            "StartRuntime",
+            "StopRuntime",
+            "ImportEndpointConfig",
+            "PreviewBootstrapDHTQR",
+            "ImportHostCreatorDHTSeed",
+            "RefreshEvents",
+            "OperationOutput",
+        )
+        requiredIds.forEach { id ->
+            assertNotNull("missing UI control $id", findByTag(root, id))
+        }
+
+        click(activity, "StartRuntime")
+        waitForOutput(activity, "creator")
+        click(activity, "PreviewBootstrapDHTQR")
+        waitForOutput(activity, "host-creator")
+        click(activity, "ImportHostCreatorDHTSeed")
+        waitForOutput(activity, "host-creator")
+        click(activity, "BuildUploadSession")
+        waitForOutput(activity, "ciphertext_chunk_count")
+        click(activity, "ExportEvidence")
+        waitForOutput(activity, "Evidence ZIP")
+
+        activity.finish()
+    }
+
+    private fun grantRuntimePermission(permission: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        runCatching {
+            instrumentation.uiAutomation.grantRuntimePermission(
+                instrumentation.targetContext.packageName,
+                permission,
+            )
+        }
+    }
+
+    private fun click(activity: MainActivity, tag: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            val view = findByTag(activity.window.decorView, tag)
+                ?: error("missing view $tag")
+            view.performClick()
+        }
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(500)
+    }
+
+    private fun waitForOutput(activity: MainActivity, expected: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        repeat(30) {
+            var text = ""
+            instrumentation.runOnMainSync {
+                text = (findByTag(activity.window.decorView, "OperationOutput") as TextView).text.toString()
+            }
+            if (text.contains(expected)) return
+            SystemClock.sleep(500)
+        }
+        instrumentation.runOnMainSync {
+            val text = (findByTag(activity.window.decorView, "OperationOutput") as TextView).text.toString()
+            error("expected output containing `$expected`, got `$text`")
+        }
+    }
+
+    private fun findByTag(root: View, tag: String): View? {
+        if (root.tag == tag) return root
+        if (root is ViewGroup) {
+            for (index in 0 until root.childCount) {
+                val found = findByTag(root.getChildAt(index), tag)
+                if (found != null) return found
+            }
+        }
+        return null
     }
 }

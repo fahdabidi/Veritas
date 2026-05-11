@@ -55,7 +55,7 @@ mobile-network path on the phone.
 | `flutter emulators` | pass | `PantryVision_API_36` AVD available |
 | `flutter emulators --launch PantryVision_API_36` | blocked | Flutter launcher exited with emulator startup code `-6` in WSL |
 | Direct SDK emulator launch | pass | `/usr/lib/android-sdk/emulator/emulator -avd PantryVision_API_36 -no-window -no-audio -no-snapshot -gpu swiftshader_indirect` booted |
-| `./gradlew connectedDebugAndroidTest` | pass | `2 tests; 0 failures` on `PantryVision_API_36(AVD) - 16` |
+| `./gradlew connectedDebugAndroidTest` | pass | `3 tests; 0 failures` on `PantryVision_API_36(AVD) - 16` |
 | `./gradlew installDebug` | pass | Installed `com.veritas.gbn.mobile.debug` on emulator |
 | `adb shell monkey -p com.veritas.gbn.mobile.debug 1` | pass | App launched; PID observed |
 | `cargo fmt --all --check` | pass | Rust formatting clean |
@@ -79,8 +79,8 @@ Unit test summary:
 Instrumentation summary:
 
 ```text
-Starting 2 tests on PantryVision_API_36(AVD) - 16
-Finished 2 tests on PantryVision_API_36(AVD) - 16
+Starting 3 tests on PantryVision_API_36(AVD) - 16
+Finished 3 tests on PantryVision_API_36(AVD) - 16
 ```
 
 Instrumentation gates:
@@ -89,6 +89,9 @@ Instrumentation gates:
 - Runtime is created with app-private state under `context.filesDir`.
 - `nodeMetadata()` returns the expected `creator` runtime metadata.
 - MainActivity class is available in the debug APK.
+- The app button panel exposes and exercises `StartRuntime`, `PreviewBootstrapDHTQR`,
+  `ImportHostCreatorDHTSeed`, `BuildUploadSession`, and `ExportEvidence` tags through
+  automated emulator instrumentation.
 
 ## Emulator Evidence
 

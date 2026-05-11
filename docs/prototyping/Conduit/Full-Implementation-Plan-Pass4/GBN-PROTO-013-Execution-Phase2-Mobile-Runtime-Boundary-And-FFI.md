@@ -1,6 +1,6 @@
 # GBN-PROTO-013 - Execution Phase 2 - Mobile Runtime Boundary And FFI
 
-**Status:** Pending
+**Status:** Complete
 **Last Updated:** 2026-05-11
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 
@@ -402,7 +402,7 @@ handle that can start and stop cleanly:
 
 ## Build Plan
 
-Add a script in a later implementation pass:
+Phase 2 adds the WSL2 build script:
 
 ```text
 prototype/gbn-bridge-proto/infra/scripts/build-mobile-ffi.sh
@@ -417,15 +417,16 @@ bash prototype/gbn-bridge-proto/infra/scripts/build-mobile-ffi.sh \
   --profile debug
 ```
 
-The script must:
+The script:
 
-1. Guard for WSL2 Ubuntu.
-2. Verify Android NDK toolchain availability.
-3. Install or verify Rust Android targets.
-4. Build `gbn-bridge-mobile-ffi`.
-5. Copy `.so` outputs into the Android app module.
-6. Generate Kotlin bindings when UniFFI is used.
-7. Write a build metadata file with git SHA, target ABI, Rust version, and timestamp.
+1. Guards for WSL2 Ubuntu.
+2. Verifies Android NDK toolchain availability.
+3. Installs or verifies Rust Android targets.
+4. Builds `gbn-bridge-mobile-ffi`.
+5. Copies `.so` outputs into the Android app module.
+6. Uses the Phase 2 hand-written JNI fallback fixture under
+   `mobile/bindings-fixtures/`.
+7. Writes a build metadata file with git SHA, target ABI, Rust version, and timestamp.
 
 ---
 
@@ -527,6 +528,9 @@ cd mobile/android
 ---
 
 ## Completion Evidence
+
+Phase 2 implementation report:
+[GBN-PROTO-013-Phase2-Mobile-Runtime-FFI-20260511-210526.md](Test-Reports/GBN-PROTO-013-Phase2-Mobile-Runtime-FFI-20260511-210526.md)
 
 When this phase is implemented, archive:
 

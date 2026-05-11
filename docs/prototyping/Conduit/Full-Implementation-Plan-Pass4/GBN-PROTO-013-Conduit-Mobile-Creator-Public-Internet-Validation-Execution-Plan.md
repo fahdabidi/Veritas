@@ -165,8 +165,8 @@ Expected result:
 
 | Phase | Title | Status |
 |---|---|---|
-| 1 | Bootstrap Hardening And Validation | `[ ]` |
-| 2 | Mobile Runtime Boundary And FFI | `[ ]` |
+| 1 | Bootstrap Hardening And Validation | `[x]` |
+| 2 | Mobile Runtime Boundary And FFI | `[x]` |
 | 3 | Android Kotlin Creator App | `[ ]` |
 | 4 | Local k8s Public Internet Exposure | `[ ]` |
 | 5 | Mobile To Local k8s Public Internet Validation | `[ ]` |

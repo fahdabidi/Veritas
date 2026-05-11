@@ -1,0 +1,19 @@
+[package]
+name = "gbn-bridge-mobile-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+gbn-bridge-creator = { path = "../gbn-bridge-creator" }
+gbn-bridge-protocol = { path = "../gbn-bridge-protocol" }
+jni = "0.21"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

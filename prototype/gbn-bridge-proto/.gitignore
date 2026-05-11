@@ -9,3 +9,5 @@ artifacts/
 *.p12
 Cargo.lock
 infra/k8s/conduit/overlays/dev/password.txt
+mobile/android/app/src/main/jniLibs/**/*.so
+mobile/android/app/src/main/jniLibs/mobile-ffi-build-metadata.json

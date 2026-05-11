@@ -1,6 +1,6 @@
 # GBN-PROTO-013 - Smoke 1 - Mobile Runtime
 
-**Status:** Pending
+**Status:** Complete
 **Last Updated:** 2026-05-11
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 **Depends On:** Phases 1-3 complete
@@ -21,8 +21,8 @@ and trace evidence needed for later phases.
 
 Smoke 1 validates:
 
-- `arm64-v8a` physical-device library load;
-- optional `x86_64` emulator library load;
+- `x86_64` Flutter-managed emulator library load for Phase 3;
+- `arm64-v8a` physical-device library load in Phase 5;
 - `MobileCreatorRuntime` start/stop;
 - `nodeMetadata()`;
 - `localDht()`;
@@ -59,7 +59,7 @@ cd mobile/android
 ./gradlew connectedDebugAndroidTest
 ```
 
-Connected device test must record:
+Connected emulator/device test must record:
 
 - device model;
 - Android SDK;

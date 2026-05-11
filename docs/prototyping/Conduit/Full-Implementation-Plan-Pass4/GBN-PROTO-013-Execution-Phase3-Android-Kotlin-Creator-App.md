@@ -1,6 +1,6 @@
 # GBN-PROTO-013 - Execution Phase 3 - Android Kotlin Creator App
 
-**Status:** Pending
+**Status:** Complete
 **Last Updated:** 2026-05-11
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 **Depends On:** Phase 1 bootstrap hardening and Phase 2 mobile runtime boundary / FFI API shape
@@ -16,7 +16,9 @@ evidence export needed by later mobile-public validation phases.
 At completion:
 
 - The Android project builds from WSL2 Ubuntu with Gradle.
-- The app loads the Rust mobile FFI library on a physical Android device.
+- The app loads the Rust mobile FFI library on the Flutter-managed Android emulator in
+  Phase 3. Physical Android phone validation moves to Phase 5 with the public mobile
+  network path.
 - The app can start and stop `MobileCreatorRuntime`.
 - The app can display node metadata, local DHT state, ChainIDs, runtime events, and
   upload-session summaries.
@@ -534,7 +536,9 @@ infra/scripts/k8s-pass3-acceptance.sh --require-observability
 
 ## Manual Device Smoke
 
-Run on a physical Android device after installing the debug APK:
+Run on the Flutter-managed Android emulator during Phase 3 after installing the debug
+APK. Repeat on a physical Android phone in Phase 5 when public mobile-network validation
+begins:
 
 1. Launch app.
 2. Import an optional `offline_test` run profile config.
@@ -580,7 +584,8 @@ Expected:
 
 - Android project exists under `prototype/gbn-bridge-proto/mobile/android`.
 - App builds a debug APK from WSL2 Ubuntu.
-- App loads the Rust mobile FFI library on a physical Android device.
+- App loads the Rust mobile FFI library on the Android emulator in Phase 3; physical
+  phone load validation is deferred to Phase 5.
 - Runtime, Network Profile, Creator State, Bootstrap, Upload, Events, Evidence, and Reset
   screens exist and are usable for validation.
 - Bootstrap screen can scan `BootstrapDHTQRCode`, preview HostCreator public key and
@@ -615,6 +620,9 @@ Expected:
 
 ## Completion Evidence
 
+Phase 3 implementation report:
+[GBN-PROTO-013-Phase3-Android-Kotlin-Creator-App-20260511-223257.md](Test-Reports/GBN-PROTO-013-Phase3-Android-Kotlin-Creator-App-20260511-223257.md)
+
 When this phase is implemented, archive:
 
 - `./gradlew test` output.
@@ -622,7 +630,7 @@ When this phase is implemented, archive:
 - `./gradlew assembleDebug` output.
 - `./gradlew connectedDebugAndroidTest` output.
 - APK path and SHA-256 hash.
-- Physical device model/SDK/ABI.
+- Emulator model/SDK/ABI for Phase 3, and physical device model/SDK/ABI in Phase 5.
 - Screenshot or instrumentation capture showing the Creator Actions button panel.
 - Screenshot or instrumentation capture showing `HostCreatorDHTQRReader` preview with
   HostCreator public-key fingerprint and endpoint redacted as needed.

@@ -62,7 +62,9 @@ pub fn mark_response_returned(record: &mut BootstrapSessionRecord, returned_at_m
 
 pub fn mark_seed_acknowledged(record: &mut BootstrapSessionRecord, acked_at_ms: u64) {
     record.seed_acknowledged_at_ms = Some(acked_at_ms);
-    record.state = BootstrapSessionState::SeedAcknowledged;
+    if !matches!(record.state, BootstrapSessionState::Completed) {
+        record.state = BootstrapSessionState::SeedAcknowledged;
+    }
 }
 
 pub fn mark_seed_tunnel_reported(record: &mut BootstrapSessionRecord, reported_at_ms: u64) {

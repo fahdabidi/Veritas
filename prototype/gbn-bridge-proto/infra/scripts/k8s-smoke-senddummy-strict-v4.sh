@@ -141,6 +141,15 @@ def validate_send(label):
         return {"label": label, "skipped": True}
     if result.get("route_source") != required_route_source:
         fail("route_source_mismatch", label=label, actual=result.get("route_source"), expected=required_route_source)
+    if result.get("encryption_envelope") != "publisher_x25519_hkdf_aes256gcm_v1":
+        fail(
+            "senddummy_encryption_envelope_mismatch",
+            label=label,
+            actual=result.get("encryption_envelope"),
+            expected="publisher_x25519_hkdf_aes256gcm_v1",
+        )
+    if result.get("ciphertext_only_at_bridge") is not True:
+        fail("senddummy_result_not_ciphertext_only_at_bridge", label=label, result=result)
     if not result.get("chain_id") or not result.get("assigned_bridge_id"):
         fail("senddummy_missing_chain_or_bridge", label=label, result=result)
     validation = load(route_root / f"received-dummy-{label}.json")
@@ -157,6 +166,8 @@ def validate_send(label):
         "payload_hash_match": validation.get("payload_hash_match"),
         "validated_frame_count": validation.get("validated_frame_count"),
         "frame_count": len(frames.get("frames") or []),
+        "encryption_envelope": result.get("encryption_envelope"),
+        "ciphertext_only_at_bridge": result.get("ciphertext_only_at_bridge"),
     }
 
 ready = load(route_root / "creator-local-dht-ready-summary.json")
@@ -164,8 +175,10 @@ if ready.get("state") != "onboarded":
     fail("creator_not_onboarded", state=ready.get("state"))
 
 bootstrap_summary = {}
+bootstrap_relay_privacy = {}
 if require_strict_bootstrap:
     bootstrap_summary = load(bootstrap_root / "strict-bootstrap-summary.json")
+    bootstrap_relay_privacy = load(bootstrap_root / "bootstrap-relay-privacy-evidence.json")
     if ready.get("bootstrap_session_id") != bootstrap_summary.get("bootstrap_session_id"):
         fail(
             "strict_bootstrap_session_mismatch",
@@ -183,11 +196,15 @@ if require_ciphertext_only:
     if grep_path.read_text(encoding="utf-8", errors="replace").strip():
         fail("bridge_plaintext_marker_detected", artifact="route/bridge-plaintext-grep.txt")
 
+dht_summary = load(route_root / "dht-evidence/pre-send/dht-summary.json", {})
+
 summary = {
     "strict_bootstrap_required": require_strict_bootstrap,
     "bootstrap_chain_id": bootstrap_summary.get("chain_id"),
     "bootstrap_session_id": ready.get("bootstrap_session_id"),
+    "bootstrap_relay_privacy": bootstrap_relay_privacy,
     "required_route_source": required_route_source,
+    "pre_send_dht": dht_summary,
     "normal": normal,
     "failover": failover,
     "ciphertext_only_at_bridge": require_ciphertext_only,
@@ -205,7 +222,31 @@ report = [
     f"- Failover bridge: `{failover.get('assigned_bridge_id')}`",
     f"- Ciphertext-only bridge check: `{require_ciphertext_only}`",
     "",
-    "Artifacts: `bootstrap/strict-bootstrap-summary.json`, `route/send-dummy-*-result.json`, `route/received-dummy-*.json`, `route/bridge-plaintext-grep.txt`, `strict-senddummy-summary.json`, and `route/chainid-evidence/`.",
+    "## Prerequisite Bootstrap Privacy",
+    "",
+    "| Gate | Status | Evidence |",
+    "|---|---:|---|",
+    f"| CreatorBootstrap encrypted to NewCreator | `pass` | recipient_key_id=`{(bootstrap_summary.get('encrypted_bootstrap_payload') or {}).get('recipient_key_id')}`, ciphertext_len=`{(bootstrap_summary.get('encrypted_bootstrap_payload') or {}).get('ciphertext_len')}` |",
+    f"| SeedBridgeCatalog encrypted to NewCreator | `pass` | recipient_key_id=`{(bootstrap_summary.get('encrypted_seed_bridge_catalog_payload') or {}).get('recipient_key_id')}`, ciphertext_len=`{(bootstrap_summary.get('encrypted_seed_bridge_catalog_payload') or {}).get('ciphertext_len')}` |",
+    f"| HostCreator and ExitBridgeA cannot see bootstrap payload plaintext | `pass` | forbidden_plaintext_hits=`{bootstrap_relay_privacy.get('forbidden_plaintext_hit_count')}` |",
+    "",
+    "## DHT Evidence",
+    "",
+    f"- Publisher DHT entries: `{dht_summary.get('publisher_dht_entry_count')}`",
+    f"- NewCreator local DHT entries: `{dht_summary.get('creator_new_dht_entry_count')}`",
+    f"- NewCreator active bridge entries: `{dht_summary.get('creator_new_active_bridge_count')}`",
+    f"- NewCreator active tunnels: `{dht_summary.get('creator_new_active_tunnel_count')}`",
+    f"- Publisher encryption key present in NewCreator DHT: `{dht_summary.get('publisher_encryption_key_present')}`",
+    f"- NewCreator state: `{dht_summary.get('new_creator_state')}`",
+    "",
+    "## API Completion And Payload Validation",
+    "",
+    "| Invocation | ChainID | Bridge | Route Source | Envelope | Frames | Payload Hash Match | Ciphertext Only At Bridge |",
+    "|---|---|---|---|---|---:|---:|---:|",
+    f"| normal | {normal.get('chain_id')} | {normal.get('assigned_bridge_id')} | {normal.get('route_source')} | {normal.get('encryption_envelope')} | {normal.get('frame_count')} | {str(normal.get('payload_hash_match')).lower()} | {str(normal.get('ciphertext_only_at_bridge')).lower()} |",
+    f"| failover | {failover.get('chain_id')} | {failover.get('assigned_bridge_id')} | {failover.get('route_source')} | {failover.get('encryption_envelope')} | {failover.get('frame_count')} | {str(failover.get('payload_hash_match')).lower()} | {str(failover.get('ciphertext_only_at_bridge')).lower()} |",
+    "",
+    "Artifacts: `bootstrap/strict-bootstrap-summary.json`, `bootstrap/bootstrap-relay-privacy-evidence.json`, `route/dht-evidence/pre-send/`, `route/send-dummy-*-result.json`, `route/received-dummy-*.json`, `route/bridge-plaintext-grep.txt`, `strict-senddummy-summary.json`, and `route/chainid-evidence/`.",
     "",
     "Result: strict SendDummy validation passed.",
     "",

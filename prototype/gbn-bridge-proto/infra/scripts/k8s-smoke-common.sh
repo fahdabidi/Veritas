@@ -130,6 +130,13 @@ smoke_archive_report() {
   fi
   report_root="${VERITAS_K8S_SMOKE_REPORT_ROOT:-$repo_root/docs/prototyping/Conduit/Full-Implementation-Plan-Pass3/Test-Reports}"
   run_id="$(basename "$ARTIFACT_DIR")"
+  if [[ "$run_id" == "bootstrap" || "$run_id" == "route" ]]; then
+    local parent_run_id
+    parent_run_id="$(basename "$(dirname "$ARTIFACT_DIR")")"
+    if [[ -n "$parent_run_id" && "$parent_run_id" != "." && "$parent_run_id" != "/" ]]; then
+      run_id="${parent_run_id}-${run_id}"
+    fi
+  fi
   dest_path="$report_root/${report_prefix}-${run_id}.md"
   mkdir -p "$report_root"
   cp "$source_path" "$dest_path"

@@ -99,6 +99,7 @@ require_fanout = sys.argv[5] == "1"
 failure_path = root / "strict-bootstrap-failure.json"
 summary_path = root / "strict-bootstrap-summary.json"
 flow_steps_path = root / "strict-bootstrap-flow-steps.json"
+relay_privacy_path = root / "bootstrap-relay-privacy-evidence.json"
 report_path = root / "strict-report.md"
 
 def load(name):
@@ -186,8 +187,29 @@ for event in progress:
         fail("progress_session_mismatch", event=event)
 
 seed_bridge_id = session.get("seed_bridge_id") or evidence.get("seed_bridge_id")
+relay_bridge_id = session.get("relay_bridge_id") or seed_result.get("relay_bridge_id")
 if evidence.get("seed_bridge_dht_entry_id") != seed_bridge_id:
     fail("seed_bridge_dht_entry_mismatch", actual=evidence.get("seed_bridge_dht_entry_id"), expected=seed_bridge_id)
+for payload_name, payload in (
+    ("encrypted_bootstrap_payload", bootstrap_payload),
+    ("encrypted_seed_bridge_catalog_payload", catalog_payload),
+):
+    if not payload:
+        continue
+    if payload.get("recipient_key_id") != "new-creator":
+        fail(
+            "payload_recipient_mismatch",
+            payload=payload_name,
+            actual=payload.get("recipient_key_id"),
+            expected="new-creator",
+        )
+    if payload.get("recipient_key_id") in {"host-creator", relay_bridge_id}:
+        fail(
+            "payload_targeted_transit_actor",
+            payload=payload_name,
+            recipient_key_id=payload.get("recipient_key_id"),
+            relay_bridge_id=relay_bridge_id,
+        )
 seed_payload_reporters = {
     event.get("reporter_id")
     for event in progress
@@ -228,6 +250,104 @@ pod_log_text = "\n".join(
     path.read_text(encoding="utf-8", errors="replace")
     for path in sorted((root / "pod-logs").glob("*.log"))
 )
+
+def current_chain_lines(path):
+    return [
+        line
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if chain_id in line
+    ]
+
+host_log_paths = sorted((root / "pod-logs").glob("creator-host-*.log"))
+relay_log_paths = sorted((root / "pod-logs").glob(f"{relay_bridge_id}*.log")) if relay_bridge_id else []
+transit_logs = {}
+for path in host_log_paths + relay_log_paths:
+    lines = current_chain_lines(path)
+    if lines:
+        transit_logs[path.name] = lines
+if not host_log_paths:
+    fail("host_creator_log_missing")
+if relay_bridge_id and not relay_log_paths:
+    fail("relay_bridge_log_missing", relay_bridge_id=relay_bridge_id)
+if not transit_logs:
+    fail("transit_actor_chain_logs_missing", relay_bridge_id=relay_bridge_id)
+
+forbidden_plaintext_patterns = [
+    "creator_response",
+    "bridge_set",
+    "bridge_entries",
+    "bridge_dht_entries",
+    "publisher_entry",
+    "publisher_pub",
+    "publisher_encryption_pub",
+    "seed_bridge_id",
+    "seed_bridge\":",
+    "authority_url",
+    "receiver_url",
+    "pub_key",
+    "publisher_sig",
+    "ip_addr",
+    "udp_punch_port",
+    "entry_expiry_ms",
+    "creator_bootstrap_payload",
+    "seed_bridge_catalog_payload",
+    "CreatorBootstrapPayload",
+    "SeedBridgeCatalogPayload",
+]
+plaintext_hits = []
+for log_name, lines in transit_logs.items():
+    for line_no, line in enumerate(lines, start=1):
+        lowered = line.lower()
+        for pattern in forbidden_plaintext_patterns:
+            if pattern.lower() in lowered:
+                plaintext_hits.append(
+                    {
+                        "log": log_name,
+                        "chain_line": line_no,
+                        "pattern": pattern,
+                        "line": line,
+                    }
+                )
+if plaintext_hits:
+    (root / "bootstrap-relay-plaintext-hits.json").write_text(
+        json.dumps(plaintext_hits, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    fail(
+        "bootstrap_payload_plaintext_visible_to_transit_actor",
+        relay_bridge_id=relay_bridge_id,
+        hits=plaintext_hits[:10],
+        hit_count=len(plaintext_hits),
+    )
+
+relay_privacy = {
+    "chain_id": chain_id,
+    "bootstrap_session_id": bootstrap_session_id,
+    "relay_bridge_id": relay_bridge_id,
+    "transit_actor_logs": {
+        name: {"current_chain_line_count": len(lines)}
+        for name, lines in sorted(transit_logs.items())
+    },
+    "allowed_transit_metadata": [
+        "chain_id",
+        "new_creator_id",
+        "host_creator_id",
+        "relay_bridge_id",
+        "bootstrap_session_id",
+    ],
+    "forbidden_plaintext_patterns": forbidden_plaintext_patterns,
+    "forbidden_plaintext_hit_count": len(plaintext_hits),
+    "initial_plaintext_bridge_set_present": evidence.get("initial_plaintext_bridge_set_present"),
+    "creator_bootstrap_ciphertext_len": (bootstrap_payload or {}).get("ciphertext_len"),
+    "creator_bootstrap_recipient_key_id": (bootstrap_payload or {}).get("recipient_key_id"),
+    "seed_bridge_catalog_ciphertext_len": (catalog_payload or {}).get("ciphertext_len"),
+    "seed_bridge_catalog_recipient_key_id": (catalog_payload or {}).get("recipient_key_id"),
+    "payloads_protected": [
+        "CreatorBootstrap encrypted to NewCreator",
+        "SeedBridgeCatalog encrypted to NewCreator",
+    ],
+}
+relay_privacy_path.write_text(json.dumps(relay_privacy, indent=2, sort_keys=True), encoding="utf-8")
 
 def require_log(event):
     if event not in pod_log_text:
@@ -297,8 +417,8 @@ flow_steps = [
         "step": 7,
         "name": "Encrypted bootstrap payload returns through Publisher -> ExitBridgeA -> HostCreator -> NewCreator",
         "status": "pass",
-        "evidence": "pod-logs/*.log",
-        "observed": "publisher_response_to_host_via_bridge, host_relayed_response_to_new_creator, and new_creator_bootstrap_response_received observed",
+        "evidence": "pod-logs/*.log, bootstrap-relay-privacy-evidence.json",
+        "observed": f"publisher_response_to_host_via_bridge, host_relayed_response_to_new_creator, and new_creator_bootstrap_response_received observed; transit_plaintext_hits={relay_privacy['forbidden_plaintext_hit_count']}",
     },
     {
         "step": 8,
@@ -375,6 +495,7 @@ summary = {
     "fanout_progress_count": len(fanout_reporters),
     "progress_event_count": len(progress),
     "local_dht_state": local_dht.get("self_onboarding_state"),
+    "relay_privacy": relay_privacy,
 }
 summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -390,6 +511,15 @@ report = [
     f"- Publisher DHT entry in encrypted bootstrap payload: `{evidence.get('publisher_entry_in_bootstrap_payload')}`",
     f"- CreatorBootstrap ciphertext bytes: `{(bootstrap_payload or {}).get('ciphertext_len')}`",
     f"- SeedBridgeCatalog ciphertext bytes: `{(catalog_payload or {}).get('ciphertext_len')}`",
+    f"- Transit actor bootstrap plaintext hits: `{relay_privacy['forbidden_plaintext_hit_count']}`",
+    "",
+    "## Payload Encryption And Relay Privacy",
+    "",
+    "| Payload | Protection Gate | Status | Evidence |",
+    "|---|---|---:|---|",
+    f"| CreatorBootstrap | encrypted to NewCreator; no initial plaintext bridge set | `pass` | recipient_key_id=`{(bootstrap_payload or {}).get('recipient_key_id')}`, ciphertext_len=`{(bootstrap_payload or {}).get('ciphertext_len')}`, initial_plaintext_bridge_set_present=`{evidence.get('initial_plaintext_bridge_set_present')}` |",
+    f"| SeedBridgeCatalog | encrypted to NewCreator before catalog handoff | `pass` | recipient_key_id=`{(catalog_payload or {}).get('recipient_key_id')}`, ciphertext_len=`{(catalog_payload or {}).get('ciphertext_len')}` |",
+    f"| Relay transit visibility | HostCreator and ExitBridgeA current-chain logs contain no bootstrap-payload fields | `pass` | relay_bridge_id=`{relay_bridge_id}`, forbidden_plaintext_hits=`{relay_privacy['forbidden_plaintext_hit_count']}` |",
     "",
     "## README Flow Gate Ledger",
     "",
@@ -402,7 +532,7 @@ for step in flow_steps:
     )
 report.extend([
     "",
-    "Artifacts: `seed-new-creator-result.json`, `bootstrap-session.json`, `local-dht-final.json`, `strict-bootstrap-summary.json`, `strict-bootstrap-flow-steps.json`, `pod-log-events.json`, and `pod-logs/`.",
+    "Artifacts: `seed-new-creator-result.json`, `bootstrap-session.json`, `local-dht-final.json`, `strict-bootstrap-summary.json`, `strict-bootstrap-flow-steps.json`, `bootstrap-relay-privacy-evidence.json`, `pod-log-events.json`, and `pod-logs/`.",
     "",
     "Result: strict bootstrap hardening validation passed.",
     "",

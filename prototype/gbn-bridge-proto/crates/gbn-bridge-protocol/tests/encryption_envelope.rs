@@ -100,6 +100,8 @@ fn encrypted_bootstrap_payload_round_trip_succeeds_for_new_creator_only() {
     let publisher_private = [9_u8; 32];
     let creator_private = [7_u8; 32];
     let creator_public = public_key(creator_private);
+    let host_creator_private = [8_u8; 32];
+    let exit_bridge_private = [11_u8; 32];
     let plaintext = json!({
         "chain_id": "bootstrap-chain",
         "bootstrap_session_id": "bootstrap-session",
@@ -129,5 +131,10 @@ fn encrypted_bootstrap_payload_round_trip_succeeds_for_new_creator_only() {
     let decrypted: serde_json::Value =
         decrypt_bootstrap_payload(&encrypted, creator_private).unwrap();
     assert_eq!(decrypted, plaintext);
-    assert!(decrypt_bootstrap_payload::<serde_json::Value>(&encrypted, [8_u8; 32]).is_err());
+    assert!(
+        decrypt_bootstrap_payload::<serde_json::Value>(&encrypted, host_creator_private).is_err()
+    );
+    assert!(
+        decrypt_bootstrap_payload::<serde_json::Value>(&encrypted, exit_bridge_private).is_err()
+    );
 }

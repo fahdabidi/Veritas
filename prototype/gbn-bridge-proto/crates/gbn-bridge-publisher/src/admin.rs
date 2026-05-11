@@ -21,13 +21,15 @@ use gbn_bridge_creator::{
     UploadManifest, UploadSessionSummary,
 };
 use gbn_bridge_protocol::{
-    decrypt_from_creator, publisher_encryption_identity,
-    publisher_encryption_private_from_signing_key, validate_chain_id, BootstrapJoinReply,
-    BootstrapSession, BridgeCommandPayload, BridgeDhtEntry, CreatorDhtEntry,
-    CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint, EncryptedFrame,
-    HostCreatorSeedState, HostRoleState, LocalDiscoveryTable, NewCreatorSeedState, PendingCreator,
-    ProtocolError, PublicKeyBytes, PublisherDhtEntry, ReachabilityClass, SelfOnboardingState,
-    TunnelPeerRole, TunnelState,
+    decrypt_bootstrap_payload, decrypt_from_creator, encryption_identity_from_signing_key,
+    publisher_encryption_identity, publisher_encryption_private_from_signing_key,
+    validate_chain_id, BootstrapJoinReply, BootstrapPayloadKind, BootstrapSession,
+    BridgeCommandPayload, BridgeDhtEntry, CreatorBootstrapPayload, CreatorDhtEntry,
+    CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint,
+    EncryptedBootstrapPayload, EncryptedFrame, EnvelopeKeyDerivation, HostCreatorSeedState,
+    HostRoleState, LocalDiscoveryTable, NewCreatorSeedState, PendingCreator, ProtocolError,
+    PublicKeyBytes, PublisherDhtEntry, ReachabilityClass, SeedBridgeCatalogPayload,
+    SelfOnboardingState, TunnelPeerRole, TunnelState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -489,6 +491,32 @@ pub struct SeedNewCreatorResponse {
     pub started_bootstrap: bool,
     pub forced: bool,
     pub idempotent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_bootstrap_evidence: Option<StrictBootstrapEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrictBootstrapEvidence {
+    pub initial_plaintext_bridge_set_present: bool,
+    pub new_creator_encryption_pub_key: PublicKeyBytes,
+    pub encrypted_bootstrap_payload: BootstrapPayloadEvidence,
+    pub encrypted_seed_bridge_catalog_payload: BootstrapPayloadEvidence,
+    pub seed_bridge_id: String,
+    pub seed_catalog_bridge_count: usize,
+    pub seed_catalog_bridge_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapPayloadEvidence {
+    pub key_derivation: EnvelopeKeyDerivation,
+    pub payload_kind: BootstrapPayloadKind,
+    pub chain_id: String,
+    pub bootstrap_session_id: String,
+    pub sender_pubkey: PublicKeyBytes,
+    pub recipient_key_id: String,
+    pub plaintext_sha256: Vec<u8>,
+    pub ciphertext_len: usize,
+    pub auth_tag_len: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1662,6 +1690,7 @@ fn seed_new_creator(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec
                         .map(|session| session.session_id.clone()),
                     false,
                     true,
+                    None,
                 ),
             );
         }
@@ -1729,12 +1758,20 @@ fn seed_new_creator(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec
     if !request.start_bootstrap {
         return json_response(
             200,
-            &seed_new_response(&committed, &request, proposed_chain_id, None, false, false),
+            &seed_new_response(
+                &committed,
+                &request,
+                proposed_chain_id,
+                None,
+                false,
+                false,
+                None,
+            ),
         );
     }
 
     match begin_new_creator_bootstrap(state, store, &request, &proposed_chain_id, now_ms) {
-        Ok((table, bootstrap_session_id)) => json_response(
+        Ok((table, bootstrap_session_id, strict_bootstrap_evidence)) => json_response(
             200,
             &seed_new_response(
                 &table,
@@ -1743,6 +1780,7 @@ fn seed_new_creator(state: &AdminState, body: &[u8], query: Option<&str>) -> Vec
                 Some(bootstrap_session_id),
                 true,
                 false,
+                Some(strict_bootstrap_evidence),
             ),
         ),
         Err((status, code, message)) => error_response(status, code, &message),
@@ -1790,7 +1828,7 @@ fn start_bootstrap(state: &AdminState, body: &[u8]) -> Vec<u8> {
         host_admin_url: None,
     };
     match begin_new_creator_bootstrap(state, store, &request, &chain_id, now_ms()) {
-        Ok((table, bootstrap_session_id)) => json_response(
+        Ok((table, bootstrap_session_id, strict_bootstrap_evidence)) => json_response(
             200,
             &seed_new_response(
                 &table,
@@ -1799,6 +1837,7 @@ fn start_bootstrap(state: &AdminState, body: &[u8]) -> Vec<u8> {
                 Some(bootstrap_session_id),
                 true,
                 false,
+                Some(strict_bootstrap_evidence),
             ),
         ),
         Err((status, code, message)) => error_response(status, code, &message),
@@ -2764,6 +2803,7 @@ fn seed_new_response(
     bootstrap_session_id: Option<String>,
     started_bootstrap: bool,
     idempotent: bool,
+    strict_bootstrap_evidence: Option<StrictBootstrapEvidence>,
 ) -> SeedNewCreatorResponse {
     SeedNewCreatorResponse {
         new_creator_id: request.new_creator_id.clone(),
@@ -2774,6 +2814,21 @@ fn seed_new_response(
         started_bootstrap,
         forced: request.force,
         idempotent,
+        strict_bootstrap_evidence,
+    }
+}
+
+fn bootstrap_payload_evidence(payload: &EncryptedBootstrapPayload) -> BootstrapPayloadEvidence {
+    BootstrapPayloadEvidence {
+        key_derivation: payload.key_derivation,
+        payload_kind: payload.payload_kind,
+        chain_id: payload.chain_id.clone(),
+        bootstrap_session_id: payload.bootstrap_session_id.clone(),
+        sender_pubkey: payload.sender_pubkey.clone(),
+        recipient_key_id: payload.recipient_key_id.clone(),
+        plaintext_sha256: payload.plaintext_sha256.clone(),
+        ciphertext_len: payload.ciphertext.len(),
+        auth_tag_len: payload.auth_tag.len(),
     }
 }
 
@@ -2783,7 +2838,7 @@ fn begin_new_creator_bootstrap(
     request: &SeedNewCreatorRequest,
     chain_id: &str,
     now_ms: u64,
-) -> Result<(LocalDiscoveryTable, String), (u16, &'static str, String)> {
+) -> Result<(LocalDiscoveryTable, String, StrictBootstrapEvidence), (u16, &'static str, String)> {
     let config = state.creator.as_ref().ok_or_else(|| {
         (
             501,
@@ -2822,6 +2877,9 @@ fn begin_new_creator_bootstrap(
                     pub_key: PublicKeyBytes::from_verifying_key(
                         &config.signing_key.verifying_key(),
                     ),
+                    encryption_pub_key: Some(encryption_identity_from_signing_key(
+                        &config.signing_key,
+                    )),
                     udp_punch_port: state
                         .node_metadata
                         .creator_udp_punch_port
@@ -2904,29 +2962,100 @@ fn begin_new_creator_bootstrap(
         mark_new_creator_failed(store, chain_id, &message);
         return Err((502, "publisher_bootstrap_payload_invalid", message));
     }
-    let creator_entry = relay
+    if relay.bootstrap_reply.bridge_set.is_some() {
+        let message =
+            "strict bootstrap rejects plaintext bridge set in initial HostCreator relay response"
+                .to_string();
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "bootstrap_payload_plaintext_bridge_set", message));
+    }
+    let encrypted_bootstrap = relay
         .bootstrap_reply
-        .creator_dht_entry
+        .encrypted_bootstrap_payload
         .clone()
         .ok_or_else(|| {
-            let message = "Publisher bootstrap payload did not include a signed Creator DHT entry"
-                .to_string();
+            let message =
+                "Publisher bootstrap response did not include encrypted NewCreator payload"
+                    .to_string();
             mark_new_creator_failed(store, chain_id, &message);
-            (502, "bootstrap_payload_missing_creator_entry", message)
+            (502, "bootstrap_payload_missing_encrypted_payload", message)
         })?;
-    let bridge_set = relay.bootstrap_reply.bridge_set.clone().ok_or_else(|| {
-        let message =
-            "Publisher bootstrap payload did not include the signed bridge set".to_string();
+    if encrypted_bootstrap.payload_kind != BootstrapPayloadKind::CreatorBootstrap {
+        let message = "encrypted bootstrap payload had the wrong payload kind".to_string();
         mark_new_creator_failed(store, chain_id, &message);
-        (502, "bootstrap_payload_missing_bridge_set", message)
+        return Err((502, "bootstrap_payload_wrong_kind", message));
+    }
+    let bootstrap_payload: CreatorBootstrapPayload = decrypt_bootstrap_payload(
+        &encrypted_bootstrap,
+        gbn_bridge_protocol::encryption_private_from_signing_key(&config.signing_key),
+    )
+    .map_err(|error| {
+        let message = format!("failed to decrypt Publisher bootstrap payload: {error}");
+        mark_new_creator_failed(store, chain_id, &message);
+        (502, "bootstrap_payload_decrypt_failed", message)
     })?;
+    if let Err(error) = bootstrap_payload.verify_authority(&config.publisher_pub, now_ms) {
+        let message = format!("decrypted Publisher bootstrap payload failed validation: {error}");
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "publisher_bootstrap_payload_invalid", message));
+    }
+    if bootstrap_payload.chain_id != chain_id
+        || bootstrap_payload.bootstrap_session_id != relay.bootstrap_session_id
+    {
+        let message = "decrypted Publisher bootstrap payload metadata mismatch".to_string();
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "bootstrap_payload_metadata_mismatch", message));
+    }
+    let creator_entry = bootstrap_payload.creator_dht_entry.clone();
+    let encrypted_catalog = relay
+        .bootstrap_reply
+        .encrypted_seed_bridge_catalog_payload
+        .clone()
+        .ok_or_else(|| {
+            let message =
+                "Seed ExitBridge catalog payload was not forwarded as encrypted seed payload"
+                    .to_string();
+            mark_new_creator_failed(store, chain_id, &message);
+            (
+                502,
+                "seed_bridge_catalog_missing_encrypted_payload",
+                message,
+            )
+        })?;
+    if encrypted_catalog.payload_kind != BootstrapPayloadKind::SeedBridgeCatalog {
+        let message =
+            "encrypted seed bridge catalog payload had the wrong payload kind".to_string();
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "seed_bridge_catalog_wrong_kind", message));
+    }
+    let seed_catalog_payload: SeedBridgeCatalogPayload = decrypt_bootstrap_payload(
+        &encrypted_catalog,
+        gbn_bridge_protocol::encryption_private_from_signing_key(&config.signing_key),
+    )
+    .map_err(|error| {
+        let message = format!("failed to decrypt Seed ExitBridge catalog payload: {error}");
+        mark_new_creator_failed(store, chain_id, &message);
+        (502, "seed_bridge_catalog_decrypt_failed", message)
+    })?;
+    if let Err(error) = seed_catalog_payload.verify_authority(&config.publisher_pub, now_ms) {
+        let message = format!("Seed ExitBridge catalog payload failed validation: {error}");
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "seed_bridge_catalog_invalid", message));
+    }
+    let bridge_set = seed_catalog_payload.bridge_set.clone();
     if bridge_set.bridge_dht_entries.is_empty() {
         let message =
             "Publisher bootstrap payload did not include signed bridge DHT entries".to_string();
         mark_new_creator_failed(store, chain_id, &message);
         return Err((502, "bootstrap_payload_missing_bridge_dht_entries", message));
     }
-    let seed_bridge_id = relay.bootstrap_reply.response.seed_bridge.node_id.clone();
+    let seed_bridge_id = bootstrap_payload.response.seed_bridge.node_id.clone();
+    if seed_catalog_payload.seed_bridge_id != seed_bridge_id {
+        let message =
+            "Seed ExitBridge catalog payload did not match selected seed bridge".to_string();
+        mark_new_creator_failed(store, chain_id, &message);
+        return Err((502, "seed_bridge_catalog_seed_mismatch", message));
+    }
     if !bridge_set
         .bridge_dht_entries
         .iter()
@@ -2938,6 +3067,21 @@ fn begin_new_creator_bootstrap(
         mark_new_creator_failed(store, chain_id, &message);
         return Err((502, "bootstrap_payload_missing_seed_bridge", message));
     }
+    let mut seed_catalog_bridge_ids = bridge_set
+        .bridge_dht_entries
+        .iter()
+        .map(|entry| entry.bridge_id.clone())
+        .collect::<Vec<_>>();
+    seed_catalog_bridge_ids.sort();
+    let strict_bootstrap_evidence = StrictBootstrapEvidence {
+        initial_plaintext_bridge_set_present: relay.bootstrap_reply.bridge_set.is_some(),
+        new_creator_encryption_pub_key: encryption_identity_from_signing_key(&config.signing_key),
+        encrypted_bootstrap_payload: bootstrap_payload_evidence(&encrypted_bootstrap),
+        encrypted_seed_bridge_catalog_payload: bootstrap_payload_evidence(&encrypted_catalog),
+        seed_bridge_id: seed_bridge_id.clone(),
+        seed_catalog_bridge_count: bridge_set.bridge_dht_entries.len(),
+        seed_catalog_bridge_ids,
+    };
     emit_join_path_event(
         "new_creator_bootstrap_response_received",
         chain_id,
@@ -3016,12 +3160,8 @@ fn begin_new_creator_bootstrap(
             .receiver_url
             .clone()
             .unwrap_or_else(|| config.authority_url.clone()),
-        pub_key: relay.bootstrap_reply.response.publisher_pub.clone(),
-        encryption_pub_key: relay
-            .bootstrap_reply
-            .response
-            .publisher_encryption_pub
-            .clone(),
+        pub_key: bootstrap_payload.response.publisher_pub.clone(),
+        encryption_pub_key: bootstrap_payload.response.publisher_encryption_pub.clone(),
         entry_expiry_ms: bridge_set
             .bridge_dht_entries
             .iter()
@@ -3086,7 +3226,7 @@ fn begin_new_creator_bootstrap(
                 Some(&seed_bridge_id),
                 Some(&relay.bootstrap_session_id),
             );
-            Ok((table, relay.bootstrap_session_id))
+            Ok((table, relay.bootstrap_session_id, strict_bootstrap_evidence))
         }
         Err(error) => Err((500, "local_dht_bootstrap_update_failed", error.to_string())),
     }

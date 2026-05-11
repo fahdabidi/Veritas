@@ -17,7 +17,7 @@ use gbn_bridge_publisher::{
     admin::{
         AdminCreatorConfig, AdminErrorResponse, AdminHttpServer, AdminHttpServerHandle,
         AdminNodeMetadata, AdminState, CreatorDhtEntryResponse, CreatorDhtEntrySignRequest,
-        HostJoinRelayBody, SeedNewCreatorRequest, SeedNewCreatorResponse,
+        HostJoinRelayBody, HostJoinRelayResponse, SeedNewCreatorRequest, SeedNewCreatorResponse,
     },
     api::{AuthorityApiRequest, AuthorityApiRequestUnsigned, AuthorityRoute},
     AuthorityServer, PublisherAuthority, PublisherServiceConfig,
@@ -402,6 +402,29 @@ fn valid_seed_with_bootstrap_relays_join_through_host_and_records_session() {
         .bootstrap_session_id
         .clone()
         .expect("bootstrap session id should be returned");
+    let strict_evidence = response
+        .strict_bootstrap_evidence
+        .as_ref()
+        .expect("strict bootstrap response should include evidence metadata");
+    assert!(!strict_evidence.initial_plaintext_bridge_set_present);
+    assert_eq!(
+        strict_evidence.encrypted_bootstrap_payload.payload_kind,
+        gbn_bridge_protocol::BootstrapPayloadKind::CreatorBootstrap
+    );
+    assert_eq!(
+        strict_evidence
+            .encrypted_bootstrap_payload
+            .bootstrap_session_id,
+        bootstrap_session_id
+    );
+    assert_eq!(
+        strict_evidence
+            .encrypted_seed_bridge_catalog_payload
+            .payload_kind,
+        gbn_bridge_protocol::BootstrapPayloadKind::SeedBridgeCatalog
+    );
+    assert_eq!(strict_evidence.seed_bridge_id, "exit-bridge-b");
+    assert_eq!(strict_evidence.seed_catalog_bridge_count, 2);
 
     let (status, table): (u16, LocalDiscoveryTable) =
         get_json(new_admin.local_addr(), AuthorityRoute::AdminLocalDht.path());
@@ -472,6 +495,12 @@ fn valid_seed_with_bootstrap_relays_join_through_host_and_records_session() {
         .iter()
         .any(|event| event.reporter_id == "exit-bridge-b"
             && event.stage == BootstrapProgressStage::SeedTunnelEstablished));
+    for bridge_id in &session.bridge_ids {
+        assert!(session.progress_events.iter().any(|event| {
+            event.reporter_id == *bridge_id
+                && event.stage == BootstrapProgressStage::BridgeTunnelEstablished
+        }));
+    }
     assert!(session
         .progress_events
         .iter()
@@ -488,6 +517,99 @@ fn valid_seed_with_bootstrap_relays_join_through_host_and_records_session() {
     authority.join();
     let _ = std::fs::remove_dir_all(host_dir);
     let _ = std::fs::remove_dir_all(new_dir);
+}
+
+#[test]
+fn host_join_returns_encrypted_payloads_without_plaintext_bridge_set() {
+    let authority = AuthorityHarness::start();
+    let (host_dir, host_store) = seed_host_store("creator-host", authority.url.clone());
+    let host_admin =
+        creator_admin_server("creator-host", 10, authority.url.clone(), host_store, true);
+    let now = now_ms();
+    let relay = AuthorityApiRequest::sign(
+        AuthorityApiRequestUnsigned {
+            chain_id: format!("seed-new-creator-creator-new-{now}"),
+            request_id: format!("join-{now}"),
+            sent_at_ms: now,
+            actor_id: "creator-new".to_string(),
+            body: HostJoinRelayBody {
+                host_creator_id: "creator-host".to_string(),
+                creator: PendingCreator {
+                    node_id: "creator-new".to_string(),
+                    ip_addr: "127.0.0.1".to_string(),
+                    pub_key: public_key(20),
+                    encryption_pub_key: Some(
+                        gbn_bridge_protocol::encryption_identity_from_signing_key(&signing_key(20)),
+                    ),
+                    udp_punch_port: 4443,
+                },
+                now_ms: now,
+            },
+        },
+        &signing_key(20),
+    )
+    .unwrap();
+    let body = serde_json::to_string(&relay).unwrap();
+
+    let (status, response): (u16, HostJoinRelayResponse) = post_json(
+        host_admin.local_addr(),
+        AuthorityRoute::AdminHostJoinRelay.path(),
+        &body,
+    );
+    assert_eq!(status, 200);
+    assert!(response.bootstrap_reply.bridge_set.is_none());
+    let encrypted_bootstrap = response
+        .bootstrap_reply
+        .encrypted_bootstrap_payload
+        .as_ref()
+        .expect("strict host relay should include encrypted bootstrap payload");
+    assert_eq!(
+        encrypted_bootstrap.payload_kind,
+        gbn_bridge_protocol::BootstrapPayloadKind::CreatorBootstrap
+    );
+    let bootstrap_payload: gbn_bridge_protocol::CreatorBootstrapPayload =
+        gbn_bridge_protocol::decrypt_bootstrap_payload(
+            encrypted_bootstrap,
+            gbn_bridge_protocol::encryption_private_from_signing_key(&signing_key(20)),
+        )
+        .expect("NewCreator key should decrypt bootstrap payload");
+    assert_eq!(bootstrap_payload.creator_entry.node_id, "creator-new");
+    assert_eq!(
+        bootstrap_payload.response.bootstrap_session_id,
+        response.bootstrap_session_id
+    );
+
+    let encrypted_catalog = response
+        .bootstrap_reply
+        .encrypted_seed_bridge_catalog_payload
+        .as_ref()
+        .expect("strict host relay should include encrypted seed catalog payload");
+    assert_eq!(
+        encrypted_catalog.payload_kind,
+        gbn_bridge_protocol::BootstrapPayloadKind::SeedBridgeCatalog
+    );
+    let seed_catalog: gbn_bridge_protocol::SeedBridgeCatalogPayload =
+        gbn_bridge_protocol::decrypt_bootstrap_payload(
+            encrypted_catalog,
+            gbn_bridge_protocol::encryption_private_from_signing_key(&signing_key(20)),
+        )
+        .expect("NewCreator key should decrypt seed catalog payload");
+    assert_eq!(seed_catalog.bridge_set.bridge_dht_entries.len(), 2);
+    assert_eq!(
+        seed_catalog.seed_bridge_id,
+        bootstrap_payload.response.seed_bridge.node_id
+    );
+    assert!(gbn_bridge_protocol::decrypt_bootstrap_payload::<
+        gbn_bridge_protocol::CreatorBootstrapPayload,
+    >(
+        encrypted_bootstrap,
+        gbn_bridge_protocol::encryption_private_from_signing_key(&signing_key(21)),
+    )
+    .is_err());
+
+    host_admin.join().unwrap();
+    authority.join();
+    let _ = std::fs::remove_dir_all(host_dir);
 }
 
 #[test]
@@ -624,6 +746,9 @@ fn unseeded_host_creator_rejects_join_request() {
                     node_id: "creator-new".to_string(),
                     ip_addr: "127.0.0.1".to_string(),
                     pub_key: public_key(20),
+                    encryption_pub_key: Some(
+                        gbn_bridge_protocol::encryption_identity_from_signing_key(&signing_key(20)),
+                    ),
                     udp_punch_port: 4443,
                 },
                 now_ms: now,

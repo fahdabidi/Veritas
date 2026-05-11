@@ -49,6 +49,7 @@ fn join_request(request_id: &str, relay_bridge_id: &str, key_seed: u8) -> Creato
             node_id: format!("creator-{request_id}"),
             ip_addr: "203.0.113.55".into(),
             pub_key: node_public_key(key_seed),
+            encryption_pub_key: None,
             udp_punch_port: 443,
         },
     }
@@ -219,8 +220,8 @@ fn seed_bridge_establishes_acks_and_returns_bootstrap_payload() {
         bridge_set.bootstrap_session_id,
         plan.response.bootstrap_session_id
     );
-    assert_eq!(bridge_set.bridge_entries.len(), 1);
-    assert_eq!(bridge_set.bridge_dht_entries.len(), 1);
+    assert_eq!(bridge_set.bridge_entries.len(), 2);
+    assert_eq!(bridge_set.bridge_dht_entries.len(), 2);
 
     let progress = bridge.publisher_client().reported_progress();
     assert_eq!(progress.len(), 2);

@@ -4,12 +4,13 @@ pub mod session;
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    publisher_encryption_identity, BootstrapDhtEntry, BootstrapDhtEntryUnsigned,
-    BootstrapJoinReply, BridgeCapability, BridgeDhtEntry, BridgeDhtEntryUnsigned,
-    BridgeIngressEndpointKind, BridgeSeedAssign, BridgeSetResponse, BridgeSetResponseUnsigned,
+    encrypt_bootstrap_payload, encryption_private_from_signing_key, publisher_encryption_identity,
+    BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BootstrapJoinReply, BootstrapPayloadKind,
+    BridgeCapability, BridgeDhtEntry, BridgeDhtEntryUnsigned, BridgeIngressEndpointKind,
+    BridgeSeedAssign, BridgeSetResponse, BridgeSetResponseUnsigned, CreatorBootstrapPayload,
     CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned, CreatorDhtEntry,
     CreatorDhtEntryUnsigned, CreatorJoinRequest, DhtBridgeIngressEndpoint, PublicKeyBytes,
-    ReachabilityClass,
+    ReachabilityClass, SeedBridgeCatalogPayload,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,9 @@ pub struct AuthorityBootstrapPlan {
     pub bridge_set: BridgeSetResponse,
     pub seed_punch: gbn_bridge_protocol::BridgePunchStart,
     pub seed_assignment: BridgeSeedAssign,
+    pub encrypted_bootstrap_payload: Option<gbn_bridge_protocol::EncryptedBootstrapPayload>,
+    pub encrypted_seed_bridge_catalog_payload:
+        Option<gbn_bridge_protocol::EncryptedBootstrapPayload>,
 }
 
 impl AuthorityBootstrapPlan {
@@ -35,7 +39,21 @@ impl AuthorityBootstrapPlan {
             self.creator_entry.clone(),
             self.creator_dht_entry.clone(),
             self.response.clone(),
-            self.bridge_set.clone(),
+            self.encrypted_bootstrap_payload.clone(),
+            self.encrypted_seed_bridge_catalog_payload.clone(),
+            None,
+        )
+    }
+
+    pub fn compatibility_join_reply(&self) -> BootstrapJoinReply {
+        distribution::join_reply(
+            &self.response.chain_id,
+            self.creator_entry.clone(),
+            self.creator_dht_entry.clone(),
+            self.response.clone(),
+            self.encrypted_bootstrap_payload.clone(),
+            self.encrypted_seed_bridge_catalog_payload.clone(),
+            Some(self.bridge_set.clone()),
         )
     }
 }
@@ -287,6 +305,46 @@ pub fn begin_bootstrap(
         seed_punch.clone(),
         now_ms + config.bootstrap_response_ttl_ms,
     )?;
+    let (encrypted_bootstrap_payload, encrypted_seed_bridge_catalog_payload) =
+        if let Some(creator_encryption_pub) = &request.creator.encryption_pub_key {
+            let sender_private = encryption_private_from_signing_key(signing_key);
+            let recipient_key_id = request.creator.node_id.clone();
+            let bootstrap_payload = CreatorBootstrapPayload {
+                chain_id: chain_id.to_string(),
+                bootstrap_session_id: bootstrap_session_id.clone(),
+                creator_entry: creator_entry.clone(),
+                creator_dht_entry: creator_dht_entry.clone(),
+                response: response.clone(),
+                publisher_entry: None,
+            };
+            let encrypted_bootstrap = encrypt_bootstrap_payload(
+                BootstrapPayloadKind::CreatorBootstrap,
+                chain_id,
+                &bootstrap_session_id,
+                &bootstrap_payload,
+                creator_encryption_pub,
+                &recipient_key_id,
+                sender_private,
+            )?;
+            let catalog_payload = SeedBridgeCatalogPayload {
+                chain_id: chain_id.to_string(),
+                bootstrap_session_id: bootstrap_session_id.clone(),
+                seed_bridge_id: seed_record.bridge_id.clone(),
+                bridge_set: bridge_set.clone(),
+            };
+            let encrypted_catalog = encrypt_bootstrap_payload(
+                BootstrapPayloadKind::SeedBridgeCatalog,
+                chain_id,
+                &bootstrap_session_id,
+                &catalog_payload,
+                creator_encryption_pub,
+                recipient_key_id,
+                sender_private,
+            )?;
+            (Some(encrypted_bootstrap), Some(encrypted_catalog))
+        } else {
+            (None, None)
+        };
 
     storage.bootstrap_sessions.insert(
         bootstrap_session_id.clone(),
@@ -315,5 +373,7 @@ pub fn begin_bootstrap(
         bridge_set,
         seed_punch,
         seed_assignment,
+        encrypted_bootstrap_payload,
+        encrypted_seed_bridge_catalog_payload,
     })
 }

@@ -2,6 +2,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -11,6 +12,8 @@ use crate::signing::PublicKeyBytes;
 
 const KEY_INFO: &[u8] = b"veritas/conduit/v2/upload-content-key";
 const NONCE_INFO: &[u8] = b"veritas/conduit/v2/nonce";
+const BOOTSTRAP_KEY_INFO: &[u8] = b"veritas/conduit/v2/bootstrap-payload-key";
+const BOOTSTRAP_NONCE_INFO: &[u8] = b"veritas/conduit/v2/bootstrap-payload-nonce";
 const SESSION_ID_LEN: usize = 16;
 const GCM_TAG_LEN: usize = 16;
 
@@ -33,14 +36,153 @@ pub struct EncryptedFrame {
     pub auth_tag: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapPayloadKind {
+    CreatorBootstrap,
+    SeedBridgeCatalog,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncryptedBootstrapPayload {
+    pub key_derivation: EnvelopeKeyDerivation,
+    pub payload_kind: BootstrapPayloadKind,
+    pub chain_id: String,
+    pub bootstrap_session_id: String,
+    pub sender_pubkey: PublicKeyBytes,
+    pub recipient_key_id: String,
+    pub plaintext_sha256: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub auth_tag: Vec<u8>,
+}
+
 pub fn publisher_encryption_private_from_signing_key(signing_key: &SigningKey) -> [u8; 32] {
     signing_key.to_bytes()
 }
 
 pub fn publisher_encryption_identity(signing_key: &SigningKey) -> PublicKeyBytes {
+    encryption_identity_from_signing_key(signing_key)
+}
+
+pub fn encryption_private_from_signing_key(signing_key: &SigningKey) -> [u8; 32] {
+    signing_key.to_bytes()
+}
+
+pub fn encryption_identity_from_signing_key(signing_key: &SigningKey) -> PublicKeyBytes {
     let private = publisher_encryption_private_from_signing_key(signing_key);
     let public = PublicKey::from(&StaticSecret::from(private));
     PublicKeyBytes(public.as_bytes().to_vec())
+}
+
+pub fn encrypt_bootstrap_payload<T>(
+    payload_kind: BootstrapPayloadKind,
+    chain_id: impl Into<String>,
+    bootstrap_session_id: impl Into<String>,
+    plaintext: &T,
+    recipient_x25519_pubkey: &PublicKeyBytes,
+    recipient_key_id: impl Into<String>,
+    sender_private: [u8; 32],
+) -> Result<EncryptedBootstrapPayload, ProtocolError>
+where
+    T: Serialize,
+{
+    let chain_id = chain_id.into();
+    let bootstrap_session_id = bootstrap_session_id.into();
+    let recipient_pubkey = x25519_public_key(recipient_x25519_pubkey)?;
+    let sender_secret = StaticSecret::from(sender_private);
+    let sender_pubkey = PublicKey::from(&sender_secret);
+    let shared_secret = sender_secret.diffie_hellman(&recipient_pubkey);
+    let key = derive_bytes(shared_secret.as_bytes(), BOOTSTRAP_KEY_INFO, 32)?;
+    let nonce_base = derive_bytes(shared_secret.as_bytes(), BOOTSTRAP_NONCE_INFO, 12)?;
+    let plaintext = serde_json::to_vec(plaintext)?;
+    let plaintext_sha256 = Sha256::digest(&plaintext).to_vec();
+    let aad = bootstrap_payload_aad(
+        payload_kind,
+        &chain_id,
+        &bootstrap_session_id,
+        &plaintext_sha256,
+    );
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|error| {
+        ProtocolError::Envelope(format!("failed to initialize AES-256-GCM: {error}"))
+    })?;
+    let mut encrypted = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_base),
+            Payload {
+                msg: &plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| {
+            ProtocolError::Envelope("AES-256-GCM bootstrap encryption failed".to_string())
+        })?;
+    if encrypted.len() < GCM_TAG_LEN {
+        return Err(ProtocolError::Envelope(
+            "AES-256-GCM bootstrap output was shorter than authentication tag".to_string(),
+        ));
+    }
+    let auth_tag = encrypted.split_off(encrypted.len() - GCM_TAG_LEN);
+
+    Ok(EncryptedBootstrapPayload {
+        key_derivation: EnvelopeKeyDerivation::PublisherX25519HkdfAes256GcmV1,
+        payload_kind,
+        chain_id,
+        bootstrap_session_id,
+        sender_pubkey: PublicKeyBytes(sender_pubkey.as_bytes().to_vec()),
+        recipient_key_id: recipient_key_id.into(),
+        plaintext_sha256,
+        ciphertext: encrypted,
+        auth_tag,
+    })
+}
+
+pub fn decrypt_bootstrap_payload<T>(
+    payload: &EncryptedBootstrapPayload,
+    recipient_private: [u8; 32],
+) -> Result<T, ProtocolError>
+where
+    T: DeserializeOwned,
+{
+    if payload.auth_tag.len() != GCM_TAG_LEN {
+        return Err(ProtocolError::Envelope(format!(
+            "encrypted bootstrap auth_tag length must be {GCM_TAG_LEN}, got {}",
+            payload.auth_tag.len()
+        )));
+    }
+    let sender_pubkey = x25519_public_key(&payload.sender_pubkey)?;
+    let recipient_secret = StaticSecret::from(recipient_private);
+    let shared_secret = recipient_secret.diffie_hellman(&sender_pubkey);
+    let key = derive_bytes(shared_secret.as_bytes(), BOOTSTRAP_KEY_INFO, 32)?;
+    let nonce_base = derive_bytes(shared_secret.as_bytes(), BOOTSTRAP_NONCE_INFO, 12)?;
+    let aad = bootstrap_payload_aad(
+        payload.payload_kind,
+        &payload.chain_id,
+        &payload.bootstrap_session_id,
+        &payload.plaintext_sha256,
+    );
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|error| {
+        ProtocolError::Envelope(format!("failed to initialize AES-256-GCM: {error}"))
+    })?;
+    let mut combined = payload.ciphertext.clone();
+    combined.extend_from_slice(&payload.auth_tag);
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(&nonce_base),
+            Payload {
+                msg: &combined,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| {
+            ProtocolError::Envelope("AES-256-GCM bootstrap decryption failed".to_string())
+        })?;
+    let actual_hash = Sha256::digest(&plaintext).to_vec();
+    if actual_hash != payload.plaintext_sha256 {
+        return Err(ProtocolError::Envelope(
+            "encrypted bootstrap plaintext hash mismatch".to_string(),
+        ));
+    }
+    serde_json::from_slice(&plaintext).map_err(Into::into)
 }
 
 pub fn encrypt_for_publisher(
@@ -190,5 +332,25 @@ fn envelope_aad(
     aad.extend_from_slice(&chunk_index.to_le_bytes());
     aad.extend_from_slice(&total_chunks.to_le_bytes());
     aad.extend_from_slice(plaintext_hash);
+    aad
+}
+
+fn bootstrap_payload_aad(
+    payload_kind: BootstrapPayloadKind,
+    chain_id: &str,
+    bootstrap_session_id: &str,
+    plaintext_sha256: &[u8],
+) -> Vec<u8> {
+    let kind = match payload_kind {
+        BootstrapPayloadKind::CreatorBootstrap => b"creator_bootstrap".as_slice(),
+        BootstrapPayloadKind::SeedBridgeCatalog => b"seed_bridge_catalog".as_slice(),
+    };
+    let mut aad = Vec::with_capacity(
+        kind.len() + chain_id.len() + bootstrap_session_id.len() + plaintext_sha256.len(),
+    );
+    aad.extend_from_slice(kind);
+    aad.extend_from_slice(chain_id.as_bytes());
+    aad.extend_from_slice(bootstrap_session_id.as_bytes());
+    aad.extend_from_slice(plaintext_sha256);
     aad
 }

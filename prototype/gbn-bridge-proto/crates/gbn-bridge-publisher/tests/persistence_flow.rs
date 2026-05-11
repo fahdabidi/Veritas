@@ -134,6 +134,7 @@ fn postgres_backed_authority_recovers_bridges_bootstrap_catalog_and_upload_sessi
                     node_id: "creator-new".into(),
                     ip_addr: "203.0.113.44".into(),
                     pub_key: node_public_key(61),
+                    encryption_pub_key: None,
                     udp_punch_port: 443,
                 },
             },

@@ -16,6 +16,7 @@ fn creator_join_request_preserves_distinct_new_host_and_relay_actors() {
             node_id: "creator-new".to_string(),
             ip_addr: "127.0.0.1".to_string(),
             pub_key: public_key(20),
+            encryption_pub_key: None,
             udp_punch_port: 4443,
         },
     };

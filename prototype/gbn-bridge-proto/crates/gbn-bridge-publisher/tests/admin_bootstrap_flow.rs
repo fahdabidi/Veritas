@@ -458,6 +458,12 @@ fn full_bootstrap_payload_populates_local_dht_and_records_progress() {
         .iter()
         .any(|event| event.reporter_id == session.seed_bridge_id
             && event.stage == BootstrapProgressStage::SeedTunnelEstablished));
+    for bridge_id in &session.bridge_ids {
+        assert!(session.progress_events.iter().any(|event| {
+            event.reporter_id == *bridge_id
+                && event.stage == BootstrapProgressStage::BridgeTunnelEstablished
+        }));
+    }
     assert!(session
         .progress_events
         .iter()
@@ -518,6 +524,7 @@ fn bootstrap_rejects_when_relay_bridge_is_the_only_direct_bridge() {
                     node_id: "creator-new".to_string(),
                     ip_addr: "127.0.0.1".to_string(),
                     pub_key: public_key(20),
+                    encryption_pub_key: None,
                     udp_punch_port: 4443,
                 },
             },

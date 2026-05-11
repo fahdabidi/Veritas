@@ -93,6 +93,7 @@ impl CreatorRuntime {
             node_id: self.config.creator_id.clone(),
             ip_addr: self.config.ip_addr.clone(),
             pub_key: self.config.pub_key.clone(),
+            encryption_pub_key: None,
             udp_punch_port: self.config.udp_punch_port,
         }
     }

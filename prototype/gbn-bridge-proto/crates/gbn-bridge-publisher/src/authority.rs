@@ -717,7 +717,17 @@ impl PublisherAuthority {
                     );
                 }
                 BootstrapProgressStage::BridgeSetComplete => {
-                    bootstrap_session::mark_completed(session, latest_progress.reported_at_ms);
+                    let all_remaining_bridges_reported =
+                        session.bridge_ids.iter().all(|bridge_id| {
+                            session.progress_events.iter().any(|event| {
+                                event.reporter_id == *bridge_id
+                                    && event.stage
+                                        == BootstrapProgressStage::BridgeTunnelEstablished
+                            })
+                        });
+                    if all_remaining_bridges_reported {
+                        bootstrap_session::mark_completed(session, latest_progress.reported_at_ms);
+                    }
                 }
                 _ => {}
             }

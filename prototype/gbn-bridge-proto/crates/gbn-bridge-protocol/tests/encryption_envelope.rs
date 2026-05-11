@@ -1,6 +1,8 @@
 use gbn_bridge_protocol::{
-    decrypt_from_creator, encrypt_for_publisher, EnvelopeKeyDerivation, PublicKeyBytes,
+    decrypt_bootstrap_payload, decrypt_from_creator, encrypt_bootstrap_payload,
+    encrypt_for_publisher, BootstrapPayloadKind, EnvelopeKeyDerivation, PublicKeyBytes,
 };
+use serde_json::json;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 fn public_key(private: [u8; 32]) -> PublicKeyBytes {
@@ -91,4 +93,41 @@ fn bridge_key_cannot_decrypt_publisher_encrypted_frame() {
     .unwrap();
 
     assert!(decrypt_from_creator(&encrypted, bridge_private).is_err());
+}
+
+#[test]
+fn encrypted_bootstrap_payload_round_trip_succeeds_for_new_creator_only() {
+    let publisher_private = [9_u8; 32];
+    let creator_private = [7_u8; 32];
+    let creator_public = public_key(creator_private);
+    let plaintext = json!({
+        "chain_id": "bootstrap-chain",
+        "bootstrap_session_id": "bootstrap-session",
+        "seed_bridge_id": "exit-bridge-b"
+    });
+
+    let encrypted = encrypt_bootstrap_payload(
+        BootstrapPayloadKind::CreatorBootstrap,
+        "bootstrap-chain",
+        "bootstrap-session",
+        &plaintext,
+        &creator_public,
+        "creator-new",
+        publisher_private,
+    )
+    .unwrap();
+
+    assert_eq!(
+        encrypted.payload_kind,
+        BootstrapPayloadKind::CreatorBootstrap
+    );
+    assert_ne!(
+        encrypted.ciphertext,
+        serde_json::to_vec(&plaintext).unwrap()
+    );
+
+    let decrypted: serde_json::Value =
+        decrypt_bootstrap_payload(&encrypted, creator_private).unwrap();
+    assert_eq!(decrypted, plaintext);
+    assert!(decrypt_bootstrap_payload::<serde_json::Value>(&encrypted, [8_u8; 32]).is_err());
 }

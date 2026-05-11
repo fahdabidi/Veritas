@@ -1,7 +1,9 @@
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 
+use crate::dht::PublisherDhtEntry;
 use crate::dht::{BridgeDhtEntry, CreatorDhtEntry};
+use crate::envelope::EncryptedBootstrapPayload;
 use crate::error::ProtocolError;
 use crate::punch::BridgePunchStart;
 use crate::signing::{
@@ -14,6 +16,8 @@ pub struct PendingCreator {
     pub node_id: String,
     pub ip_addr: String,
     pub pub_key: PublicKeyBytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_pub_key: Option<PublicKeyBytes>,
     pub udp_punch_port: u16,
 }
 
@@ -176,6 +180,10 @@ pub struct BootstrapJoinReply {
     pub creator_dht_entry: Option<CreatorDhtEntry>,
     pub response: CreatorBootstrapResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_bootstrap_payload: Option<EncryptedBootstrapPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_seed_bridge_catalog_payload: Option<EncryptedBootstrapPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_set: Option<BridgeSetResponse>,
 }
 
@@ -196,10 +204,92 @@ impl BootstrapJoinReply {
             entry.verify_authority(publisher_key, now_ms)?;
         }
         self.response.verify_authority(publisher_key, now_ms)?;
+        if let Some(payload) = &self.encrypted_bootstrap_payload {
+            if payload.chain_id != self.chain_id
+                || payload.bootstrap_session_id != self.response.bootstrap_session_id
+            {
+                return Err(ProtocolError::Serialization(
+                    "encrypted bootstrap payload metadata mismatch".into(),
+                ));
+            }
+        }
+        if let Some(payload) = &self.encrypted_seed_bridge_catalog_payload {
+            if payload.chain_id != self.chain_id
+                || payload.bootstrap_session_id != self.response.bootstrap_session_id
+            {
+                return Err(ProtocolError::Serialization(
+                    "encrypted seed bridge catalog payload metadata mismatch".into(),
+                ));
+            }
+        }
         if let Some(bridge_set) = &self.bridge_set {
             bridge_set.verify_authority(publisher_key, now_ms)?;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatorBootstrapPayload {
+    pub chain_id: String,
+    pub bootstrap_session_id: String,
+    pub creator_entry: BootstrapDhtEntry,
+    pub creator_dht_entry: CreatorDhtEntry,
+    pub response: CreatorBootstrapResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_entry: Option<PublisherDhtEntry>,
+}
+
+impl CreatorBootstrapPayload {
+    pub fn verify_authority(
+        &self,
+        publisher_key: &PublicKeyBytes,
+        now_ms: u64,
+    ) -> Result<(), ProtocolError> {
+        validate_chain_id(&self.chain_id)?;
+        if self.response.chain_id != self.chain_id {
+            return Err(ProtocolError::Serialization(
+                "creator bootstrap payload response chain_id mismatch".into(),
+            ));
+        }
+        if self.response.bootstrap_session_id != self.bootstrap_session_id {
+            return Err(ProtocolError::Serialization(
+                "creator bootstrap payload response session mismatch".into(),
+            ));
+        }
+        self.creator_entry.verify_authority(publisher_key, now_ms)?;
+        self.creator_dht_entry
+            .verify_authority(publisher_key, now_ms)?;
+        self.response.verify_authority(publisher_key, now_ms)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedBridgeCatalogPayload {
+    pub chain_id: String,
+    pub bootstrap_session_id: String,
+    pub seed_bridge_id: String,
+    pub bridge_set: BridgeSetResponse,
+}
+
+impl SeedBridgeCatalogPayload {
+    pub fn verify_authority(
+        &self,
+        publisher_key: &PublicKeyBytes,
+        now_ms: u64,
+    ) -> Result<(), ProtocolError> {
+        validate_chain_id(&self.chain_id)?;
+        if self.bridge_set.chain_id != self.chain_id {
+            return Err(ProtocolError::Serialization(
+                "seed bridge catalog payload chain_id mismatch".into(),
+            ));
+        }
+        if self.bridge_set.bootstrap_session_id != self.bootstrap_session_id {
+            return Err(ProtocolError::Serialization(
+                "seed bridge catalog payload session mismatch".into(),
+            ));
+        }
+        self.bridge_set.verify_authority(publisher_key, now_ms)
     }
 }
 

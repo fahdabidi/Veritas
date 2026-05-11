@@ -271,6 +271,7 @@ fn catalog_and_join_routes_accept_signed_requests() {
                         node_id: "creator-boot".into(),
                         ip_addr: "203.0.113.44".into(),
                         pub_key: node_public_key(62),
+                        encryption_pub_key: None,
                         udp_punch_port: 443,
                     },
                 },
@@ -363,6 +364,7 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
                         node_id: "creator-progress".into(),
                         ip_addr: "203.0.113.50".into(),
                         pub_key: node_public_key(72),
+                        encryption_pub_key: None,
                         udp_punch_port: 443,
                     },
                 },
@@ -404,7 +406,7 @@ fn progress_route_records_events_and_invalid_signature_is_rejected() {
     );
     assert_eq!(status, 200);
     response.verify_authority(&publisher_pub).unwrap();
-    assert_eq!(response.body.as_ref().unwrap().stored_event_count, 5);
+    assert_eq!(response.body.as_ref().unwrap().stored_event_count, 7);
 
     let mut tampered = progress_request.clone();
     tampered.chain_id = "chain-progress-tampered".into();

@@ -123,6 +123,7 @@ fn bootstrap_response(
             bootstrap_session_id: "bootstrap-001".into(),
             seed_bridge,
             publisher_pub: publisher_public_key(signing_key),
+            publisher_encryption_pub: Some(publisher_public_key(signing_key)),
             response_expiry_ms,
             assigned_bridge_count: 1,
         },

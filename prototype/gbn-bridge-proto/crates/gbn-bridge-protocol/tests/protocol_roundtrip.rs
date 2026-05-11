@@ -117,6 +117,7 @@ fn sample_creator_join_request() -> CreatorJoinRequest {
             node_id: "creator-01".into(),
             ip_addr: "203.0.113.44".into(),
             pub_key: creator_identity_pub(),
+            encryption_pub_key: None,
             udp_punch_port: 443,
         },
     }
@@ -129,6 +130,7 @@ fn sample_creator_bootstrap_response() -> CreatorBootstrapResponse {
             bootstrap_session_id: "bootstrap-001".into(),
             seed_bridge: sample_seed_bridge_entry(),
             publisher_pub: publisher_pub(),
+            publisher_encryption_pub: Some(publisher_pub()),
             response_expiry_ms: 45_000,
             assigned_bridge_count: 9,
         },

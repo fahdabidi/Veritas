@@ -100,6 +100,7 @@ impl CreatorClient {
                 node_id: self.actor_id.clone(),
                 ip_addr: self.creator_ip_addr.clone(),
                 pub_key: self.actor_pub.clone(),
+                encryption_pub_key: None,
                 udp_punch_port: self.udp_punch_port,
             },
         };

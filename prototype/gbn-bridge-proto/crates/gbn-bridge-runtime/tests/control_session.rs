@@ -112,6 +112,7 @@ fn creator_join_request(
             node_id: format!("creator-{request_id}"),
             ip_addr: "203.0.113.55".into(),
             pub_key: node_public_key(key_seed),
+            encryption_pub_key: None,
             udp_punch_port: 443,
         },
     }

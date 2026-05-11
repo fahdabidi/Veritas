@@ -1,7 +1,7 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
     BootstrapJoinReply, BridgeSeedAssign, BridgeSeedAssignUnsigned, BridgeSetResponse,
-    CreatorBootstrapResponse, CreatorDhtEntry,
+    CreatorBootstrapResponse, CreatorDhtEntry, EncryptedBootstrapPayload,
 };
 
 use crate::AuthorityResult;
@@ -11,14 +11,18 @@ pub fn join_reply(
     creator_entry: gbn_bridge_protocol::BootstrapDhtEntry,
     creator_dht_entry: CreatorDhtEntry,
     response: CreatorBootstrapResponse,
-    bridge_set: BridgeSetResponse,
+    encrypted_bootstrap_payload: Option<EncryptedBootstrapPayload>,
+    encrypted_seed_bridge_catalog_payload: Option<EncryptedBootstrapPayload>,
+    bridge_set: Option<BridgeSetResponse>,
 ) -> BootstrapJoinReply {
     BootstrapJoinReply {
         chain_id: chain_id.to_string(),
         creator_entry,
         creator_dht_entry: Some(creator_dht_entry),
         response,
-        bridge_set: Some(bridge_set),
+        encrypted_bootstrap_payload,
+        encrypted_seed_bridge_catalog_payload,
+        bridge_set,
     }
 }
 

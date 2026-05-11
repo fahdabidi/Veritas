@@ -514,7 +514,12 @@ impl AuthorityService {
             &plan.response.bootstrap_session_id,
             &plan.seed_assignment.seed_bridge_id,
             &plan.creator_entry.node_id,
-            plan.bridge_set.bridge_entries.len() as u16,
+            &plan
+                .bridge_set
+                .bridge_dht_entries
+                .iter()
+                .map(|entry| entry.bridge_id.clone())
+                .collect::<Vec<_>>(),
             request.body.now_ms,
         )
         .map_err(map_authority_error)?;
@@ -538,28 +543,46 @@ impl AuthorityService {
         bootstrap_session_id: &str,
         seed_bridge_id: &str,
         new_creator_id: &str,
-        active_bridge_count: u16,
+        bridge_ids: &[String],
         now_ms: u64,
     ) -> crate::AuthorityResult<()> {
-        let stages = [
-            (seed_bridge_id, BootstrapProgressStage::SeedPayloadReceived),
+        let active_bridge_count = bridge_ids.len() as u16;
+        let mut stages = vec![
+            (
+                seed_bridge_id,
+                BootstrapProgressStage::SeedPayloadReceived,
+                active_bridge_count,
+            ),
             (
                 seed_bridge_id,
                 BootstrapProgressStage::SeedTunnelEstablished,
+                1,
             ),
             (
                 new_creator_id,
                 BootstrapProgressStage::SeedTunnelEstablished,
+                1,
             ),
-            (new_creator_id, BootstrapProgressStage::BridgeSetComplete),
         ];
-        for (offset, (reporter_id, stage)) in stages.into_iter().enumerate() {
+        for (index, bridge_id) in bridge_ids.iter().enumerate() {
+            stages.push((
+                bridge_id.as_str(),
+                BootstrapProgressStage::BridgeTunnelEstablished,
+                index.saturating_add(1) as u16,
+            ));
+        }
+        stages.push((
+            new_creator_id,
+            BootstrapProgressStage::BridgeSetComplete,
+            active_bridge_count,
+        ));
+        for (offset, (reporter_id, stage, event_active_count)) in stages.into_iter().enumerate() {
             let progress = BootstrapProgress {
                 chain_id: chain_id.to_string(),
                 bootstrap_session_id: bootstrap_session_id.to_string(),
                 reporter_id: reporter_id.to_string(),
                 stage,
-                active_bridge_count,
+                active_bridge_count: event_active_count,
                 reported_at_ms: now_ms.saturating_add(offset as u64 + 1),
             };
             let update = self

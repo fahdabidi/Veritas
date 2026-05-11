@@ -17,7 +17,8 @@ pub mod trace;
 pub use bootstrap::{
     BootstrapDhtEntry, BootstrapDhtEntryUnsigned, BootstrapJoinReply, BridgeSeedAssign,
     BridgeSeedAssignUnsigned, BridgeSetRequest, BridgeSetResponse, BridgeSetResponseUnsigned,
-    CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned, CreatorJoinRequest, PendingCreator,
+    CreatorBootstrapPayload, CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned,
+    CreatorJoinRequest, PendingCreator, SeedBridgeCatalogPayload,
 };
 pub use catalog::{
     BridgeCatalogRequest, BridgeCatalogResponse, BridgeCatalogResponseUnsigned, BridgeRefreshHint,
@@ -41,8 +42,11 @@ pub use dht::{
     LOCAL_DISCOVERY_TABLE_SCHEMA_VERSION,
 };
 pub use envelope::{
-    decrypt_from_creator, encrypt_for_publisher, publisher_encryption_identity,
-    publisher_encryption_private_from_signing_key, EncryptedFrame, EnvelopeKeyDerivation,
+    decrypt_bootstrap_payload, decrypt_from_creator, encrypt_bootstrap_payload,
+    encrypt_for_publisher, encryption_identity_from_signing_key,
+    encryption_private_from_signing_key, publisher_encryption_identity,
+    publisher_encryption_private_from_signing_key, BootstrapPayloadKind, EncryptedBootstrapPayload,
+    EncryptedFrame, EnvelopeKeyDerivation,
 };
 pub use error::ProtocolError;
 pub use lease::{

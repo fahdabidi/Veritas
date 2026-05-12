@@ -59,6 +59,7 @@ mobile-network path on the phone.
 | Manual emulator runtime start/stop | pass | App opened in visible WSLg emulator, runtime started/stopped, Rust library loaded, no `FATAL EXCEPTION` |
 | Manual emulator action-output visibility follow-up | pass | `Show Node Metadata` initially updated only the off-screen output area; app now auto-scrolls to `Output` for action results/errors and instrumentation asserts this |
 | Manual emulator S3 negative path follow-up | pass | Blank pre-signed PUT URL now reports `S3 pre-signed PUT URL is required`; Creator Actions and Evidence buttons use the same upload handler |
+| Manual emulator S3 grant import follow-up | pass | Long pre-signed grant JSON can be pushed by adb to app external files and imported from the Evidence screen; instrumentation covers the import button |
 | `./gradlew installDebug` | pass | Installed `com.veritas.gbn.mobile.debug` on emulator |
 | `adb shell monkey -p com.veritas.gbn.mobile.debug 1` | pass | App launched; PID observed |
 | `cargo fmt --all --check` | pass | Rust formatting clean |
@@ -102,6 +103,9 @@ Instrumentation gates:
   message `no protocol:`. The upload handler now rejects blank URLs with the operator
   message `S3 pre-signed PUT URL is required`, and both S3 upload buttons use that same
   handler.
+- Manual validation showed long pre-signed URLs are not practical to paste into the WSLg
+  emulator. The app now shows an adb-friendly grant file path and can import
+  `pass4-s3-grant.json` from app external files into the Evidence grant field.
 
 ## Emulator Evidence
 

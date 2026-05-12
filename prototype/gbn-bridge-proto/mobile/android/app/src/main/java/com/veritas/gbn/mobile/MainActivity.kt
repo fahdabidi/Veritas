@@ -230,6 +230,10 @@ class MainActivity : Activity() {
             "S3EvidenceUploadGrant",
         )
         root.addView(uploadGrantInput)
+        root.addView(body("ADB grant file: ${s3GrantFile().absolutePath}"))
+        root.addView(button("ImportS3GrantFromDeviceFile", "Import S3 Grant From Device File") {
+            importS3GrantFromDeviceFile()
+        })
         root.addView(button("ExportEvidence", "Export Evidence") {
             exportEvidence()
         })
@@ -364,6 +368,19 @@ class MainActivity : Activity() {
         }.onFailure { showError(it) }
     }
 
+    private fun importS3GrantFromDeviceFile() {
+        runCatching {
+            val grantFile = s3GrantFile()
+            require(grantFile.exists()) {
+                "S3 grant file missing. Push it with: adb push /tmp/pass4-s3-grant.json ${grantFile.absolutePath}"
+            }
+            val rawJson = grantFile.readText()
+            val config = EvidenceUploadConfig.parse(rawJson)
+            uploadGrantInput.setText(rawJson)
+            show("Imported S3 evidence grant from ${grantFile.absolutePath}\nobject_key=${config.objectKey}\nexpires_at_ms=${config.expiresAtMs ?: 0}")
+        }.onFailure { showError(it) }
+    }
+
     private fun callRuntime(buttonId: String, block: (MobileCreatorRuntime) -> String) {
         val current = runtime
         if (current == null) {
@@ -464,6 +481,9 @@ class MainActivity : Activity() {
     private fun stateDir(): File = File(filesDir, "creator-runtime")
 
     private fun evidenceDir(): File = File(stateDir(), "evidence")
+
+    private fun s3GrantFile(): File =
+        File(getExternalFilesDir(null) ?: filesDir, "pass4-s3-grant.json")
 
     private fun deviceId(): String =
         Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "emulator"

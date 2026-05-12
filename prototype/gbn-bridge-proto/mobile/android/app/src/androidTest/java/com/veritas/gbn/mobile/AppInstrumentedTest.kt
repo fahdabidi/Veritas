@@ -53,6 +53,17 @@ class AppInstrumentedTest {
         File(context.filesDir, "creator-runtime").deleteRecursively()
         File(context.cacheDir, "app-events").deleteRecursively()
         File(context.cacheDir, "evidence-exports").deleteRecursively()
+        File(context.getExternalFilesDir(null), "pass4-s3-grant.json").writeText(
+            """
+            {
+              "upload_mode": "s3_presigned_put",
+              "bucket": "veritas-pass4-mobile-evidence",
+              "object_key": "mobile-evidence/run/chain/bundle.zip",
+              "presigned_put_url": "",
+              "expires_at_ms": 0
+            }
+            """.trimIndent(),
+        )
 
         val activity = instrumentation.startActivitySync(
             Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
@@ -66,6 +77,7 @@ class AppInstrumentedTest {
             "ImportEndpointConfig",
             "PreviewBootstrapDHTQR",
             "ImportHostCreatorDHTSeed",
+            "ImportS3GrantFromDeviceFile",
             "RefreshEvents",
             "MainScroll",
             "OperationOutput",
@@ -90,6 +102,8 @@ class AppInstrumentedTest {
         waitForOutput(activity, "host-creator")
         click(activity, "ExportEvidence")
         waitForOutput(activity, "Evidence ZIP")
+        click(activity, "ImportS3GrantFromDeviceFile")
+        waitForOutput(activity, "Imported S3 evidence grant")
         click(activity, "UploadEvidenceToS3")
         waitForOutput(activity, "S3 pre-signed PUT URL is required")
 

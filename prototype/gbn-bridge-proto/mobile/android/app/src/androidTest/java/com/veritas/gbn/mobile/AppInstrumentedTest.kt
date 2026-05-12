@@ -50,6 +50,9 @@ class AppInstrumentedTest {
         if (Build.VERSION.SDK_INT >= 33) {
             grantRuntimePermission(Manifest.permission.POST_NOTIFICATIONS)
         }
+        File(context.filesDir, "creator-runtime").deleteRecursively()
+        File(context.cacheDir, "app-events").deleteRecursively()
+        File(context.cacheDir, "evidence-exports").deleteRecursively()
 
         val activity = instrumentation.startActivitySync(
             Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
@@ -79,14 +82,16 @@ class AppInstrumentedTest {
         click(activity, "ShowNodeMetadata")
         waitForOutput(activity, "creator")
         waitForOutputScrolledIntoView(activity)
+        click(activity, "BuildUploadSession")
+        waitForOutput(activity, "ciphertext_chunk_count")
         click(activity, "PreviewBootstrapDHTQR")
         waitForOutput(activity, "host-creator")
         click(activity, "ImportHostCreatorDHTSeed")
         waitForOutput(activity, "host-creator")
-        click(activity, "BuildUploadSession")
-        waitForOutput(activity, "ciphertext_chunk_count")
         click(activity, "ExportEvidence")
         waitForOutput(activity, "Evidence ZIP")
+        click(activity, "UploadEvidenceToS3")
+        waitForOutput(activity, "S3 pre-signed PUT URL is required")
 
         activity.finish()
     }

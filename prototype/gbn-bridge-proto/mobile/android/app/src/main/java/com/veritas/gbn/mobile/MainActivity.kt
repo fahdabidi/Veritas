@@ -234,12 +234,7 @@ class MainActivity : Activity() {
             exportEvidence()
         })
         root.addView(button("UploadEvidenceToS3", "Upload Evidence To S3") {
-            runCatching {
-                val evidence = lastEvidence ?: exportEvidence()
-                val uploadConfig = EvidenceUploadConfig.parse(uploadGrantInput.text.toString())
-                val result = S3EvidenceUploader.uploadPresignedPut(uploadConfig, evidence.zipFile)
-                show("Uploaded s3://${result.bucket}/${result.objectKey}\netag=${result.etag}\nsha256=${result.localSha256}")
-            }.onFailure { showError(it) }
+            uploadEvidenceToS3()
         })
     }
 
@@ -274,7 +269,7 @@ class MainActivity : Activity() {
                     }
                     "SessionFrameSummary" -> show(lastUploadResult)
                     "ExportEvidence" -> exportEvidence()
-                    "UploadEvidenceToS3" -> show("Import an S3 pre-signed PUT grant, export evidence, then use the Evidence screen upload button.")
+                    "UploadEvidenceToS3" -> uploadEvidenceToS3()
                     "ResetCreatorState" -> callRuntime("ResetCreatorState") { it.resetState(nextChainId("reset")) }
                     else -> refreshStatus(action.buttonId)
                 }
@@ -358,6 +353,15 @@ class MainActivity : Activity() {
         eventLog.appendEvent("creator_evidence_exported", chainId, result.zipFile.absolutePath)
         show("Evidence ZIP: ${result.zipFile.absolutePath}\nfiles=${result.fileCount}\nsha256=${result.zipSha256}")
         return result
+    }
+
+    private fun uploadEvidenceToS3() {
+        runCatching {
+            val evidence = lastEvidence ?: exportEvidence()
+            val uploadConfig = EvidenceUploadConfig.parse(uploadGrantInput.text.toString())
+            val result = S3EvidenceUploader.uploadPresignedPut(uploadConfig, evidence.zipFile)
+            show("Uploaded s3://${result.bucket}/${result.objectKey}\netag=${result.etag}\nsha256=${result.localSha256}")
+        }.onFailure { showError(it) }
     }
 
     private fun callRuntime(buttonId: String, block: (MobileCreatorRuntime) -> String) {

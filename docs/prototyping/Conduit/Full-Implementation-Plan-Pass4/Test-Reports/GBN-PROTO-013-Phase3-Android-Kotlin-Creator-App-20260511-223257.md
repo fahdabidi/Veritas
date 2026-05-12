@@ -58,6 +58,7 @@ mobile-network path on the phone.
 | `./gradlew connectedDebugAndroidTest` | pass | `3 tests; 0 failures` on `PantryVision_API_36(AVD) - 16` |
 | Manual emulator runtime start/stop | pass | App opened in visible WSLg emulator, runtime started/stopped, Rust library loaded, no `FATAL EXCEPTION` |
 | Manual emulator action-output visibility follow-up | pass | `Show Node Metadata` initially updated only the off-screen output area; app now auto-scrolls to `Output` for action results/errors and instrumentation asserts this |
+| Manual emulator S3 negative path follow-up | pass | Blank pre-signed PUT URL now reports `S3 pre-signed PUT URL is required`; Creator Actions and Evidence buttons use the same upload handler |
 | `./gradlew installDebug` | pass | Installed `com.veritas.gbn.mobile.debug` on emulator |
 | `adb shell monkey -p com.veritas.gbn.mobile.debug 1` | pass | App launched; PID observed |
 | `cargo fmt --all --check` | pass | Rust formatting clean |
@@ -97,6 +98,10 @@ Instrumentation gates:
 - Manual validation found that action buttons such as `Show Node Metadata` did update the
   bottom `Output` area, but did not scroll the operator there. The app now scrolls action
   output/errors into view, and the instrumentation workflow asserts the scroll behavior.
+- Manual validation also found the blank S3 grant path exposed the low-level URL parser
+  message `no protocol:`. The upload handler now rejects blank URLs with the operator
+  message `S3 pre-signed PUT URL is required`, and both S3 upload buttons use that same
+  handler.
 
 ## Emulator Evidence
 

@@ -16,7 +16,12 @@ data class EvidenceUploadResult(
 object S3EvidenceUploader {
     fun uploadPresignedPut(config: EvidenceUploadConfig, zipFile: File): EvidenceUploadResult {
         val putUrl = config.presignedPutUrl
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
             ?: throw IllegalArgumentException("S3 pre-signed PUT URL is required")
+        require(putUrl.startsWith("https://") || putUrl.startsWith("http://")) {
+            "S3 pre-signed PUT URL must use http or https"
+        }
         val connection = (URL(putUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "PUT"
             doOutput = true

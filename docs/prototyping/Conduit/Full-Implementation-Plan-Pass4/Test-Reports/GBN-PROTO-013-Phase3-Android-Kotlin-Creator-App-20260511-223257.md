@@ -56,6 +56,8 @@ mobile-network path on the phone.
 | `flutter emulators --launch PantryVision_API_36` | blocked | Flutter launcher exited with emulator startup code `-6` in WSL |
 | Direct SDK emulator launch | pass | `/usr/lib/android-sdk/emulator/emulator -avd PantryVision_API_36 -no-window -no-audio -no-snapshot -gpu swiftshader_indirect` booted |
 | `./gradlew connectedDebugAndroidTest` | pass | `3 tests; 0 failures` on `PantryVision_API_36(AVD) - 16` |
+| Manual emulator runtime start/stop | pass | App opened in visible WSLg emulator, runtime started/stopped, Rust library loaded, no `FATAL EXCEPTION` |
+| Manual emulator action-output visibility follow-up | pass | `Show Node Metadata` initially updated only the off-screen output area; app now auto-scrolls to `Output` for action results/errors and instrumentation asserts this |
 | `./gradlew installDebug` | pass | Installed `com.veritas.gbn.mobile.debug` on emulator |
 | `adb shell monkey -p com.veritas.gbn.mobile.debug 1` | pass | App launched; PID observed |
 | `cargo fmt --all --check` | pass | Rust formatting clean |
@@ -92,6 +94,9 @@ Instrumentation gates:
 - The app button panel exposes and exercises `StartRuntime`, `PreviewBootstrapDHTQR`,
   `ImportHostCreatorDHTSeed`, `BuildUploadSession`, and `ExportEvidence` tags through
   automated emulator instrumentation.
+- Manual validation found that action buttons such as `Show Node Metadata` did update the
+  bottom `Output` area, but did not scroll the operator there. The app now scrolls action
+  output/errors into view, and the instrumentation workflow asserts the scroll behavior.
 
 ## Emulator Evidence
 

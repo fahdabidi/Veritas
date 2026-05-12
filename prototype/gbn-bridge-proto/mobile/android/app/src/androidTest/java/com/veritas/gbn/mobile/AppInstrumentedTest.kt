@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.test.platform.app.InstrumentationRegistry
 import com.veritas.gbn.mobile.model.CreatorActionCatalog
@@ -63,14 +64,21 @@ class AppInstrumentedTest {
             "PreviewBootstrapDHTQR",
             "ImportHostCreatorDHTSeed",
             "RefreshEvents",
+            "MainScroll",
             "OperationOutput",
         )
         requiredIds.forEach { id ->
             assertNotNull("missing UI control $id", findByTag(root, id))
         }
 
+        click(activity, "ShowNodeMetadata")
+        waitForOutput(activity, "Runtime is stopped")
+        waitForOutputScrolledIntoView(activity)
         click(activity, "StartRuntime")
         waitForOutput(activity, "creator")
+        click(activity, "ShowNodeMetadata")
+        waitForOutput(activity, "creator")
+        waitForOutputScrolledIntoView(activity)
         click(activity, "PreviewBootstrapDHTQR")
         waitForOutput(activity, "host-creator")
         click(activity, "ImportHostCreatorDHTSeed")
@@ -117,6 +125,22 @@ class AppInstrumentedTest {
         instrumentation.runOnMainSync {
             val text = (findByTag(activity.window.decorView, "OperationOutput") as TextView).text.toString()
             error("expected output containing `$expected`, got `$text`")
+        }
+    }
+
+    private fun waitForOutputScrolledIntoView(activity: MainActivity) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        repeat(30) {
+            var scrollY = 0
+            instrumentation.runOnMainSync {
+                scrollY = (findByTag(activity.window.decorView, "MainScroll") as ScrollView).scrollY
+            }
+            if (scrollY > 0) return
+            SystemClock.sleep(200)
+        }
+        instrumentation.runOnMainSync {
+            val scrollY = (findByTag(activity.window.decorView, "MainScroll") as ScrollView).scrollY
+            error("expected action output to scroll into view, got scrollY=$scrollY")
         }
     }
 

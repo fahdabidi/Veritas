@@ -42,6 +42,7 @@ class MainActivity : Activity() {
     private lateinit var hostSeedInput: EditText
     private lateinit var chainFilterInput: EditText
     private lateinit var uploadGrantInput: EditText
+    private lateinit var scrollView: ScrollView
     private lateinit var output: TextView
 
     private var runtime: MobileCreatorRuntime? = null
@@ -66,12 +67,14 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi(): View {
-        val scroll = ScrollView(this)
+        scrollView = ScrollView(this).apply {
+            setTag("MainScroll")
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
         }
-        scroll.addView(root)
+        scrollView.addView(root)
 
         root.addView(title("GBN Mobile Creator Validation"))
         status = body("Status pending")
@@ -91,7 +94,7 @@ class MainActivity : Activity() {
         output.setTag("OperationOutput")
         root.addView(section("Output"))
         root.addView(output)
-        return scroll
+        return scrollView
     }
 
     private fun addRuntimeScreen(root: LinearLayout) {
@@ -376,10 +379,12 @@ class MainActivity : Activity() {
 
     private fun show(value: String) {
         output.text = value
+        output.post { scrollView.smoothScrollTo(0, output.bottom) }
     }
 
     private fun showError(error: Throwable) {
         output.text = "ERROR: ${error.message}"
+        output.post { scrollView.smoothScrollTo(0, output.bottom) }
         eventLog.appendEvent("app_error", nextChainId("error"), error.message ?: error.toString())
     }
 

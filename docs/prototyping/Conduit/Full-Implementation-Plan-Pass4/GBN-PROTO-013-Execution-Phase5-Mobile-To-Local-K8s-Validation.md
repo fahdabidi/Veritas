@@ -172,6 +172,63 @@ The collector must:
 
 The collector output becomes the canonical Phase 5 report input.
 
+### 5. Standalone S3 Grant Import
+
+The physical phone is standalone in Phase 5. It is not connected through adb and the
+pre-signed S3 `PUT` URL is too long and error-prone to type manually. Phase 5 therefore
+requires a QR-based evidence grant handoff.
+
+Add an app control:
+
+```text
+EvidenceGrantQRReader
+```
+
+The canonical grant import path is:
+
+1. The workstation generates a short-lived S3 `PUT` grant JSON.
+2. The workstation renders the grant as one or more QR payloads.
+3. The phone scans the QR payloads from the workstation screen.
+4. The app reconstructs and validates the complete grant.
+5. The app stores the grant in app-private state and uses it for evidence upload.
+
+Because AWS pre-signed URLs can be larger than a single reliable QR payload, the QR format
+must support chunking:
+
+```json
+{
+  "type": "gbn.s3_grant.chunk",
+  "version": 1,
+  "grant_id": "pass4-phase5-20260512T201424Z",
+  "index": 1,
+  "count": 3,
+  "sha256": "hex-sha256-of-complete-grant-json",
+  "data": "base64url(json-chunk)"
+}
+```
+
+Rules:
+
+- `index` is 1-based.
+- all chunks must share `grant_id`, `count`, and `sha256`;
+- duplicate chunks are accepted only if their payload is byte-identical;
+- the reconstructed grant JSON SHA-256 must match `sha256`;
+- `expires_at_ms` must be in the future;
+- the app must reject grants that contain long-lived AWS credentials or raw
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, or session-token fields outside the
+  pre-signed URL;
+- the app must show scan progress, final bucket/object key, and expiry before upload.
+
+Fallbacks:
+
+- Android document picker import from Downloads/Files;
+- Android share intent into the app;
+- adb file import for emulator/lab only.
+
+Add workstation tooling to produce both the grant JSON and QR payload files/PNGs. If
+`qrencode` is unavailable, the tool must still emit text payloads that can be rendered or
+copied by another QR renderer.
+
 ---
 
 ## Mobile Run Flow
@@ -255,10 +312,10 @@ Expected:
 The phone exports evidence through the app, uploads it to S3, and this workstation
 retrieves it through AWS APIs.
 
-Required workstation setup creates a short-lived S3 `PUT` grant JSON for the app. Do not
-embed AWS credentials in the APK. Use an operator-side helper such as boto3
-`generate_presigned_url(ClientMethod="put_object", HttpMethod="PUT")` and copy the grant
-to the phone through the app's supported import path:
+Required workstation setup creates a short-lived S3 `PUT` grant JSON for the app and then
+renders it as chunked QR payloads. Do not embed AWS credentials in the APK. Use an
+operator-side helper such as boto3
+`generate_presigned_url(ClientMethod="put_object", HttpMethod="PUT")`:
 
 ```json
 {
@@ -269,6 +326,17 @@ to the phone through the app's supported import path:
   "expires_at_ms": 1770000000000
 }
 ```
+
+Then generate the QR handoff:
+
+```bash
+infra/scripts/pass4-s3-grant-qr.sh \
+  --grant-json /tmp/pass4-s3-grant.json \
+  --out-dir target/pass4-s3-grants/$RUN_ID
+```
+
+The app imports the grant through `EvidenceGrantQRReader`. The document/share/adb import
+paths are fallback paths only; QR import is the canonical standalone-phone path.
 
 The app records:
 
@@ -370,6 +438,8 @@ Add tests for:
 - local k8s collector fails if any required ChainID is missing;
 - local k8s collector fails if the mobile evidence bundle omits DHT, trace, manifest,
   endpoint, S3, or admin-denial artifacts.
+- S3 grant chunk reconstruction accepts out-of-order QR chunks and rejects hash mismatch,
+  duplicate mismatch, expired grants, and grants carrying raw long-lived AWS credentials.
 
 Run:
 
@@ -392,6 +462,9 @@ cd mobile/android
   flags.
 - `infra/scripts/k8s-pass4-mobile-local-collector.sh` exists, is tested, and fails closed
   on missing mobile/k8s/observability evidence.
+- `infra/scripts/pass4-s3-grant-qr.sh` exists and emits grant JSON, chunk payloads, and QR
+  PNGs when a QR renderer is available.
+- Android `EvidenceGrantQRReader` can import a chunked S3 grant without adb or typing.
 - Mobile FFI implements `bootstrapNewCreator`, `sendDummy`, and `sendUpload`.
 - Android `BootstrapNewCreator`, `SendDummy`, and `SendUpload` buttons are enabled only
   by their strict Phase 5 prerequisites and no longer permanently disabled.
@@ -422,6 +495,7 @@ When this phase is implemented, archive:
 - QR scan/import screenshots or instrumentation captures;
 - mobile evidence ZIP from S3;
 - S3 retrieval transcript and hash verification;
+- S3 grant QR payloads/PNGs and app-side grant import evidence;
 - local k8s trace/log bundle;
 - public endpoint map;
 - HostCreator QR seed and redacted manifest;

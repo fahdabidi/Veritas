@@ -28,12 +28,15 @@ object HostSeedGuard {
             throw IllegalArgumentException("HostCreator seed must not preload `$field`")
         }
         val publicKey = JsonText.stringField(payload, "host_creator_public_key_hex")
-            ?: throw IllegalArgumentException("HostCreator seed requires host_creator_public_key_hex")
+            ?: JsonText.stringField(payload, "host_creator_public_key_fingerprint")
+            ?: throw IllegalArgumentException("HostCreator seed requires HostCreator public key")
         require(publicKey.length >= 16) { "HostCreator public key is too short" }
         val expiresAtMs = JsonText.longField(payload, "expires_at_ms")
             ?: throw IllegalArgumentException("HostCreator seed requires expires_at_ms")
         require(expiresAtMs > nowMs) { "HostCreator seed is expired" }
         val host = JsonText.stringField(payload, "host")
+            ?: JsonText.stringField(payload, "public_host")
+            ?: JsonText.stringFieldInObject(payload, "host_creator_bootstrap_endpoint", "public_host")
             ?: throw IllegalArgumentException("HostCreator seed requires mobile-reachable endpoint host")
         val normalizedHost = host.lowercase()
         require(normalizedHost != "localhost" && normalizedHost != "127.0.0.1" && normalizedHost != "::1") {
@@ -49,10 +52,17 @@ object HostSeedGuard {
             "HostCreator seed endpoint must not be an admin listener"
         }
         return HostSeedPreview(
-            hostCreatorId = JsonText.stringField(payload, "host_creator_id") ?: "host-creator",
+            hostCreatorId = JsonText.stringField(payload, "host_creator_id")
+                ?: JsonText.stringFieldInObject(payload, "host_creator_entry", "node_id")
+                ?: "host-creator",
             publicKeyFingerprint = publicKey.take(12),
             host = host,
-            port = JsonText.longField(payload, "port")?.toString() ?: "443",
+            port = JsonText.longField(payload, "port")?.toString()
+                ?: JsonText.longField(payload, "tcp_port")?.toString()
+                ?: JsonText.longField(payload, "udp_port")?.toString()
+                ?: JsonText.longFieldInObject(payload, "host_creator_bootstrap_endpoint", "tcp_port")?.toString()
+                ?: JsonText.longFieldInObject(payload, "host_creator_bootstrap_endpoint", "udp_port")?.toString()
+                ?: "443",
             chainId = JsonText.stringField(payload, "chain_id") ?: "pass4-host-seed",
             expiresAtMs = expiresAtMs,
         )

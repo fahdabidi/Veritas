@@ -30,10 +30,26 @@ object JsonText {
     fun hasField(json: String, field: String): Boolean =
         Regex(""""${Regex.escape(field)}"\s*:""").containsMatchIn(json)
 
+    fun stringFieldInObject(json: String, objectField: String, field: String): String? {
+        val body = objectBody(json, objectField) ?: return null
+        return stringField("{$body}", field)
+    }
+
+    fun longFieldInObject(json: String, objectField: String, field: String): Long? {
+        val body = objectBody(json, objectField) ?: return null
+        return longField("{$body}", field)
+    }
+
     fun objectWithFields(fields: Map<String, String?>): String =
         fields.entries
             .filter { it.value != null }
             .joinToString(prefix = "{", postfix = "}") { (key, value) ->
                 """"$key":${quote(value.orEmpty())}"""
             }
+
+    private fun objectBody(json: String, objectField: String): String? =
+        Regex(""""${Regex.escape(objectField)}"\s*:\s*\{([^{}]*)\}""", RegexOption.DOT_MATCHES_ALL)
+            .find(json)
+            ?.groupValues
+            ?.get(1)
 }

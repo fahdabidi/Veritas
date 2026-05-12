@@ -1,7 +1,6 @@
 package com.veritas.gbn.mobile
 
 import com.veritas.gbn.mobile.model.CreatorActionCatalog
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -29,10 +28,10 @@ class CreatorActionCatalogTest {
     }
 
     @Test
-    fun futureNetworkActionsRemainDisabledInPhase3() {
+    fun phase5NetworkActionsAreVisibleForRuntimeGates() {
         val actions = CreatorActionCatalog.actions.associateBy { it.buttonId }
-        assertFalse(actions.getValue("BootstrapNewCreator").phase3Enabled)
-        assertFalse(actions.getValue("SendDummy").phase3Enabled)
-        assertFalse(actions.getValue("SendUpload").phase3Enabled)
+        assertTrue(actions.getValue("BootstrapNewCreator").phase3Enabled)
+        assertTrue(actions.getValue("SendDummy").phase3Enabled)
+        assertTrue(actions.getValue("SendUpload").phase3Enabled)
     }
 }

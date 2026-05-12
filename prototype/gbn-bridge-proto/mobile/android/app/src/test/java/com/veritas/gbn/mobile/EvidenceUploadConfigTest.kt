@@ -20,6 +20,7 @@ class EvidenceUploadConfigTest {
               "expires_at_ms": 2000
             }
             """.trimIndent(),
+            nowMs = 1000,
         )
         assertEquals("veritas-pass4-mobile-evidence", config.bucket)
     }
@@ -34,6 +35,23 @@ class EvidenceUploadConfigTest {
                   "bucket": "veritas-pass4-mobile-evidence",
                   "object_key": "mobile-evidence/run/chain/bundle.zip",
                   "aws_secret_access_key": "not-allowed"
+                }
+                """.trimIndent(),
+            )
+        }
+        assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun rejectsUppercaseRawAwsCredentialFields() {
+        val result = runCatching {
+            EvidenceUploadConfig.parse(
+                """
+                {
+                  "upload_mode": "s3_presigned_put",
+                  "bucket": "veritas-pass4-mobile-evidence",
+                  "object_key": "mobile-evidence/run/chain/bundle.zip",
+                  "AWS_ACCESS_KEY_ID": "not-allowed"
                 }
                 """.trimIndent(),
             )

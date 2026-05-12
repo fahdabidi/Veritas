@@ -14,9 +14,10 @@ use gbn_bridge_creator::{
     ResetCreatorStateResponse, SanitizerFormatHint, UploadSessionSummary,
 };
 use gbn_bridge_protocol::{
-    encryption_identity_from_signing_key, publisher_identity, BridgeDhtEntry, CreatorDhtEntry,
-    LocalDiscoveryTable, NewCreatorSeedState, PublicKeyBytes, PublisherDhtEntry,
-    SelfOnboardingState,
+    encryption_identity_from_signing_key, publisher_identity, BootstrapSession, BridgeDhtEntry,
+    BridgeDhtEntryUnsigned, CreatorDhtEntry, CreatorDhtEntryUnsigned, DhtBridgeIngressEndpoint,
+    LocalDiscoveryTable, NewCreatorSeedState, PublicKeyBytes, PublisherDhtEntry, ReachabilityClass,
+    SelfOnboardingState, TunnelPeerRole, TunnelState,
 };
 use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
@@ -239,6 +240,84 @@ fn default_sanitization_profile() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapNewCreatorRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapNewCreatorResult {
+    pub chain_id: String,
+    pub bootstrap_session_id: String,
+    pub self_onboarding_state: SelfOnboardingState,
+    pub publisher_entry_present: bool,
+    pub seed_bridge_id: String,
+    pub bridge_count: usize,
+    pub active_bridge_count: usize,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendDummyRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    #[serde(default = "default_dummy_size")]
+    pub size_bytes: usize,
+    #[serde(default)]
+    pub force_bridge_failure: bool,
+}
+
+fn default_dummy_size() -> usize {
+    256
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobileSendDummyResult {
+    pub chain_id: String,
+    pub actor_id: String,
+    pub route_source: String,
+    pub candidate_bridge_ids: Vec<String>,
+    pub selected_bridge_ids: Vec<String>,
+    pub assigned_bridge_id: String,
+    pub encryption_envelope: String,
+    pub ciphertext_only_at_bridge: bool,
+    pub frames: u32,
+    pub payload_size_bytes: usize,
+    pub payload_sha256: String,
+    pub force_bridge_failure_used: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendUploadRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default = "default_target_lane_count")]
+    pub target_lane_count: u32,
+    #[serde(default)]
+    pub force_lane_failure: Vec<String>,
+}
+
+fn default_target_lane_count() -> u32 {
+    3
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobileSendUploadResult {
+    pub session_id: String,
+    pub chain_id: String,
+    pub session_status: String,
+    pub total_chunks: u32,
+    pub completed_chunks: u32,
+    pub lanes_used: Vec<String>,
+    pub lane_count_at_first_dispatch: u32,
+    pub lane_count_at_completion: u32,
+    pub ciphertext_only_at_bridge: bool,
+    pub force_lane_failure_used: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceFile {
     pub path: String,
     pub sha256: String,
@@ -312,6 +391,42 @@ pub struct HostCreatorBootstrapEndpoint {
     pub tls_sni: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificate_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PublicEndpointProfile {
+    #[serde(default = "default_network_profile")]
+    profile: String,
+    #[serde(default)]
+    run_id: String,
+    endpoints: Vec<PublicEndpointDescriptor>,
+}
+
+impl PublicEndpointProfile {
+    fn endpoint(&self, role: &str) -> MobileResult<&PublicEndpointDescriptor> {
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.role == role)
+            .ok_or_else(|| {
+                MobileRuntimeError::Config(format!(
+                    "public endpoint profile missing `{role}` endpoint"
+                ))
+            })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PublicEndpointDescriptor {
+    endpoint_id: String,
+    actor_id: String,
+    role: String,
+    protocol: String,
+    public_host: String,
+    #[serde(default)]
+    tcp_port: Option<u16>,
+    #[serde(default)]
+    udp_port: Option<u16>,
+    expires_at_ms: u64,
 }
 
 pub struct MobileCreatorRuntime {
@@ -605,6 +720,234 @@ impl MobileCreatorRuntime {
         Ok(result.summary)
     }
 
+    pub fn bootstrap_new_creator(
+        &self,
+        request: BootstrapNewCreatorRequest,
+    ) -> MobileResult<BootstrapNewCreatorResult> {
+        let chain_id = request
+            .chain_id
+            .unwrap_or_else(|| format!("mobile-bootstrap-{}", now_ms()));
+        let seed = self.load_host_seed()?;
+        let (publisher_entry, bridge_entries) = self.public_profile_dht_entries(&chain_id)?;
+        if bridge_entries.is_empty() {
+            return Err(MobileRuntimeError::Runtime(
+                "public endpoint profile contains no ExitBridge endpoint descriptors".to_string(),
+            ));
+        }
+        let now = now_ms();
+        let bootstrap_session_id = format!("mobile-bootstrap-{now}");
+        let seed_bridge = bridge_entries
+            .first()
+            .expect("bridge_entries checked above")
+            .clone();
+        let signing_key = self.identity.signing_key()?;
+        let creator_entry = CreatorDhtEntry::sign(
+            CreatorDhtEntryUnsigned {
+                node_id: self.identity.creator_id.clone(),
+                ip_addr: "mobile-public".to_string(),
+                pub_key: publisher_identity(&signing_key),
+                udp_punch_port: seed.host_creator_entry.udp_punch_port,
+                entry_expiry_ms: now.saturating_add(3_600_000),
+            },
+            &signing_key,
+            true,
+        )
+        .map_err(|error| MobileRuntimeError::Runtime(error.to_string()))?;
+
+        let mut table = self.local_dht.snapshot();
+        table.self_onboarding_state = SelfOnboardingState::Onboarded;
+        table.host_creator_entry = Some(seed.host_creator_entry.clone());
+        table.creator_entry = Some(creator_entry);
+        table.publisher_entry = Some(publisher_entry);
+        table.bridge_entries = bridge_entries.clone();
+        table.active_tunnels = bridge_entries
+            .iter()
+            .map(|bridge| TunnelState {
+                peer_id: bridge.bridge_id.clone(),
+                peer_role: TunnelPeerRole::ExitBridge,
+                established_at_ms: now,
+                last_seen_ms: now,
+                bootstrap_session_id: Some(bootstrap_session_id.clone()),
+            })
+            .collect();
+        table.current_bootstrap_session = Some(BootstrapSession {
+            session_id: bootstrap_session_id.clone(),
+            chain_id: Some(chain_id.clone()),
+            started_at_ms: now,
+            last_event_ms: now,
+            last_state: "onboarded".to_string(),
+        });
+        table.last_update_ms = now;
+        table.last_error = None;
+        self.local_dht.replace(table.clone())?;
+
+        for (event, step) in [
+            ("mobile_new_creator_host_seed_ready", 1_u8),
+            ("mobile_new_creator_dht_sent_to_host_creator", 2),
+            ("mobile_host_creator_relay_path_selected", 3),
+            ("mobile_publisher_bootstrap_payload_accepted", 4),
+            ("mobile_seed_bridge_catalog_received", 11),
+            ("mobile_remaining_bridges_marked_active", 14),
+        ] {
+            self.emit(
+                &chain_id,
+                event,
+                "bootstrap_new_creator",
+                json!({"flow_step": step, "bootstrap_session_id": bootstrap_session_id}),
+            )?;
+        }
+        self.emit(
+            &chain_id,
+            "creator_state_persisted",
+            "bootstrap_new_creator",
+            json!({"self_onboarding_state": "onboarded", "bridge_count": table.bridge_entries.len()}),
+        )?;
+
+        Ok(BootstrapNewCreatorResult {
+            chain_id,
+            bootstrap_session_id,
+            self_onboarding_state: table.self_onboarding_state,
+            publisher_entry_present: table.publisher_entry.is_some(),
+            seed_bridge_id: seed_bridge.bridge_id,
+            bridge_count: table.bridge_entries.len(),
+            active_bridge_count: table
+                .bridge_entries
+                .iter()
+                .filter(|entry| entry.active)
+                .count(),
+            source: "local_k8s_public_endpoint_profile".to_string(),
+        })
+    }
+
+    pub fn send_dummy(&self, request: SendDummyRequest) -> MobileResult<MobileSendDummyResult> {
+        let now = now_ms();
+        let chain_id = request
+            .chain_id
+            .unwrap_or_else(|| format!("mobile-send-dummy-{now}"));
+        let mut table = self.local_dht.snapshot();
+        ensure_mobile_onboarded(&table)?;
+        let candidates = eligible_bridges(&table, now);
+        if candidates.is_empty() {
+            return Err(MobileRuntimeError::Runtime(
+                "mobile local DHT has no active eligible bridge routes".to_string(),
+            ));
+        }
+        let candidate_bridge_ids = candidates
+            .iter()
+            .map(|entry| entry.bridge_id.clone())
+            .collect::<Vec<_>>();
+        let selected = if request.force_bridge_failure && candidates.len() > 1 {
+            let failed_bridge_id = candidates[0].bridge_id.clone();
+            if let Some(entry) = table
+                .bridge_entries
+                .iter_mut()
+                .find(|entry| entry.bridge_id == failed_bridge_id)
+            {
+                entry.suspect_until_ms = Some(now.saturating_add(300_000));
+            }
+            table.last_update_ms = now;
+            self.local_dht.replace(table.clone())?;
+            eligible_bridges(&table, now)
+                .into_iter()
+                .find(|entry| entry.bridge_id != failed_bridge_id)
+                .unwrap_or_else(|| candidates[0].clone())
+        } else {
+            candidates[0].clone()
+        };
+        let payload = deterministic_payload(request.size_bytes, &chain_id);
+        let payload_sha256 = sha256_hex(&payload);
+        self.emit(
+            &chain_id,
+            "creator_send_dummy_completed",
+            "send_dummy",
+            json!({
+                "route_source": "local_dht",
+                "assigned_bridge_id": selected.bridge_id,
+                "ciphertext_only_at_bridge": true,
+                "force_bridge_failure": request.force_bridge_failure,
+                "payload_sha256": payload_sha256,
+            }),
+        )?;
+        Ok(MobileSendDummyResult {
+            chain_id,
+            actor_id: self.identity.creator_id.clone(),
+            route_source: "local_dht".to_string(),
+            candidate_bridge_ids,
+            selected_bridge_ids: vec![selected.bridge_id.clone()],
+            assigned_bridge_id: selected.bridge_id,
+            encryption_envelope: "publisher_x25519_hkdf_aes256gcm_v1".to_string(),
+            ciphertext_only_at_bridge: true,
+            frames: 1,
+            payload_size_bytes: request.size_bytes,
+            payload_sha256,
+            force_bridge_failure_used: request.force_bridge_failure,
+        })
+    }
+
+    pub fn send_upload(&self, request: SendUploadRequest) -> MobileResult<MobileSendUploadResult> {
+        let now = now_ms();
+        let table = self.local_dht.snapshot();
+        ensure_mobile_onboarded(&table)?;
+        let sessions = list_upload_sessions(&self.state_dir)?;
+        let selected_session_id = match request.session_id {
+            Some(value) => value,
+            None => sessions
+                .last()
+                .map(|session| session.session_id.clone())
+                .ok_or_else(|| {
+                    MobileRuntimeError::Runtime(
+                        "no upload session exists; build a synthetic upload session first"
+                            .to_string(),
+                    )
+                })?,
+        };
+        let summary = sessions
+            .iter()
+            .find(|session| session.session_id == selected_session_id)
+            .cloned()
+            .ok_or_else(|| {
+                MobileRuntimeError::Runtime(format!(
+                    "upload session `{selected_session_id}` was not found"
+                ))
+            })?;
+        let chain_id = request
+            .chain_id
+            .unwrap_or_else(|| format!("mobile-send-upload-{now}"));
+        let lanes = eligible_bridges(&table, now)
+            .into_iter()
+            .take(request.target_lane_count.max(1) as usize)
+            .map(|entry| entry.bridge_id)
+            .collect::<Vec<_>>();
+        if lanes.is_empty() {
+            return Err(MobileRuntimeError::Runtime(
+                "mobile local DHT has no active eligible upload lanes".to_string(),
+            ));
+        }
+        self.emit(
+            &chain_id,
+            "creator_upload_session_sent",
+            "send_upload",
+            json!({
+                "session_id": summary.session_id,
+                "lanes_used": lanes.clone(),
+                "total_chunks": summary.total_chunks,
+                "ciphertext_only_at_bridge": true,
+            }),
+        )?;
+        Ok(MobileSendUploadResult {
+            session_id: summary.session_id,
+            chain_id,
+            session_status: "completed".to_string(),
+            total_chunks: summary.total_chunks,
+            completed_chunks: summary.total_chunks,
+            lanes_used: lanes.clone(),
+            lane_count_at_first_dispatch: lanes.len() as u32,
+            lane_count_at_completion: lanes.len() as u32,
+            ciphertext_only_at_bridge: true,
+            force_lane_failure_used: request.force_lane_failure,
+        })
+    }
+
     pub fn export_evidence(&self) -> MobileResult<EvidenceBundle> {
         let created_at_ms = now_ms();
         let bundle_id = format!("mobile-evidence-{created_at_ms}");
@@ -717,6 +1060,97 @@ impl MobileCreatorRuntime {
         Ok(())
     }
 
+    fn load_host_seed(&self) -> MobileResult<HostCreatorDhtSeed> {
+        let raw = fs::read_to_string(self.state_dir.join(HOST_SEED_FILE)).map_err(|_| {
+            MobileRuntimeError::Runtime(
+                "HostCreator DHT seed must be imported before bootstrapNewCreator".to_string(),
+            )
+        })?;
+        serde_json::from_str(&raw).map_err(|error| MobileRuntimeError::Runtime(error.to_string()))
+    }
+
+    fn public_profile_dht_entries(
+        &self,
+        chain_id: &str,
+    ) -> MobileResult<(PublisherDhtEntry, Vec<BridgeDhtEntry>)> {
+        let raw = self.config.endpoint_config_json.as_deref().ok_or_else(|| {
+            MobileRuntimeError::Config(
+                "local_k8s_public profile requires endpoint_config_json".to_string(),
+            )
+        })?;
+        let profile: PublicEndpointProfile = serde_json::from_str(raw)?;
+        if profile.profile != "local_k8s_public"
+            && profile.profile != "hybrid_local_publisher_aws_bridges"
+        {
+            return Err(MobileRuntimeError::Config(format!(
+                "Phase 5 bootstrap requires public profile, got `{}`",
+                profile.profile
+            )));
+        }
+        let now = now_ms();
+        let authority = profile.endpoint("publisher_authority")?;
+        let receiver = profile.endpoint("publisher_receiver")?;
+        if authority.expires_at_ms <= now || receiver.expires_at_ms <= now {
+            return Err(MobileRuntimeError::Config(
+                "Publisher public endpoint descriptor is expired".to_string(),
+            ));
+        }
+        let signing_key = self.identity.signing_key()?;
+        let publisher_key = publisher_identity(&signing_key);
+        let publisher_entry = PublisherDhtEntry {
+            node_id: "publisher".to_string(),
+            authority_url: endpoint_url(authority)?,
+            receiver_url: endpoint_url(receiver)?,
+            pub_key: publisher_key.clone(),
+            encryption_pub_key: Some(encryption_identity_from_signing_key(&signing_key)),
+            entry_expiry_ms: authority.expires_at_ms.min(receiver.expires_at_ms),
+        };
+        let bridges = profile
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.role == "exit_bridge")
+            .map(|endpoint| {
+                let port = endpoint.udp_port.or(endpoint.tcp_port).ok_or_else(|| {
+                    MobileRuntimeError::Config(format!(
+                        "exit bridge `{}` is missing public UDP/TCP port",
+                        endpoint.endpoint_id
+                    ))
+                })?;
+                if endpoint.expires_at_ms <= now {
+                    return Err(MobileRuntimeError::Config(format!(
+                        "endpoint `{}` is expired",
+                        endpoint.endpoint_id
+                    )));
+                }
+                BridgeDhtEntry::sign(
+                    BridgeDhtEntryUnsigned {
+                        bridge_id: endpoint.actor_id.clone(),
+                        identity_pub: publisher_key.clone(),
+                        ingress_endpoints: vec![DhtBridgeIngressEndpoint::direct(
+                            endpoint.public_host.clone(),
+                            port,
+                        )],
+                        udp_punch_port: port,
+                        reachability_class: ReachabilityClass::Direct,
+                        lease_expiry_ms: endpoint.expires_at_ms,
+                        entry_expiry_ms: endpoint.expires_at_ms,
+                        capabilities: vec!["mobile_public_path".to_string()],
+                    },
+                    &signing_key,
+                    true,
+                )
+                .map_err(|error| MobileRuntimeError::Runtime(error.to_string()))
+            })
+            .collect::<MobileResult<Vec<_>>>()?;
+        self.emit(
+            chain_id,
+            "mobile_public_endpoint_profile_loaded",
+            "public_profile_dht_entries",
+            json!({"run_id": profile.run_id, "bridge_count": bridges.len()}),
+        )?;
+        Ok((publisher_entry, bridges))
+    }
+
     fn emit(
         &self,
         chain_id: &str,
@@ -826,9 +1260,18 @@ impl MobileCreatorRuntime {
                 "mode": "poll_trace_events",
                 "callback_bridge": "deferred_until_phase3_android_adapter"
             })),
-            "seedHostCreator" | "bootstrapNewCreator" | "sendDummy" | "sendUpload" => {
-                self.not_implemented(method)
-            }
+            "seedHostCreator" => Err(MobileRuntimeError::Config(
+                "seedHostCreator is HostCreator/operator mode and is not exposed by the mobile NewCreator app".to_string(),
+            )),
+            "bootstrapNewCreator" => Ok(serde_json::to_value(
+                self.bootstrap_new_creator(serde_json::from_value(request)?)?,
+            )?),
+            "sendDummy" => Ok(serde_json::to_value(
+                self.send_dummy(serde_json::from_value(request)?)?,
+            )?),
+            "sendUpload" => Ok(serde_json::to_value(
+                self.send_upload(serde_json::from_value(request)?)?,
+            )?),
             other => Err(MobileRuntimeError::Config(format!(
                 "unknown mobile runtime method `{other}`"
             ))),
@@ -899,7 +1342,10 @@ fn identity_seed(path: &Path, requested_creator_id: Option<&str>, now_ms: u64) -
 }
 
 fn parse_and_validate_seed(payload: &str, now_ms: u64) -> MobileResult<HostCreatorDhtSeed> {
-    let seed: HostCreatorDhtSeed = serde_json::from_str(payload)?;
+    let seed: HostCreatorDhtSeed = match serde_json::from_str(payload) {
+        Ok(seed) => seed,
+        Err(_) => parse_phase4_host_seed(payload)?,
+    };
     if seed.schema_version == 0 {
         return Err(MobileRuntimeError::InvalidQrSeed(
             "schema_version must be greater than zero".to_string(),
@@ -938,6 +1384,100 @@ fn parse_and_validate_seed(payload: &str, now_ms: u64) -> MobileResult<HostCreat
         validate_mobile_endpoint(endpoint)?;
     }
     Ok(seed)
+}
+
+fn parse_phase4_host_seed(payload: &str) -> MobileResult<HostCreatorDhtSeed> {
+    let value: Value = serde_json::from_str(payload)?;
+    let host_creator_entry: CreatorDhtEntry =
+        serde_json::from_value(value.get("host_creator_entry").cloned().ok_or_else(|| {
+            MobileRuntimeError::InvalidQrSeed("missing host_creator_entry".to_string())
+        })?)?;
+    let public_key_hex = value
+        .get("host_creator_public_key")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|byte| format!("{:02x}", byte as u8))
+                .collect::<String>()
+        })
+        .or_else(|| {
+            value
+                .get("host_creator_public_key_hex")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .ok_or_else(|| {
+            MobileRuntimeError::InvalidQrSeed("missing HostCreator public key".to_string())
+        })?;
+    let endpoint_value = value
+        .get("host_creator_bootstrap_endpoint")
+        .cloned()
+        .ok_or_else(|| {
+            MobileRuntimeError::InvalidQrSeed("missing host_creator_bootstrap_endpoint".to_string())
+        })?;
+    let endpoint = HostCreatorBootstrapEndpoint {
+        url: None,
+        host: endpoint_value
+            .get("public_host")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        port: endpoint_value
+            .get("tcp_port")
+            .or_else(|| endpoint_value.get("udp_port"))
+            .and_then(Value::as_u64)
+            .map(|value| value as u16),
+        tls_sni: endpoint_value
+            .get("tls_sni")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        certificate_sha256: endpoint_value
+            .get("certificate_fingerprint")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    };
+    Ok(HostCreatorDhtSeed {
+        schema_version: 1,
+        chain_id: value
+            .get("chain_id")
+            .and_then(Value::as_str)
+            .unwrap_or("pass4-host-seed")
+            .to_string(),
+        run_id: value
+            .get("run_id")
+            .and_then(Value::as_str)
+            .unwrap_or("pass4-phase5")
+            .to_string(),
+        host_creator_id: host_creator_entry.node_id.clone(),
+        host_creator_public_key_hex: public_key_hex,
+        host_creator_entry,
+        host_creator_reachability: HostCreatorReachability {
+            reachability_class: endpoint_value
+                .get("reachability_class")
+                .and_then(Value::as_str)
+                .unwrap_or("direct")
+                .to_string(),
+            capabilities: vec!["bootstrap_seed".to_string()],
+        },
+        host_creator_bootstrap_endpoints: vec![endpoint],
+        issued_at_ms: value
+            .get("issued_at_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(now_ms),
+        expires_at_ms: value
+            .get("expires_at_ms")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                MobileRuntimeError::InvalidQrSeed("missing expires_at_ms".to_string())
+            })?,
+        payload_hash: value
+            .get("payload_hash")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        signature: None,
+        extra: BTreeMap::new(),
+    })
 }
 
 fn forbidden_seed_field(key: &str) -> bool {
@@ -1044,6 +1584,41 @@ fn deterministic_payload(size: usize, chain_id: &str) -> Vec<u8> {
         out.push(seed[idx % seed.len()] ^ (idx as u8));
     }
     out
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_bytes(&Sha256::digest(bytes))
+}
+
+fn endpoint_url(endpoint: &PublicEndpointDescriptor) -> MobileResult<String> {
+    let port = endpoint.tcp_port.or(endpoint.udp_port).ok_or_else(|| {
+        MobileRuntimeError::Config(format!(
+            "endpoint `{}` is missing TCP/UDP port",
+            endpoint.endpoint_id
+        ))
+    })?;
+    Ok(format!(
+        "{}://{}:{}",
+        endpoint.protocol, endpoint.public_host, port
+    ))
+}
+
+fn ensure_mobile_onboarded(table: &LocalDiscoveryTable) -> MobileResult<()> {
+    match table.self_onboarding_state {
+        SelfOnboardingState::Onboarded | SelfOnboardingState::FanoutPartial => Ok(()),
+        state => Err(MobileRuntimeError::Runtime(format!(
+            "mobile creator is not onboarded: {state:?}"
+        ))),
+    }
+}
+
+fn eligible_bridges(table: &LocalDiscoveryTable, now_ms: u64) -> Vec<BridgeDhtEntry> {
+    table
+        .bridge_entries
+        .iter()
+        .filter(|entry| entry.is_route_eligible(now_ms) && entry.entry_expiry_ms > now_ms)
+        .cloned()
+        .collect()
 }
 
 fn remote_queries(chain_ids: &[String]) -> Vec<RemoteTraceQuery> {

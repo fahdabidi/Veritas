@@ -29,6 +29,7 @@ import com.veritas.gbn.mobile.model.EvidenceUploadConfig
 import com.veritas.gbn.mobile.model.HostSeedGuard
 import com.veritas.gbn.mobile.model.JsonText
 import com.veritas.gbn.mobile.model.RunProfileConfig
+import com.veritas.gbn.mobile.model.S3GrantQrAssembler
 import com.veritas.gbn.mobile.runtime.RuntimeConfigFactory
 import com.veritas.gbn.mobile.runtime.MobileCreatorRuntime
 import com.veritas.gbn.mobile.service.CreatorForegroundService
@@ -50,7 +51,9 @@ class MainActivity : Activity() {
     private var runProfile = RunProfileConfig.default(selectedProfile)
     private var lastHostSeedPayload: String? = null
     private var lastUploadResult: String = "{}"
+    private var lastBootstrapResult: String = "{}"
     private var lastEvidence: EvidenceBundleResult? = null
+    private val s3GrantQrAssembler = S3GrantQrAssembler()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,6 +67,20 @@ class MainActivity : Activity() {
         runtime?.close()
         stopService(Intent(this, CreatorForegroundService::class.java))
         super.onDestroy()
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
+        val payload = data?.getStringExtra("SCAN_RESULT").orEmpty()
+        if (payload.isBlank()) return
+        when (requestCode) {
+            REQUEST_HOST_QR_SCAN -> {
+                hostSeedInput.setText(payload)
+                previewHostSeed()
+            }
+            REQUEST_S3_GRANT_QR_SCAN -> importS3GrantQrPayload(payload)
+        }
     }
 
     private fun buildUi(): View {
@@ -172,7 +189,7 @@ class MainActivity : Activity() {
         root.addView(button("HostCreatorDHTQRReader", "HostCreator DHT QR Reader") {
             eventLog.appendAction(findAction("HostCreatorDHTQRReader"), nextChainId("qr"), "external_scanner_requested")
             val intent = Intent("com.google.zxing.client.android.SCAN").putExtra("SCAN_MODE", "QR_CODE_MODE")
-            runCatching { startActivityForResult(intent, REQUEST_QR_SCAN) }
+            runCatching { startActivityForResult(intent, REQUEST_HOST_QR_SCAN) }
                 .onFailure { show("No external QR scanner found in emulator. Paste or file-import the QR payload above.") }
         })
         root.addView(button("PreviewBootstrapDHTQR", "Preview Host Seed") {
@@ -181,7 +198,9 @@ class MainActivity : Activity() {
         root.addView(button("ImportHostCreatorDHTSeed", "Import Host Seed") {
             importHostSeed()
         })
-        root.addView(disabledButton("BootstrapNewCreator", "Bootstrap New Creator", "Phase 5 public HostCreator path required"))
+        root.addView(button("BootstrapNewCreator", "Bootstrap New Creator") {
+            bootstrapNewCreator()
+        })
     }
 
     private fun addUploadScreen(root: LinearLayout) {
@@ -196,8 +215,12 @@ class MainActivity : Activity() {
         root.addView(button("SessionFrameSummary", "Session Frame Summary") {
             show("Last upload session:\n$lastUploadResult")
         })
-        root.addView(disabledButton("SendDummy", "Send Dummy", "Phase 5 onboarded mobile path required"))
-        root.addView(disabledButton("SendUpload", "Send Upload", "Phase 5 onboarded mobile path required"))
+        root.addView(button("SendDummy", "Send Dummy") {
+            sendDummy()
+        })
+        root.addView(button("SendUpload", "Send Upload") {
+            sendUpload()
+        })
     }
 
     private fun addEventsScreen(root: LinearLayout) {
@@ -234,6 +257,11 @@ class MainActivity : Activity() {
         root.addView(button("ImportS3GrantFromDeviceFile", "Import S3 Grant From Device File") {
             importS3GrantFromDeviceFile()
         })
+        root.addView(button("EvidenceGrantQRReader", "Evidence Grant QR Reader") {
+            val intent = Intent("com.google.zxing.client.android.SCAN").putExtra("SCAN_MODE", "QR_CODE_MODE")
+            runCatching { startActivityForResult(intent, REQUEST_S3_GRANT_QR_SCAN) }
+                .onFailure { show("No external QR scanner found. Use Android Files/share import fallback, or emulator adb grant import.") }
+        })
         root.addView(button("ExportEvidence", "Export Evidence") {
             exportEvidence()
         })
@@ -266,11 +294,15 @@ class MainActivity : Activity() {
                     "DumpLocalDht" -> callRuntime("DumpLocalDht") { it.localDht() }
                     "DumpNodeState" -> callRuntime("DumpNodeState") { it.nodeMetadata() + "\n" + it.localDht() }
                     "RuntimeMetrics" -> show("events=${eventLog.readText().lines().size}; upload=${lastUploadResult.take(160)}")
+                    "RefreshBridgeCatalog" -> callRuntime("RefreshBridgeCatalog") { it.refreshBridgeCatalog() }
                     "HostCreatorDHTQRReader" -> previewHostSeed()
+                    "BootstrapNewCreator" -> bootstrapNewCreator()
                     "BuildUploadSession" -> callRuntime("BuildUploadSession") { runtime ->
                         val chainId = nextChainId("upload")
                         runtime.buildSyntheticUploadSession("""{"chain_id":"$chainId","size_bytes":4096,"chunk_size":1024,"sanitization_profile":"phase3-button"}""")
                     }
+                    "SendDummy" -> sendDummy()
+                    "SendUpload" -> sendUpload()
                     "SessionFrameSummary" -> show(lastUploadResult)
                     "ExportEvidence" -> exportEvidence()
                     "UploadEvidenceToS3" -> uploadEvidenceToS3()
@@ -329,6 +361,48 @@ class MainActivity : Activity() {
         }.onFailure { showError(it) }
     }
 
+    private fun bootstrapNewCreator() {
+        phase5PrerequisiteError(requireHostSeed = true)?.let {
+            show("BootstrapNewCreator disabled: $it")
+            return
+        }
+        callRuntime("BootstrapNewCreator") { runtime ->
+            val chainId = nextChainId("bootstrap")
+            runtime.bootstrapNewCreator("""{"chain_id":"$chainId"}""").also {
+                lastBootstrapResult = it
+                chainFilterInput.setText(chainId)
+            }
+        }
+    }
+
+    private fun sendDummy() {
+        phase5PrerequisiteError(requireOnboarded = true)?.let {
+            show("SendDummy disabled: $it")
+            return
+        }
+        callRuntime("SendDummy") { runtime ->
+            val chainId = nextChainId("dummy")
+            runtime.sendDummy("""{"chain_id":"$chainId","size_bytes":256}""").also {
+                chainFilterInput.setText(chainId)
+            }
+        }
+    }
+
+    private fun sendUpload() {
+        phase5PrerequisiteError(requireOnboarded = true, requireUpload = true)?.let {
+            show("SendUpload disabled: $it")
+            return
+        }
+        callRuntime("SendUpload") { runtime ->
+            val chainId = nextChainId("send-upload")
+            val sessionId = jsonStringField(lastUploadResult, "session_id")
+            val sessionField = sessionId?.let { ""","session_id":${JsonText.quote(it)}""" }.orEmpty()
+            runtime.sendUpload("""{"chain_id":"$chainId"$sessionField,"target_lane_count":3}""").also {
+                chainFilterInput.setText(chainId)
+            }
+        }
+    }
+
     private fun exportEvidence(): EvidenceBundleResult {
         val chainId = nextChainId("evidence")
         val runtimeEvidence = runtime?.exportEvidence() ?: "{}"
@@ -345,7 +419,7 @@ class MainActivity : Activity() {
             "network_context.json" to DeviceContext.networkJson(this, "Phase 3 emulator-first validation"),
             "app_build.json" to DeviceContext.appBuildJson(),
             "rust_build.json" to DeviceContext.rustBuildJson(),
-            "chain_ids.txt" to chainId,
+            "chain_ids.txt" to listOf(chainId, jsonStringField(lastBootstrapResult, "chain_id")).filterNotNull().joinToString("\n"),
             "remote_trace_queries.json" to runtimeTraceQueries(chainId),
         )
         val result = EvidenceBundleWriter.writeBundle(
@@ -391,6 +465,44 @@ class MainActivity : Activity() {
         }.onFailure { showError(it) }
     }
 
+    private fun importS3GrantQrPayload(payload: String) {
+        runCatching {
+            val result = s3GrantQrAssembler.accept(payload)
+            if (result.complete && result.grantJson != null) {
+                uploadGrantInput.setText(result.grantJson)
+            }
+            show(result.message)
+        }.onFailure { showError(it) }
+    }
+
+    private fun phase5PrerequisiteError(
+        requireHostSeed: Boolean = false,
+        requireOnboarded: Boolean = false,
+        requireUpload: Boolean = false,
+    ): String? {
+        if (runtime == null) return "runtime is stopped"
+        if (selectedProfile != RunProfileConfig.PROFILE_LOCAL_K8S_PUBLIC &&
+            selectedProfile != RunProfileConfig.PROFILE_HYBRID
+        ) {
+            return "select local_k8s_public or hybrid profile"
+        }
+        if (requireHostSeed && lastHostSeedPayload.isNullOrBlank()) {
+            return "import HostCreator DHT seed first"
+        }
+        if (requireOnboarded) {
+            val dht = runCatching { runtime?.localDht().orEmpty() }.getOrDefault("")
+            if (!dht.contains(""""self_onboarding_state":"onboarded"""") &&
+                !dht.contains(""""self_onboarding_state":"fanout_partial"""")
+            ) {
+                return "mobile creator is not onboarded"
+            }
+        }
+        if (requireUpload && jsonStringField(lastUploadResult, "session_id").isNullOrBlank()) {
+            return "build an upload session first"
+        }
+        return null
+    }
+
     private fun callRuntime(buttonId: String, block: (MobileCreatorRuntime) -> String) {
         val current = runtime
         if (current == null) {
@@ -421,6 +533,12 @@ class MainActivity : Activity() {
         output.post { scrollView.smoothScrollTo(0, output.bottom) }
         eventLog.appendEvent("app_error", nextChainId("error"), message)
     }
+
+    private fun jsonStringField(json: String, field: String): String? =
+        Regex(""""${Regex.escape(field)}"\s*:\s*"([^"]*)"""")
+            .find(json)
+            ?.groupValues
+            ?.get(1)
 
     private fun startForeground(chainId: String, operation: String) {
         val intent = Intent(this, CreatorForegroundService::class.java)
@@ -554,6 +672,7 @@ class MainActivity : Activity() {
         }
 
     companion object {
-        private const val REQUEST_QR_SCAN = 13014
+        private const val REQUEST_HOST_QR_SCAN = 13014
+        private const val REQUEST_S3_GRANT_QR_SCAN = 13015
     }
 }

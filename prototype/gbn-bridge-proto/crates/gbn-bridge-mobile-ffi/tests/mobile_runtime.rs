@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use ed25519_dalek::SigningKey;
 use gbn_bridge_mobile_ffi::{
     gbn_mobile_runtime_call, gbn_mobile_runtime_close, gbn_mobile_runtime_create,
-    gbn_mobile_string_free, BuildSyntheticUploadRequest, CreatorRuntimeConfig,
-    HostCreatorBootstrapEndpoint, HostCreatorDhtSeed, HostCreatorDhtSeedImportRequest,
-    HostCreatorReachability, MobileCreatorRuntime, TraceEventFilter,
+    gbn_mobile_string_free, BootstrapNewCreatorRequest, BuildSyntheticUploadRequest,
+    CreatorRuntimeConfig, HostCreatorBootstrapEndpoint, HostCreatorDhtSeed,
+    HostCreatorDhtSeedImportRequest, HostCreatorReachability, MobileCreatorRuntime,
+    SendDummyRequest, SendUploadRequest, TraceEventFilter,
 };
 use gbn_bridge_protocol::{
     publisher_identity, CreatorDhtEntry, CreatorDhtEntryUnsigned, SelfOnboardingState,
@@ -42,6 +43,60 @@ fn config(root: &std::path::Path, actor: &str) -> CreatorRuntimeConfig {
         log_level: "info".to_string(),
         evidence_dir: None,
     }
+}
+
+fn local_public_config(root: &std::path::Path, actor: &str) -> CreatorRuntimeConfig {
+    let mut config = config(root, actor);
+    config.network_profile = "local_k8s_public".to_string();
+    config.endpoint_config_json = Some(format!(
+        r#"{{
+              "profile": "local_k8s_public",
+              "run_id": "phase5-unit",
+              "endpoints": [
+                {{
+                  "endpoint_id": "publisher-authority",
+                  "actor_id": "publisher",
+                  "role": "publisher_authority",
+                  "protocol": "https",
+                  "public_host": "pub-auth.example.test",
+                  "tcp_port": 443,
+                  "expires_at_ms": {}
+                }},
+                {{
+                  "endpoint_id": "publisher-receiver",
+                  "actor_id": "publisher",
+                  "role": "publisher_receiver",
+                  "protocol": "https",
+                  "public_host": "pub-recv.example.test",
+                  "tcp_port": 443,
+                  "expires_at_ms": {}
+                }},
+                {{
+                  "endpoint_id": "bridge-0",
+                  "actor_id": "exit-bridge-0",
+                  "role": "exit_bridge",
+                  "protocol": "udp",
+                  "public_host": "bridge01.example.test",
+                  "udp_port": 31001,
+                  "expires_at_ms": {}
+                }},
+                {{
+                  "endpoint_id": "bridge-1",
+                  "actor_id": "exit-bridge-1",
+                  "role": "exit_bridge",
+                  "protocol": "udp",
+                  "public_host": "bridge02.example.test",
+                  "udp_port": 31002,
+                  "expires_at_ms": {}
+                }}
+              ]
+            }}"#,
+        now_ms() + 3_600_000,
+        now_ms() + 3_600_000,
+        now_ms() + 3_600_000,
+        now_ms() + 3_600_000,
+    ));
+    config
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -218,6 +273,57 @@ fn synthetic_upload_trace_filter_and_evidence_export_work() {
 }
 
 #[test]
+fn phase5_public_operations_update_local_dht_and_emit_results() {
+    let root = temp_root("phase5");
+    let runtime = MobileCreatorRuntime::new(local_public_config(&root, "mobile-phase5")).unwrap();
+    let payload = host_seed(now_ms() + 60_000);
+    runtime
+        .import_host_creator_dht_seed(HostCreatorDhtSeedImportRequest { payload })
+        .unwrap();
+
+    let bootstrap = runtime
+        .bootstrap_new_creator(BootstrapNewCreatorRequest {
+            chain_id: Some("phase5-bootstrap-chain".to_string()),
+        })
+        .unwrap();
+    assert_eq!(
+        bootstrap.self_onboarding_state,
+        SelfOnboardingState::Onboarded
+    );
+    assert_eq!(bootstrap.bridge_count, 2);
+    assert!(runtime.local_dht().publisher_entry.is_some());
+
+    let dummy = runtime
+        .send_dummy(SendDummyRequest {
+            chain_id: Some("phase5-dummy-chain".to_string()),
+            size_bytes: 128,
+            force_bridge_failure: true,
+        })
+        .unwrap();
+    assert_eq!(dummy.route_source, "local_dht");
+    assert!(dummy.ciphertext_only_at_bridge);
+
+    let summary = runtime
+        .build_synthetic_upload_session(BuildSyntheticUploadRequest {
+            chain_id: Some("phase5-upload-build".to_string()),
+            size_bytes: 512,
+            chunk_size: 128,
+            sanitization_profile: "phase5-unit".to_string(),
+        })
+        .unwrap();
+    let uploaded = runtime
+        .send_upload(SendUploadRequest {
+            chain_id: Some("phase5-upload-send".to_string()),
+            session_id: Some(summary.session_id),
+            target_lane_count: 2,
+            force_lane_failure: vec!["exit-bridge-0".to_string()],
+        })
+        .unwrap();
+    assert_eq!(uploaded.completed_chunks, uploaded.total_chunks);
+    assert!(!uploaded.lanes_used.is_empty());
+}
+
+#[test]
 fn reset_clears_local_state_and_preserves_event_export_path() {
     let root = temp_root("reset");
     let runtime = MobileCreatorRuntime::new(config(&root, "mobile-reset")).unwrap();
@@ -271,7 +377,11 @@ fn ffi_json_boundary_hides_native_pointer_and_catches_errors() {
     };
     let parsed: Value = serde_json::from_str(&response).unwrap();
     assert_eq!(parsed["ok"], false);
-    assert_eq!(parsed["error"]["code"], "not_implemented");
+    assert_eq!(parsed["error"]["code"], "runtime_error");
+    assert!(parsed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not onboarded"));
 
     let response = unsafe { take_string(gbn_mobile_runtime_close(handle)) };
     let parsed: Value = serde_json::from_str(&response).unwrap();

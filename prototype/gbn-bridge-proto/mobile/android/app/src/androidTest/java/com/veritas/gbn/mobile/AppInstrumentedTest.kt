@@ -78,6 +78,7 @@ class AppInstrumentedTest {
             "PreviewBootstrapDHTQR",
             "ImportHostCreatorDHTSeed",
             "ImportS3GrantFromDeviceFile",
+            "EvidenceGrantQRReader",
             "RefreshEvents",
             "MainScroll",
             "OperationOutput",

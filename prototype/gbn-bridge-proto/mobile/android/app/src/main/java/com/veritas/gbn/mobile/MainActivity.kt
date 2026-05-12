@@ -363,8 +363,18 @@ class MainActivity : Activity() {
         runCatching {
             val evidence = lastEvidence ?: exportEvidence()
             val uploadConfig = EvidenceUploadConfig.parse(uploadGrantInput.text.toString())
-            val result = S3EvidenceUploader.uploadPresignedPut(uploadConfig, evidence.zipFile)
-            show("Uploaded s3://${result.bucket}/${result.objectKey}\netag=${result.etag}\nsha256=${result.localSha256}")
+            show("Uploading evidence to S3...\ns3://${uploadConfig.bucket}/${uploadConfig.objectKey}")
+            Thread {
+                runCatching {
+                    S3EvidenceUploader.uploadPresignedPut(uploadConfig, evidence.zipFile)
+                }.onSuccess { result ->
+                    runOnUiThread {
+                        show("Uploaded s3://${result.bucket}/${result.objectKey}\netag=${result.etag}\nsha256=${result.localSha256}")
+                    }
+                }.onFailure { error ->
+                    runOnUiThread { showError(error) }
+                }
+            }.start()
         }.onFailure { showError(it) }
     }
 
@@ -404,9 +414,12 @@ class MainActivity : Activity() {
     }
 
     private fun showError(error: Throwable) {
-        output.text = "ERROR: ${error.message}"
+        val message = error.message
+            ?: error::class.java.simpleName.takeIf { it.isNotBlank() }
+            ?: error.toString()
+        output.text = "ERROR: $message"
         output.post { scrollView.smoothScrollTo(0, output.bottom) }
-        eventLog.appendEvent("app_error", nextChainId("error"), error.message ?: error.toString())
+        eventLog.appendEvent("app_error", nextChainId("error"), message)
     }
 
     private fun startForeground(chainId: String, operation: String) {

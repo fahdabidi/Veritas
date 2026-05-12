@@ -60,6 +60,7 @@ mobile-network path on the phone.
 | Manual emulator action-output visibility follow-up | pass | `Show Node Metadata` initially updated only the off-screen output area; app now auto-scrolls to `Output` for action results/errors and instrumentation asserts this |
 | Manual emulator S3 negative path follow-up | pass | Blank pre-signed PUT URL now reports `S3 pre-signed PUT URL is required`; Creator Actions and Evidence buttons use the same upload handler |
 | Manual emulator S3 grant import follow-up | pass | Long pre-signed grant JSON can be pushed by adb to app external files and imported from the Evidence screen; instrumentation covers the import button |
+| Manual emulator S3 upload follow-up | pass | Evidence ZIP uploaded from emulator to `s3://veritas-pass4-mobile-evidence/mobile-evidence/pass4-phase3-emulator/mobile-chain/mobile-bundle.zip`; downloaded object SHA-256 matched app output `8e5934e5e131ab7923bd3be0aee6d58d4d8abbbc6f39da1e0ac723ddce2cb4ef` |
 | `./gradlew installDebug` | pass | Installed `com.veritas.gbn.mobile.debug` on emulator |
 | `adb shell monkey -p com.veritas.gbn.mobile.debug 1` | pass | App launched; PID observed |
 | `cargo fmt --all --check` | pass | Rust formatting clean |
@@ -164,9 +165,25 @@ git and reproducible.
 ## S3 Evidence Path
 
 The app implements the canonical S3 upload path using a pre-signed PUT grant and rejects
-long-lived AWS credentials in app config. No real S3 PUT was executed in this Phase 3 run
-because no operator-issued pre-signed upload grant was provided. The emulator run still
-validated grant parsing and evidence ZIP creation through unit tests.
+long-lived AWS credentials in app config. Manual emulator validation on `2026-05-12`
+executed a real PUT to:
+
+```text
+s3://veritas-pass4-mobile-evidence/mobile-evidence/pass4-phase3-emulator/mobile-chain/mobile-bundle.zip
+```
+
+The app exported:
+
+```text
+/data/user/0/com.veritas.gbn.mobile.debug/cache/evidence-exports/mobile-evidence-1778613524822.zip
+sha256=8e5934e5e131ab7923bd3be0aee6d58d4d8abbbc6f39da1e0ac723ddce2cb4ef
+```
+
+The object was downloaded from S3 and the local SHA-256 matched the app output:
+
+```text
+8e5934e5e131ab7923bd3be0aee6d58d4d8abbbc6f39da1e0ac723ddce2cb4ef  /tmp/mobile-bundle.zip
+```
 
 ## Compatibility Notes
 

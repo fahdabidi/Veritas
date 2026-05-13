@@ -1,5 +1,10 @@
 # GBN-PROTO-013 Phase 5 Mobile To Local k8s Validation Attempt
 
+> Superseded note: this blocked attempt remains archived as historical evidence. The
+> updated Phase 5 plan no longer uses local k8s public ingress for sign-off; canonical
+> physical-phone validation now requires an AWS-deployed Publisher, HostCreator, and
+> ExitBridge topology.
+
 ## Run Metadata
 
 - Date: `2026-05-12`

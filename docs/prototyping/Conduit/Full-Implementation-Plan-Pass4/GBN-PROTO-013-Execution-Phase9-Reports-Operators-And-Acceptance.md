@@ -73,13 +73,12 @@ Update or add operator docs for:
 - WSL2 Ubuntu prerequisites;
 - Android app build/install;
 - S3 evidence bucket setup and short-lived upload grants;
-- local k8s public ingress preparation and teardown;
-- HostCreator `BootstrapDHTQRCode` generation;
+- AWS public topology deployment and teardown;
+- AWS HostCreator `BootstrapDHTQRCode` generation;
 - physical phone validation checklist;
 - mobile evidence retrieval from S3;
-- hybrid AWS bridge-only deployment and teardown;
-- CloudWatch trace collection for AWS bridges;
-- restoring private-only local k8s exposure after validation.
+- CloudWatch trace collection for AWS Publisher, HostCreator, and ExitBridges;
+- restoring private-only AWS admin access after validation.
 
 The docs must clearly distinguish operator/admin tooling from mobile app buttons. The
 mobile app must never be described as calling private admin URLs from the phone.
@@ -92,8 +91,9 @@ Only update `prototype/gbn-bridge-proto/infra/README-infra.md` after:
 
 1. Phase 1 strict Bootstrap validation passes.
 2. Phase 1 strict SendDummy validation passes.
-3. Phase 5 physical mobile local-k8s validation passes.
-4. Phase 8 physical mobile hybrid AWS geo validation passes.
+3. Phase 5 physical mobile AWS public validation passes.
+4. Phase 8 physical mobile AWS geo validation passes, or Phase 5 includes the accepted
+   non-U.S. ExitBridge evidence.
 5. Reports are archived under Pass 4 `Test-Reports/`.
 6. AWS resources are torn down or explicitly documented as intentionally still running.
 7. V1 preservation check returns no files.
@@ -136,7 +136,6 @@ cd ../../..
 prototype/gbn-bridge-proto/infra/scripts/pass4-report-index-verify.sh \
   --require-chainid-matrix \
   --require-s3-mobile-evidence \
-  --require-local-k8s-evidence \
   --require-cloudwatch-evidence \
   --require-readme-links
 ```
@@ -168,12 +167,12 @@ shellcheck infra/scripts/pass4-report-index-verify.sh
 - All Phase 1-8 acceptance criteria are complete or explicitly deferred with README gap
   left open.
 - Required Pass 4 reports exist under `Test-Reports/`.
-- Final ChainID matrix links mobile, local k8s, and AWS evidence.
+- Final ChainID matrix links mobile, S3, and AWS CloudWatch evidence.
 - README remaining validation gap is updated only when evidence supports it.
-- Operator docs describe the mobile app, S3 evidence transfer, public ingress, and AWS
-  bridge-only deployment.
+- Operator docs describe the mobile app, S3 evidence transfer, AWS public topology, and
+  CloudWatch collection.
 - AWS resources are torn down or documented with owner/reason.
-- Local k8s public exposure is torn down.
+- Any local k8s public exposure used as a fallback fixture is torn down.
 - Existing Pass 3 acceptance remains green.
 - Rust and Android validation commands pass.
 - V1 preservation checks return no files.

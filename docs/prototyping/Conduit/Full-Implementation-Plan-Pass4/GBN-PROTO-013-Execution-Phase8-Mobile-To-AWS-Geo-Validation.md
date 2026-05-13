@@ -1,9 +1,14 @@
 # GBN-PROTO-013 - Execution Phase 8 - Mobile To AWS Geo Validation
 
-**Status:** Pending
-**Last Updated:** 2026-05-11
+**Status:** Pending Rewrite
+**Last Updated:** 2026-05-12
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 **Depends On:** Phases 1-7 complete
+
+> Superseded note: the `2026-05-12` Phase 5 topology decision moved Publisher and
+> HostCreator into AWS for canonical physical mobile validation. This phase must be
+> rewritten to validate AWS Publisher/HostCreator plus non-U.S. AWS ExitBridges, not a
+> local-k8s Publisher hybrid.
 
 ## Objective
 

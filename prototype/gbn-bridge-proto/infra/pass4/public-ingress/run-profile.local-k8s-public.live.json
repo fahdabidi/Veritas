@@ -1,0 +1,103 @@
+{
+  "profile": "local_k8s_public",
+  "chain_id": "pass4-local-public-example",
+  "description": "Example Pass 4 run profile. Replace hostnames, certificate fingerprints, and expiry before a live public run.",
+  "host_creator": {
+    "actor_id": "creator-host",
+    "public_key_hex": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+  },
+  "endpoints": [
+    {
+      "endpoint_id": "pass4-local-publisher-authority",
+      "actor_id": "publisher",
+      "role": "publisher_authority",
+      "profile": "local_k8s_public",
+      "protocol": "https",
+      "public_host": "pub-auth.pass4-conduit.example.com",
+      "tcp_port": 443,
+      "tls_sni": "pub-auth.pass4-conduit.example.com",
+      "certificate_fingerprint": "sha256:replace-with-live-cert-fingerprint",
+      "reachability_class": "direct",
+      "expires_at_ms": 1798761600000,
+      "chain_id": "pass4-local-public-example"
+    },
+    {
+      "endpoint_id": "pass4-local-publisher-receiver",
+      "actor_id": "publisher",
+      "role": "publisher_receiver",
+      "profile": "local_k8s_public",
+      "protocol": "https",
+      "public_host": "pub-recv.pass4-conduit.example.com",
+      "tcp_port": 443,
+      "tls_sni": "pub-recv.pass4-conduit.example.com",
+      "certificate_fingerprint": "sha256:replace-with-live-cert-fingerprint",
+      "reachability_class": "direct",
+      "expires_at_ms": 1798761600000,
+      "chain_id": "pass4-local-public-example"
+    },
+    {
+      "endpoint_id": "pass4-local-hostcreator-bootstrap",
+      "actor_id": "creator-host",
+      "role": "host_creator_bootstrap",
+      "profile": "local_k8s_public",
+      "protocol": "https",
+      "public_host": "hostcreator.pass4-conduit.example.com",
+      "tcp_port": 443,
+      "tls_sni": "hostcreator.pass4-conduit.example.com",
+      "certificate_fingerprint": "sha256:replace-with-live-cert-fingerprint",
+      "reachability_class": "direct",
+      "expires_at_ms": 1798761600000,
+      "chain_id": "pass4-local-public-example"
+    },
+    {
+      "endpoint_id": "pass4-local-bridge-01",
+      "actor_id": "exit-bridge-0",
+      "role": "exit_bridge",
+      "profile": "local_k8s_public",
+      "protocol": "udp",
+      "public_host": "bridge01.pass4-conduit.example.com",
+      "udp_port": 31001,
+      "reachability_class": "direct",
+      "expires_at_ms": 1798761600000,
+      "chain_id": "pass4-local-public-example"
+    },
+    {
+      "endpoint_id": "pass4-local-bridge-02",
+      "actor_id": "exit-bridge-1",
+      "role": "exit_bridge",
+      "profile": "local_k8s_public",
+      "protocol": "udp",
+      "public_host": "bridge02.pass4-conduit.example.com",
+      "udp_port": 31002,
+      "reachability_class": "direct",
+      "expires_at_ms": 1798761600000,
+      "chain_id": "pass4-local-public-example"
+    },
+    {
+      "endpoint_id": "pass4-local-bridge-03",
+      "actor_id": "exit-bridge-2",
+      "role": "exit_bridge",
+      "profile": "local_k8s_public",
+      "protocol": "udp",
+      "public_host": "bridge03.pass4-conduit.example.com",
+      "udp_port": 31003,
+      "reachability_class": "direct",
+      "expires_at_ms": 1798761600000,
+      "chain_id": "pass4-local-public-example"
+    }
+  ],
+  "admin_checks": [
+    {
+      "name": "publisher-authority-admin-denied",
+      "url": "https://pub-auth.pass4-conduit.example.com:9090/v1/admin/metrics"
+    },
+    {
+      "name": "publisher-receiver-admin-denied",
+      "url": "https://pub-recv.pass4-conduit.example.com:9090/v1/admin/metrics"
+    },
+    {
+      "name": "hostcreator-admin-denied",
+      "url": "https://hostcreator.pass4-conduit.example.com:9090/v1/admin/node-metadata"
+    }
+  ]
+}

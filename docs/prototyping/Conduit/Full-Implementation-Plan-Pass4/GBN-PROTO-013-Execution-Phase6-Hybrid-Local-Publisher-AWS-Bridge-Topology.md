@@ -1,9 +1,14 @@
 # GBN-PROTO-013 - Execution Phase 6 - Hybrid Local-Publisher / AWS-Bridge Topology
 
-**Status:** Pending
-**Last Updated:** 2026-05-11
+**Status:** Pending Rewrite
+**Last Updated:** 2026-05-12
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 **Depends On:** Phases 1-5 complete
+
+> Superseded note: the `2026-05-12` Phase 5 topology decision moved canonical physical
+> mobile validation to a full AWS deployment. This phase's original hybrid
+> local-Publisher/AWS-bridge plan is no longer the forward path and must be rewritten as
+> AWS public topology hardening, scale-up, CloudWatch evidence, and teardown planning.
 
 ## Objective
 

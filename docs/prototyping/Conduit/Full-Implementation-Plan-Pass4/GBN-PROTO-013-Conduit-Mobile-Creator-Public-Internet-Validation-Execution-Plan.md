@@ -2,7 +2,7 @@
 
 **Document ID:** GBN-PROTO-013
 **Status:** Pending
-**Last Updated:** 2026-05-11
+**Last Updated:** 2026-05-12
 **Related Docs:**
 [GBN-ARCH-001-V2 Media Creation Network](../../../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md),
 [GBN-PROTO-012 Pass 3 Architecture-Correct Bootstrap](../Full-Implementation-Plan-Pass3/GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md),
@@ -27,12 +27,14 @@ Current state:
 - The deployed creator process is `creator-runner`, a container/task binary with an admin
   HTTP listener. That binary is not directly embeddable in Android because it owns process
   lifecycle, file paths, admin transport, and server binding.
-- Local k8s services are currently ClusterIP-only. A real phone on cellular cannot reach
-  them without an explicit public ingress path.
-- AWS ECS validation is available, but the existing stack shape treats all services as one
-  regional deployment. Pass 4's AWS geo test is intentionally hybrid: the Publisher
-  remains the existing local k8s Publisher exposed through the controlled public-internet
-  path, while only ExitBridges run in the non-U.S. AWS region.
+- Local k8s remains the regression baseline for Pass 3 and Phase 1 hardening, but it is
+  no longer the canonical mobile public-internet validation target. A single workstation
+  k8s cluster cannot cleanly provide distinct public node identities for Publisher,
+  HostCreator, and every ExitBridge without NAT/ingress shortcuts that weaken the test.
+- Phase 5 therefore moves the live physical-phone validation to AWS. Publisher,
+  HostCreator, and ExitBridges must all run behind AWS public protocol endpoints while
+  admin surfaces remain private. AWS ECS/EC2 validation exists, but the deployment shape
+  still needs to support the full creator topology and per-actor public endpoint evidence.
 
 Pass 4 replaces the remaining synthetic/mobile gap with this flow:
 
@@ -44,47 +46,47 @@ Pass 4 replaces the remaining synthetic/mobile gap with this flow:
    HTTP/admin contract.
 3. Build an Android Kotlin creator app that loads the Rust library, owns mobile lifecycle,
    presents debug/operator controls, and persists creator state in app-private storage.
-4. Expose the existing local k8s Publisher, HostCreator bootstrap, and ExitBridge protocol
-   surfaces to the public internet for controlled validation from a physical mobile
-   device.
-5. Run the Android app from a real mobile network path against local k8s and archive
-   bootstrap, SendDummy, upload, failover, and ChainID evidence.
-6. Prepare the hybrid AWS geo topology: keep the Publisher in local k8s, keep its public
-   protocol ingress from Phases 4/5, and allow AWS ExitBridges to register with that
-   Publisher over the public internet while admin surfaces remain private.
-7. Deploy ExitBridges in a non-U.S. AWS region for geolocation validation. The default
-   planned region is `ca-central-1` (Canada Central) because it demonstrates non-U.S.
-   placement with lower expected latency and cost than Australia for a U.S.-based tester.
-8. Run the same Android app against the local k8s Publisher plus non-U.S. AWS ExitBridges
-   and archive mobile, local-k8s, and CloudWatch evidence.
+4. Preserve the local k8s public-ingress work as a fixture/fallback and use it to clarify
+   the public endpoint contract, but do not use it for Phase 5 sign-off.
+5. Deploy Publisher, HostCreator, and ExitBridges on AWS with mobile-reachable protocol
+   endpoints, then run the Android app from a real mobile network path and archive
+   bootstrap, SendDummy, upload, failover, S3, and CloudWatch ChainID evidence.
+6. Harden and scale the AWS public topology: cost plan, teardown plan, endpoint identity,
+   CloudWatch correlation, and admin-denial checks.
+7. Deploy or scale ExitBridges in a non-U.S. AWS region for geolocation validation. The
+   default planned region is `ca-central-1` (Canada Central) because it demonstrates
+   non-U.S. placement with lower expected latency and cost than Australia for a
+   U.S.-based tester.
+8. Run the same Android app against the AWS Publisher/HostCreator plus non-U.S.
+   ExitBridges and archive mobile, S3, and CloudWatch evidence.
 9. Update reports, operator documentation, and the README validation status.
 
 ## Mobile App Walkthrough
 
-This walkthrough describes how the validation operator uses the Android app once the
-local k8s public protocol endpoints and the HostCreator bootstrap QR have been prepared.
+This walkthrough describes how the validation operator uses the Android app once the AWS
+public protocol endpoints and the AWS HostCreator bootstrap QR have been prepared.
 It is the intended mental model for the implementation and later smoke docs.
 
 ### Trigger Bootstrap
 
 Preparation outside the app:
 
-1. Start the local k8s Publisher, Receiver, HostCreator, and ExitBridge topology.
-2. Seed the k8s HostCreator through existing private WSL/k8s operator tooling.
-3. Initialize the Publisher DHT with mobile-reachable ExitBridge entries.
-4. Generate `BootstrapDHTQRCode` from the seeded HostCreator. The QR contains the
+1. Deploy the AWS Publisher, Receiver, HostCreator, and ExitBridge topology.
+2. Seed the AWS HostCreator through private AWS operator tooling.
+3. Initialize the AWS Publisher DHT with mobile-reachable AWS ExitBridge entries.
+4. Generate `BootstrapDHTQRCode` from the seeded AWS HostCreator. The QR contains the
    HostCreator public key, HostCreator DHT entry, mobile-reachable HostCreator bootstrap
    endpoint, reachability metadata, expiry, ChainID/run id, and payload hash/signature
    metadata.
-5. Ensure the local k8s Publisher and ExitBridges have public protocol reachability, but
-   do not import Publisher DHT or Publisher trust material into the mobile app for
-   first-time bootstrap. The mobile NewCreator learns that from the Publisher bootstrap
-   payload returned through the HostCreator path.
+5. Ensure the AWS Publisher and ExitBridges have public protocol reachability, but do not
+   import Publisher DHT or Publisher trust material into the mobile app for first-time
+   bootstrap. The mobile NewCreator learns that from the Publisher bootstrap payload
+   returned through the HostCreator path.
 
 Mobile app flow:
 
 1. Launch the app on a physical Android device.
-2. Select the `local_k8s_public` network profile.
+2. Select the `aws_public` network profile.
 3. Start the embedded Rust runtime from the Runtime screen.
 4. Open Bootstrap and scan the HostCreator QR with `HostCreatorDHTQRReader`.
 5. Review the preview: HostCreator id, HostCreator public-key fingerprint, endpoint,
@@ -99,8 +101,8 @@ Expected result:
   match the HostCreator DHT entry, or the HostCreator endpoint is not mobile-reachable.
 - The app emits ChainID-tagged events for QR preview, seed import, bootstrap start,
   bootstrap progress, local DHT updates, and terminal bootstrap state.
-- The mobile NewCreator contacts the imported HostCreator endpoint over the public/mobile
-  path.
+- The mobile NewCreator contacts the imported AWS HostCreator endpoint over the
+  public/mobile path.
 - The mobile NewCreator sends its own DHT entry and public key to the HostCreator. The
   HostCreator relays that NewCreator DHT to the Publisher through its existing bridge
   path.
@@ -147,13 +149,14 @@ Expected result:
   shortcut.
 - The dummy payload is encrypted/enveloped for the Publisher and sent through the selected
   ExitBridge over the public/mobile path.
-- The selected ExitBridge forwards ciphertext only; it must not have plaintext evidence.
-- The Publisher receiver accepts the frame, decrypts or validates as expected by the
+- The selected AWS ExitBridge forwards ciphertext only; it must not have plaintext
+  evidence.
+- The AWS Publisher receiver accepts the frame, decrypts or validates as expected by the
   Pass 3 route semantics, and emits an ACK/result.
 - The app shows the assigned bridge id, route source `local_dht`, result state, and
   ChainID.
-- Mobile events, local DHT snapshot, selected route, Publisher/ExitBridge trace query
-  hints, and the SendDummy result are included in the evidence bundle.
+- Mobile events, local DHT snapshot, selected route, AWS Publisher/ExitBridge CloudWatch
+  query hints, and the SendDummy result are included in the evidence bundle.
 - The operator uploads the evidence bundle to S3 and retrieves it from this workstation
   for report inspection.
 
@@ -169,13 +172,13 @@ Expected result:
 | 2 | Mobile Runtime Boundary And FFI | `[x]` |
 | 3 | Android Kotlin Creator App | `[x]` |
 | 4 | Local k8s Public Internet Exposure | `[x]` |
-| 5 | Mobile To Local k8s Public Internet Validation | `[ ]` |
-| 6 | Hybrid Local-Publisher / AWS-Bridge Topology | `[ ]` |
+| 5 | Mobile To AWS Public Internet Validation | `[ ]` |
+| 6 | AWS Public Topology Hardening And Scale Plan | `[ ]` |
 | 7 | Cross-Region ExitBridge Deployment | `[ ]` |
 | 8 | Mobile To AWS Geo Validation | `[ ]` |
 | 9 | Reports, Operators, And Acceptance | `[ ]` |
 | Smoke 1 | Mobile Runtime | `[x]` |
-| Smoke 2 | Mobile Local-k8s Public Path | `[ ]` |
+| Smoke 2 | Mobile AWS Public Path | `[ ]` |
 | Smoke 3 | Mobile AWS Geo Path | `[ ]` |
 | Smoke 4 | Mobile Churn / Failover | `[ ]` |
 
@@ -195,10 +198,10 @@ Each phase must update this status tracker when completed.
 | No mobile app | Validation uses pods/tasks and scripts | Android Kotlin app can bootstrap, inspect DHT, build/upload media or synthetic payloads, export evidence, and reset state | 3 |
 | No mobile HostCreator seed handoff | `SeedNewCreator` injects HostCreator metadata through in-cluster admin HTTP | HostCreator can export a signed bootstrap DHT seed as a QR image, and the Android app can scan/import it into mobile NewCreator local DHT before bootstrap | 2, 3, 5 |
 | No physical mobile-network validation | Pass 3 runs inside k8s | Validation must run from a phone with Wi-Fi disabled, over cellular/public internet, and archive carrier/network context | 5, 8 |
-| Local k8s is private | Services are ClusterIP-only | Publisher, HostCreator bootstrap, and ExitBridge protocol endpoints have controlled public ingress for local validation; admin remains private | 4 |
+| Local k8s cannot provide clean per-node public identity | Services are ClusterIP-only and sit behind one workstation/router | Phase 5 canonical validation deploys Publisher, HostCreator, and ExitBridges on AWS with distinct mobile-reachable protocol endpoints; local k8s stays a regression baseline/fallback fixture | 4, 5, 6 |
 | Public endpoint contract is undefined | DHT entries can contain pod-internal addresses | Publisher-signed creator and bridge entries contain mobile-reachable public endpoints and preserve signature validation | 4, 6, 7 |
-| AWS topology is single-region | Existing stack deploys Publisher and ExitBridges together | AWS geo validation keeps Publisher local in k8s and runs only public ExitBridges in a non-U.S. region | 6, 7 |
-| Cross-environment bridge registration not proven | ExitBridges register from the same local/AWS environment as the Publisher | AWS ExitBridges in `ca-central-1` register with the local k8s Publisher over public internet and appear in the Publisher-signed bridge catalog | 6, 7 |
+| AWS topology is not yet shaped for full mobile validation | Existing stack shape does not yet prove per-actor public endpoint identity and private admin boundaries for the full creator topology | AWS public validation deploys Publisher, HostCreator, and ExitBridges with public protocol endpoints and CloudWatch evidence | 5, 6 |
+| Cross-region bridge registration not proven | ExitBridges register from the same local/AWS environment as the Publisher | AWS ExitBridges in `ca-central-1` register with the AWS Publisher over public internet and appear in the Publisher-signed bridge catalog | 6, 7 |
 | ExitBridge geolocation not proven | Smoke runs do not prove non-U.S. bridge placement | At least one mobile hybrid AWS run uses public ExitBridges in `ca-central-1`; optional parity run scales to 10 bridges | 7, 8 |
 | Evidence report shape is missing | Existing validation report still has mobile gap | Pass 4 reports archive mobile logs, app build identity, ChainIDs, public endpoint map, k8s/AWS traces, and V1 preservation evidence | 9 |
 
@@ -284,13 +287,13 @@ and documented in its owning phase before use.
 
 ### 2.3.1 Bootstrap DHT QR Handoff Rule
 
-The local k8s HostCreator remains inside the cluster, while the mobile NewCreator runs on
-a physical phone. Pass 4 therefore needs an explicit seed handoff that replaces the
-in-cluster `SeedNewCreator` admin injection.
+For Phase 5, the HostCreator runs in AWS while the mobile NewCreator runs on a physical
+phone. Pass 4 therefore needs an explicit seed handoff that replaces any in-cluster or
+admin-side `SeedNewCreator` injection.
 
 The planned handoff is:
 
-1. Operator prepares/seeds the k8s HostCreator through existing private WSL/k8s tooling.
+1. Operator prepares/seeds the AWS HostCreator through private AWS operator tooling.
 2. HostCreator exposes `BootstrapDHTQRCode` through private operator tooling. The output is
    a QR PNG plus the exact signed bootstrap seed payload used to render it.
 3. The phone scans the QR with `HostCreatorDHTQRReader`.
@@ -379,14 +382,16 @@ core implementation, but the existing HTTP API shape, response fields, error cod
 ChainID behavior, persistence semantics, and Pass 3 smoke expectations are compatibility
 requirements.
 
-### 2.6 Local Public-Internet Rule
+### 2.6 AWS Public-Internet Rule
 
-Local k8s validation must be from a physical mobile device over public internet. The
-canonical run disables phone Wi-Fi and records carrier/network context.
+Phase 5 validation must be from a physical mobile device over public internet to AWS
+protocol endpoints. The canonical run disables phone Wi-Fi and records carrier/network
+context.
 
-A development tunnel may be used only as a labeled fallback when it preserves the same
-protocol behavior being validated. It cannot replace the canonical public-internet run for
-Pass 4 sign-off if it hides UDP, public endpoint descriptors, or bridge reachability.
+Local k8s public ingress or a development tunnel may be used only as a labeled fallback or
+fixture when it preserves the same protocol behavior being validated. It cannot replace
+the canonical AWS public-internet run for Pass 4 sign-off if it hides UDP, public endpoint
+descriptors, bridge reachability, or selected bridge identity.
 
 ### 2.7 ChainID Evidence Rule
 
@@ -494,23 +499,22 @@ The primary HostCreator-to-mobile transfer mechanism is QR-based:
 File import of the same payload is allowed as a lab fallback, but the physical-device
 validation must include a real camera scan of the QR code.
 
-### 3.7 Local k8s Public Endpoint Policy
+### 3.7 AWS Public Endpoint Policy
 
-The local public-internet validation must expose only the minimum protocol endpoints
-needed by the app. The planned public exposure is documented in Phase 4 and must be
-removable after each validation run.
+The AWS public-internet validation must expose only the minimum protocol endpoints needed
+by the app. Publisher, HostCreator, and ExitBridge protocol endpoints may be public;
+admin endpoints must remain private. Every public endpoint descriptor must identify the
+AWS actor, region, public host/IP, port, protocol, expiry, and certificate binding.
 
-### 3.8 Hybrid AWS Geo Topology
+### 3.8 AWS Geo Topology
 
-Pass 4's AWS geo test is not a full AWS Publisher deployment. The Publisher remains the
-local k8s Publisher from the Phase 4/5 public-internet exposure. AWS contributes only the
-non-U.S. ExitBridge fleet. Those bridges register with the local Publisher through its
-public protocol endpoint, and the Android app uses the Publisher-signed catalog returned
-by that local Publisher.
+Pass 4's AWS geo test now builds on the full AWS Publisher/HostCreator topology. The
+Publisher is an AWS Publisher, not the local k8s Publisher. ExitBridges in the selected
+non-U.S. region register with the AWS Publisher through public protocol endpoints, and
+the Android app uses the Publisher-signed catalog returned by that AWS Publisher.
 
-This keeps the test focused on the unresolved mobile/public-internet and geolocation
-questions without replacing the already validated local Publisher with a second AWS
-Publisher control plane.
+This keeps local k8s as a regression baseline while using AWS for the live mobile path
+that requires distinct public node identities.
 
 ### 3.9 AWS Geo Region Choice
 
@@ -576,36 +580,39 @@ Expose local k8s Publisher, HostCreator bootstrap, and ExitBridge protocol endpo
 the public internet for a real phone on cellular, without exposing admin endpoints.
 Define endpoint descriptors that can be signed into Publisher DHT entries.
 
-### Phase 5 - Mobile To Local k8s Public Internet Validation
+Phase 4 remains useful as endpoint-contract and fallback tooling, but it is no longer the
+canonical Phase 5 sign-off path.
+
+### Phase 5 - Mobile To AWS Public Internet Validation
 
 [GBN-PROTO-013-Execution-Phase5-Mobile-To-Local-K8s-Validation.md](GBN-PROTO-013-Execution-Phase5-Mobile-To-Local-K8s-Validation.md)
 
-Run the Android app against the local k8s topology from a mobile carrier path. Validate
-bootstrap, local DHT, SendDummy, full upload, failover, and ChainID evidence.
+Run the Android app against an AWS-deployed Publisher, HostCreator, and ExitBridge
+topology from a mobile carrier path. Validate bootstrap, local DHT, SendDummy, full
+upload, failover, S3 evidence retrieval, CloudWatch correlation, and ChainID evidence.
 
-### Phase 6 - Hybrid Local-Publisher / AWS-Bridge Topology
+### Phase 6 - AWS Public Topology Hardening And Scale Plan
 
 [GBN-PROTO-013-Execution-Phase6-Hybrid-Local-Publisher-AWS-Bridge-Topology.md](GBN-PROTO-013-Execution-Phase6-Hybrid-Local-Publisher-AWS-Bridge-Topology.md)
 
-Prepare the hybrid public-internet topology: local k8s Publisher remains the authority
-and receiver, while AWS ExitBridges in the selected non-U.S. region can register with it
-over public internet. Define DNS, TLS, security group, CloudWatch, k8s log, and teardown
-behavior.
+Revise the earlier hybrid plan into AWS public topology hardening: cost controls, public
+endpoint identity, security groups, CloudWatch evidence, private admin access, teardown,
+and bridge-count scale-up from the cost-minimum run to Pass 3 parity.
 
 ### Phase 7 - Cross-Region ExitBridge Deployment
 
 [GBN-PROTO-013-Execution-Phase7-Cross-Region-ExitBridge-Deployment.md](GBN-PROTO-013-Execution-Phase7-Cross-Region-ExitBridge-Deployment.md)
 
-Deploy public ExitBridges in `ca-central-1` and ensure the Publisher-signed bridge catalog
-from the local k8s Publisher contains non-U.S. endpoint metadata reachable by the Android
-app over the public internet.
+Deploy public ExitBridges in `ca-central-1` and ensure the AWS Publisher-signed bridge
+catalog contains non-U.S. endpoint metadata reachable by the Android app over the public
+internet.
 
 ### Phase 8 - Mobile To AWS Geo Validation
 
 [GBN-PROTO-013-Execution-Phase8-Mobile-To-AWS-Geo-Validation.md](GBN-PROTO-013-Execution-Phase8-Mobile-To-AWS-Geo-Validation.md)
 
-Run the same Android app against the local k8s Publisher plus Canada ExitBridges. Archive
-mobile logs, local k8s logs/traces, CloudWatch logs, ChainIDs, upload/ACK timings, and
+Run the same Android app against the AWS Publisher/HostCreator plus Canada ExitBridges.
+Archive mobile logs, S3 evidence, CloudWatch logs, ChainIDs, upload/ACK timings, and
 failover/churn observations.
 
 ### Phase 9 - Reports, Operators, And Acceptance
@@ -623,20 +630,20 @@ Prove the Android app can load the Rust library, run local runtime operations, e
 button panel, persist local DHT state, and export/upload evidence before live public
 network validation.
 
-### Smoke 2 - Mobile Local-k8s Public Path
+### Smoke 2 - Mobile AWS Public Path
 
 [GBN-PROTO-013-Smoke-2-Mobile-Local-K8s-Public-Path.md](GBN-PROTO-013-Smoke-2-Mobile-Local-K8s-Public-Path.md)
 
-Run the physical Android phone over cellular against local k8s public protocol endpoints
-and validate QR bootstrap, SendDummy, upload, failover, S3 evidence retrieval, and local
-k8s ChainID correlation.
+Run the physical Android phone over cellular against AWS public protocol endpoints and
+validate QR bootstrap, SendDummy, upload, failover, S3 evidence retrieval, and CloudWatch
+ChainID correlation.
 
 ### Smoke 3 - Mobile AWS Geo Path
 
 [GBN-PROTO-013-Smoke-3-Mobile-AWS-Geo-Path.md](GBN-PROTO-013-Smoke-3-Mobile-AWS-Geo-Path.md)
 
-Run the same Android app against the local k8s Publisher plus AWS `ca-central-1`
-ExitBridges and validate AWS bridge route/lane use with CloudWatch evidence.
+Run the same Android app against the AWS Publisher plus AWS `ca-central-1` ExitBridges
+and validate non-U.S. bridge route/lane use with CloudWatch evidence.
 
 ### Smoke 4 - Mobile Churn / Failover
 
@@ -669,26 +676,25 @@ Pass 4 is complete when:
    ChainIDs, runtime events, local DHT snapshot, app build identity, device/network
    context, run profile config, operation results, file hashes, and remote trace collection
    instructions.
-9. Local k8s public-internet validation runs from a physical phone with Wi-Fi disabled.
-10. Mobile local-k8s bootstrap imports the HostCreator bootstrap DHT seed by scanning a
-   `BootstrapDHTQRCode` from the k8s HostCreator, including HostCreator public key and
-   mobile-reachable endpoint information.
-11. Mobile local-k8s bootstrap proves there is no separate mobile Publisher ingest:
-   Publisher public key/DHT and Seed ExitBridgeB DHT are learned from the encrypted
-   Publisher bootstrap payload returned through HostCreator.
-12. Mobile local-k8s bootstrap reaches onboarded state without admin shortcuts.
-13. Mobile local-k8s full upload completes with content hash match and bridge
-   ciphertext-only evidence.
-14. Mobile local-k8s failover/churn validation completes and records timing.
-15. Hybrid AWS geo validation runs from the same Android app used for local-k8s mobile
+9. AWS public-internet validation runs from a physical phone with Wi-Fi disabled.
+10. Mobile AWS bootstrap imports the HostCreator bootstrap DHT seed by scanning a
+   `BootstrapDHTQRCode` from the AWS HostCreator, including HostCreator public key and
+   mobile-reachable AWS endpoint information.
+11. Mobile AWS bootstrap proves there is no separate mobile Publisher ingest: Publisher
+   public key/DHT and Seed ExitBridgeB DHT are learned from the encrypted Publisher
+   bootstrap payload returned through HostCreator.
+12. Mobile AWS bootstrap reaches onboarded state without admin shortcuts.
+13. Mobile AWS full upload completes with content hash match and bridge ciphertext-only
+   evidence.
+14. Mobile AWS failover/churn validation completes and records timing.
+15. AWS geo validation runs from the same Android app used for the Phase 5 AWS mobile
    validation.
-16. The local k8s Publisher-signed bridge catalog includes AWS non-U.S. bridges in
+16. The AWS Publisher-signed bridge catalog includes AWS non-U.S. bridges in
     `ca-central-1`.
-17. Mobile hybrid AWS full upload completes with content hash match and ChainID evidence
-    in mobile logs, local k8s Publisher/Receiver logs, and AWS ExitBridge CloudWatch logs.
-18. Hybrid trace collection succeeds for the mobile validation ChainID: local k8s
-    Publisher/Receiver evidence is collected from k8s logs/observability, and AWS
-    ExitBridge evidence is collected from CloudWatch for the `ca-central-1` bridge fleet.
+17. Mobile AWS geo full upload completes with content hash match and ChainID evidence in
+    mobile logs, AWS Publisher/Receiver logs, and AWS ExitBridge CloudWatch logs.
+18. AWS trace collection succeeds for the mobile validation ChainID: AWS
+    Publisher/Receiver/HostCreator/ExitBridge evidence is collected from CloudWatch.
 19. README remaining validation gap is updated only after reports are archived.
 20. V1 (`prototype/gbn-proto/**`) and Lattice docs are unchanged.
 

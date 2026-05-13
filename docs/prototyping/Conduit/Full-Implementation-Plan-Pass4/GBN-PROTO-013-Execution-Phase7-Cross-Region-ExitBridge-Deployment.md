@@ -1,9 +1,13 @@
 # GBN-PROTO-013 - Execution Phase 7 - Cross-Region ExitBridge Deployment
 
-**Status:** Pending
-**Last Updated:** 2026-05-11
+**Status:** Pending Rewrite
+**Last Updated:** 2026-05-12
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 **Depends On:** Phase 6 complete
+
+> Superseded note: the `2026-05-12` Phase 5 topology decision moved canonical mobile
+> validation to a full AWS deployment. This phase must be revised so non-U.S.
+> ExitBridges register with the AWS Publisher, not a local k8s Publisher.
 
 ## Objective
 

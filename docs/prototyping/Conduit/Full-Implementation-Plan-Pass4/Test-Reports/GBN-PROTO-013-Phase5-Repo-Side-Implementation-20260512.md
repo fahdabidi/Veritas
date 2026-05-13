@@ -6,8 +6,9 @@
 - Workspace: `prototype/gbn-bridge-proto`
 - Host shell: Windows PowerShell invoking WSL2 Ubuntu
 - Result: `PASS` for repo-side Phase 5 implementation and emulator automation
-- Live physical carrier/public-DNS run: pending operator live `local_k8s_public` profile
-  and physical phone execution
+- Live physical carrier/public-DNS run: superseded by the `2026-05-12` Phase 5 topology
+  decision that requires AWS-deployed Publisher, HostCreator, and ExitBridges for
+  sign-off
 
 ## Scope
 
@@ -35,7 +36,7 @@ This report covers implementation work that closes the Phase 5 repo gaps found d
 | Phase 4 HostCreator QR seed guard | `prototype/gbn-bridge-proto/mobile/android/app/src/main/java/com/veritas/gbn/mobile/model/HostSeedGuard.kt` |
 | Chunked S3 grant QR import | `prototype/gbn-bridge-proto/mobile/android/app/src/main/java/com/veritas/gbn/mobile/model/S3GrantQrAssembler.kt` |
 | Workstation S3 grant QR generator | `prototype/gbn-bridge-proto/infra/scripts/pass4-s3-grant-qr.sh` |
-| Phase 5 collector | `prototype/gbn-bridge-proto/infra/scripts/k8s-pass4-mobile-local-collector.sh` |
+| Historical local collector | `prototype/gbn-bridge-proto/infra/scripts/k8s-pass4-mobile-local-collector.sh` |
 | Phase 5 plan update | `docs/prototyping/Conduit/Full-Implementation-Plan-Pass4/GBN-PROTO-013-Execution-Phase5-Mobile-To-Local-K8s-Validation.md` |
 
 ## Validation Command Ledger
@@ -46,18 +47,19 @@ This report covers implementation work that closes the Phase 5 repo gaps found d
 | `cargo test -p gbn-bridge-mobile-ffi` | pass | `8 passed; 0 failed` |
 | `./gradlew test lint assembleDebug` | pass | Android unit tests, lint, and debug APK assembly passed |
 | `./gradlew connectedDebugAndroidTest` | pass | `3 tests; 0 failed` on `PantryVision_API_36(AVD) - 16` |
-| `bash -n infra/scripts/pass4-s3-grant-qr.sh infra/scripts/k8s-pass4-mobile-local-collector.sh` | pass | Shell syntax clean |
+| `bash -n infra/scripts/pass4-s3-grant-qr.sh infra/scripts/k8s-pass4-mobile-local-collector.sh` | pass | Historical local collector shell syntax clean |
 | `pass4-s3-grant-qr.sh --grant-json ...` | pass | Generated manifest and chunk payload files |
-| `k8s-pass4-mobile-local-collector.sh --evidence-zip ... --skip-k8s-logs` | pass | Validated synthetic evidence ZIP and generated collector report |
+| `k8s-pass4-mobile-local-collector.sh --evidence-zip ... --skip-k8s-logs` | pass | Historical local collector validated synthetic evidence ZIP and generated collector report |
 
 ## Remaining Live Run Gate
 
-The physical Phase 5 sign-off still requires:
+The physical Phase 5 sign-off now requires the AWS public topology described in the
+updated Phase 5 implementation doc:
 
-- live `local_k8s_public` profile with resolvable public endpoints;
-- router/NAT/TLS mapping from public internet to local k8s protocol surfaces;
+- live `aws_public` profile with resolvable AWS public endpoints;
+- AWS-deployed Publisher, HostCreator, and ExitBridges with private admin surfaces;
 - physical Android phone run with Wi-Fi disabled;
-- mobile evidence upload to S3 and collector run without `--skip-k8s-logs`.
+- mobile evidence upload to S3 and AWS collector run with required CloudWatch evidence.
 
 Until those operator/live-network items run, the parent Phase 5 status should remain
 pending even though the repo-side implementation gaps are closed.

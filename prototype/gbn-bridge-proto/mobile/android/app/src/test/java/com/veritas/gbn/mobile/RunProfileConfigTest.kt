@@ -30,6 +30,21 @@ class RunProfileConfigTest {
             """.trimIndent(),
         )
         assertEquals("ca-central-1", hybrid.awsExitBridgeRegion)
+
+        val aws = RunProfileConfig.parse(
+            """
+            {
+              "profile": "aws_public",
+              "run_id": "pass4-aws",
+              "evidence_bucket": "veritas-pass4-mobile-evidence",
+              "evidence_prefix": "mobile-evidence/pass4-aws/",
+              "aws_exitbridge_region": "ca-central-1",
+              "endpoints": []
+            }
+            """.trimIndent(),
+        )
+        assertEquals("aws_public", aws.profile)
+        assertEquals("pass4-aws", aws.runId)
     }
 
     @Test

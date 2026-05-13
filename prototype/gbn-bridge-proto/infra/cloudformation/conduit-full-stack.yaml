@@ -96,6 +96,20 @@ Parameters:
     Type: String
     Default: 0.0.0.0/0
     Description: CIDR allowed to reach the authority API port.
+  ReceiverIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to reach the receiver protocol port for public mobile validation.
+  CreatorBootstrapIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to reach the public HostCreator bootstrap hint endpoint.
+  CreatorBootstrapPort:
+    Type: Number
+    Default: 8082
+    MinValue: 1
+    MaxValue: 65535
+    Description: Non-admin HostCreator bootstrap hint port exposed for mobile validation.
 
 Resources:
   ConduitCluster:
@@ -270,6 +284,11 @@ Resources:
     Properties:
       GroupDescription: Conduit full-stack receiver ingress
       VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ReceiverPort
+          ToPort: !Ref ReceiverPort
+          CidrIp: !Ref ReceiverIngressCidr
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
@@ -299,6 +318,11 @@ Resources:
     Properties:
       GroupDescription: Conduit full-stack creator task egress and internal admin
       VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref CreatorBootstrapPort
+          ToPort: !Ref CreatorBootstrapPort
+          CidrIp: !Ref CreatorBootstrapIngressCidr
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
@@ -666,6 +690,8 @@ Resources:
           PortMappings:
             - ContainerPort: 9090
               Protocol: tcp
+            - ContainerPort: !Ref CreatorBootstrapPort
+              Protocol: tcp
           Environment:
             - Name: GBN_BRIDGE_NODE_ID
               Value: creator-host
@@ -673,6 +699,10 @@ Resources:
               Value: host-creator
             - Name: GBN_BRIDGE_ADMIN_BIND_ADDR
               Value: 127.0.0.1:9090
+            - Name: GBN_BRIDGE_BOOTSTRAP_HINT_BIND_ADDR
+              Value: !Sub "0.0.0.0:${CreatorBootstrapPort}"
+            - Name: GBN_BRIDGE_BOOTSTRAP_HINT_PUBLIC_PORT
+              Value: !Ref CreatorBootstrapPort
             - Name: GBN_BRIDGE_STATE_DIR
               Value: /var/lib/gbn-conduit
             - Name: GBN_BRIDGE_AUTHORITY_URL

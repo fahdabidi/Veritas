@@ -99,6 +99,18 @@ fn local_public_config(root: &std::path::Path, actor: &str) -> CreatorRuntimeCon
     config
 }
 
+fn aws_public_config(root: &std::path::Path, actor: &str) -> CreatorRuntimeConfig {
+    let mut config = local_public_config(root, actor);
+    config.network_profile = "aws_public".to_string();
+    config.endpoint_config_json = config.endpoint_config_json.map(|raw| {
+        raw.replace(
+            r#""profile": "local_k8s_public""#,
+            r#""profile": "aws_public", "endpoint_map_id": "phase5-unit-map", "aws_exitbridge_region": "ca-central-1""#,
+        )
+    });
+    config
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -275,7 +287,7 @@ fn synthetic_upload_trace_filter_and_evidence_export_work() {
 #[test]
 fn phase5_public_operations_update_local_dht_and_emit_results() {
     let root = temp_root("phase5");
-    let runtime = MobileCreatorRuntime::new(local_public_config(&root, "mobile-phase5")).unwrap();
+    let runtime = MobileCreatorRuntime::new(aws_public_config(&root, "mobile-phase5")).unwrap();
     let payload = host_seed(now_ms() + 60_000);
     runtime
         .import_host_creator_dht_seed(HostCreatorDhtSeedImportRequest { payload })
@@ -290,6 +302,7 @@ fn phase5_public_operations_update_local_dht_and_emit_results() {
         bootstrap.self_onboarding_state,
         SelfOnboardingState::Onboarded
     );
+    assert_eq!(bootstrap.source, "aws_public");
     assert_eq!(bootstrap.bridge_count, 2);
     assert!(runtime.local_dht().publisher_entry.is_some());
 

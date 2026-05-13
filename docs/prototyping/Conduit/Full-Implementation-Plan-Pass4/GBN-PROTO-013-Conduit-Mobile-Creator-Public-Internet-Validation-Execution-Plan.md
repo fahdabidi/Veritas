@@ -172,7 +172,7 @@ Expected result:
 | 2 | Mobile Runtime Boundary And FFI | `[x]` |
 | 3 | Android Kotlin Creator App | `[x]` |
 | 4 | Local k8s Public Internet Exposure | `[x]` |
-| 5 | Mobile To AWS Public Internet Validation | `[ ]` |
+| 5 | Mobile To AWS Public Internet Validation | `[/]` |
 | 6 | AWS Public Topology Hardening And Scale Plan | `[ ]` |
 | 7 | Cross-Region ExitBridge Deployment | `[ ]` |
 | 8 | Mobile To AWS Geo Validation | `[ ]` |

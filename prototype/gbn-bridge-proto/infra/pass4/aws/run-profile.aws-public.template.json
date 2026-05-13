@@ -1,0 +1,10 @@
+{
+  "profile": "aws_public",
+  "run_id": "pass4-phase5-aws-REPLACE",
+  "endpoint_map_id": "generated-by-aws-pass4-full-topology-up",
+  "evidence_bucket": "veritas-pass4-mobile-evidence",
+  "evidence_prefix": "mobile-evidence/pass4-phase5-aws-REPLACE/",
+  "aws_exitbridge_region": "ca-central-1",
+  "endpoints": [],
+  "notes": "Template only. Generate live descriptors with infra/scripts/aws-pass4-full-topology-up.sh; do not add Publisher DHT, Publisher public key, Seed ExitBridge DHT, bridge catalog, private IPs, or admin URLs."
+}

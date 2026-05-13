@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -29,6 +30,7 @@ import com.veritas.gbn.mobile.model.EvidenceUploadConfig
 import com.veritas.gbn.mobile.model.HostSeedGuard
 import com.veritas.gbn.mobile.model.JsonText
 import com.veritas.gbn.mobile.model.RunProfileConfig
+import com.veritas.gbn.mobile.model.RunProfileQrAssembler
 import com.veritas.gbn.mobile.model.S3GrantQrAssembler
 import com.veritas.gbn.mobile.runtime.RuntimeConfigFactory
 import com.veritas.gbn.mobile.runtime.MobileCreatorRuntime
@@ -53,7 +55,9 @@ class MainActivity : Activity() {
     private var lastUploadResult: String = "{}"
     private var lastBootstrapResult: String = "{}"
     private var lastEvidence: EvidenceBundleResult? = null
+    private var syncingProfileSelection = false
     private val s3GrantQrAssembler = S3GrantQrAssembler()
+    private val runProfileQrAssembler = RunProfileQrAssembler()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,9 +76,18 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (resultCode != RESULT_OK) return
+        if (requestCode == REQUEST_RUN_PROFILE_DOCUMENT) {
+            data?.data?.let { importRunProfileDocument(it) }
+            return
+        }
+        if (requestCode == REQUEST_S3_GRANT_DOCUMENT) {
+            data?.data?.let { importS3GrantDocument(it) }
+            return
+        }
         val payload = data?.getStringExtra("SCAN_RESULT").orEmpty()
         if (payload.isBlank()) return
         when (requestCode) {
+            REQUEST_RUN_PROFILE_QR_SCAN -> importRunProfileQrPayload(payload)
             REQUEST_HOST_QR_SCAN -> {
                 hostSeedInput.setText(payload)
                 previewHostSeed()
@@ -131,13 +144,19 @@ class MainActivity : Activity() {
                     RunProfileConfig.PROFILE_OFFLINE_TEST,
                     RunProfileConfig.PROFILE_LOCAL_K8S_PUBLIC,
                     RunProfileConfig.PROFILE_HYBRID,
+                    RunProfileConfig.PROFILE_AWS_PUBLIC,
                 ),
             )
             setTag("NetworkProfileSelector")
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     selectedProfile = parent?.getItemAtPosition(position).toString()
-                    runProfile = RunProfileConfig.default(selectedProfile)
+                    if (!syncingProfileSelection) {
+                        runProfile = RunProfileConfig.default(selectedProfile)
+                        if (::runProfileInput.isInitialized) {
+                            runProfileInput.setText(runProfile.rawJson)
+                        }
+                    }
                     refreshStatus("Selected $selectedProfile")
                 }
 
@@ -151,12 +170,20 @@ class MainActivity : Activity() {
         )
         root.addView(runProfileInput)
         root.addView(button("ImportEndpointConfig", "Import Run Profile") {
-            runCatching {
-                runProfile = RunProfileConfig.parse(runProfileInput.text.toString())
-                selectedProfile = runProfile.profile
-                eventLog.appendEvent("run_profile_imported", nextChainId("profile"), runProfile.profile)
-                show("Imported run profile ${runProfile.runId}; profile=${runProfile.profile}")
-            }.onFailure { showError(it) }
+            applyRunProfileJson(runProfileInput.text.toString())
+        })
+        root.addView(button("RunProfileQRReader", "Run Profile QR Reader") {
+            val intent = Intent("com.google.zxing.client.android.SCAN").putExtra("SCAN_MODE", "QR_CODE_MODE")
+            runCatching { startActivityForResult(intent, REQUEST_RUN_PROFILE_QR_SCAN) }
+                .onFailure { show("No external QR scanner found. Use Import Run Profile Document or paste the profile JSON.") }
+        })
+        root.addView(button("ImportRunProfileDocument", "Import Run Profile Document") {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+            }
+            runCatching { startActivityForResult(intent, REQUEST_RUN_PROFILE_DOCUMENT) }
+                .onFailure { showError(it) }
         })
     }
 
@@ -261,6 +288,14 @@ class MainActivity : Activity() {
             val intent = Intent("com.google.zxing.client.android.SCAN").putExtra("SCAN_MODE", "QR_CODE_MODE")
             runCatching { startActivityForResult(intent, REQUEST_S3_GRANT_QR_SCAN) }
                 .onFailure { show("No external QR scanner found. Use Android Files/share import fallback, or emulator adb grant import.") }
+        })
+        root.addView(button("ImportS3GrantDocument", "Import S3 Grant Document") {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+            }
+            runCatching { startActivityForResult(intent, REQUEST_S3_GRANT_DOCUMENT) }
+                .onFailure { showError(it) }
         })
         root.addView(button("ExportEvidence", "Export Evidence") {
             exportEvidence()
@@ -415,8 +450,9 @@ class MainActivity : Activity() {
             "host_creator_seed.redacted.json" to (lastHostSeedPayload?.let { HostSeedGuard.redacted(it) } ?: "{}"),
             "upload_sessions.json" to lastUploadResult,
             "endpoint_config.redacted.json" to runProfile.rawJson,
+            "aws_endpoint_map_context.json" to runProfileEvidenceContext(),
             "device_context.json" to DeviceContext.deviceJson(this),
-            "network_context.json" to DeviceContext.networkJson(this, "Phase 3 emulator-first validation"),
+            "network_context.json" to DeviceContext.networkJson(this, "Pass 4 mobile validation"),
             "app_build.json" to DeviceContext.appBuildJson(),
             "rust_build.json" to DeviceContext.rustBuildJson(),
             "chain_ids.txt" to listOf(chainId, jsonStringField(lastBootstrapResult, "chain_id")).filterNotNull().joinToString("\n"),
@@ -475,6 +511,16 @@ class MainActivity : Activity() {
         }.onFailure { showError(it) }
     }
 
+    private fun importS3GrantDocument(uri: Uri) {
+        runCatching {
+            val rawJson = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                ?: throw IllegalArgumentException("S3 grant document could not be opened")
+            val config = EvidenceUploadConfig.parse(rawJson)
+            uploadGrantInput.setText(rawJson)
+            show("Imported S3 evidence grant document\nobject_key=${config.objectKey}\nexpires_at_ms=${config.expiresAtMs ?: 0}")
+        }.onFailure { showError(it) }
+    }
+
     private fun phase5PrerequisiteError(
         requireHostSeed: Boolean = false,
         requireOnboarded: Boolean = false,
@@ -482,9 +528,10 @@ class MainActivity : Activity() {
     ): String? {
         if (runtime == null) return "runtime is stopped"
         if (selectedProfile != RunProfileConfig.PROFILE_LOCAL_K8S_PUBLIC &&
-            selectedProfile != RunProfileConfig.PROFILE_HYBRID
+            selectedProfile != RunProfileConfig.PROFILE_HYBRID &&
+            selectedProfile != RunProfileConfig.PROFILE_AWS_PUBLIC
         ) {
-            return "select local_k8s_public or hybrid profile"
+            return "select local_k8s_public, hybrid, or aws_public profile"
         }
         if (requireHostSeed && lastHostSeedPayload.isNullOrBlank()) {
             return "import HostCreator DHT seed first"
@@ -513,6 +560,51 @@ class MainActivity : Activity() {
             val action = CreatorActionCatalog.actions.firstOrNull { it.buttonId == buttonId || it.buttonId == "RefreshStatus" }
             if (action != null) eventLog.appendAction(action, nextChainId(buttonId.lowercase()), "running")
             show(block(current))
+        }.onFailure { showError(it) }
+    }
+
+    private fun applyRunProfileJson(rawJson: String) {
+        runCatching {
+            runProfile = RunProfileConfig.parse(rawJson)
+            selectedProfile = runProfile.profile
+            runProfileInput.setText(runProfile.rawJson)
+            syncProfileSpinner()
+            eventLog.appendEvent("run_profile_imported", nextChainId("profile"), runProfile.profile)
+            show("Imported run profile ${runProfile.runId}; profile=${runProfile.profile}")
+        }.onFailure { showError(it) }
+    }
+
+    private fun syncProfileSpinner() {
+        val adapter = profileSpinner.adapter ?: return
+        for (index in 0 until adapter.count) {
+            if (adapter.getItem(index).toString() == selectedProfile) {
+                syncingProfileSelection = true
+                profileSpinner.setSelection(index)
+                syncingProfileSelection = false
+                return
+            }
+        }
+    }
+
+    private fun importRunProfileQrPayload(payload: String) {
+        runCatching {
+            val result = runProfileQrAssembler.accept(payload)
+            if (result.complete && result.profileJson != null) {
+                runProfile = RunProfileConfig.parse(result.profileJson)
+                selectedProfile = runProfile.profile
+                runProfileInput.setText(result.profileJson)
+                syncProfileSpinner()
+                eventLog.appendEvent("run_profile_imported", nextChainId("profile"), runProfile.profile)
+            }
+            show(result.message)
+        }.onFailure { showError(it) }
+    }
+
+    private fun importRunProfileDocument(uri: Uri) {
+        runCatching {
+            val rawJson = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                ?: throw IllegalArgumentException("run profile document could not be opened")
+            applyRunProfileJson(rawJson)
         }.onFailure { showError(it) }
     }
 
@@ -564,12 +656,24 @@ class MainActivity : Activity() {
     private fun runtimeTraceQueries(chainId: String): String =
         """
         [
-          {"chain_id":"$chainId","surface":"local_k8s_publisher_authority","query_hint":"kubectl logs deploy/publisher-authority -n veritas | grep $chainId"},
-          {"chain_id":"$chainId","surface":"local_k8s_publisher_receiver","query_hint":"kubectl logs deploy/publisher-receiver -n veritas | grep $chainId"},
-          {"chain_id":"$chainId","surface":"local_k8s_exitbridges","query_hint":"kubectl logs statefulset/exit-bridge -n veritas --all-containers | grep $chainId"},
-          {"chain_id":"$chainId","surface":"aws_exitbridge_cloudwatch","region":"ca-central-1","query_hint":"aws logs filter-log-events --region ca-central-1 --filter-pattern $chainId"}
+          {"chain_id":"$chainId","surface":"aws_publisher_authority_cloudwatch","query_hint":"infra/scripts/aws-pass4-mobile-collector.sh --run-id ${runProfile.runId} --chain-id $chainId"},
+          {"chain_id":"$chainId","surface":"aws_publisher_receiver_cloudwatch","query_hint":"infra/scripts/aws-pass4-mobile-collector.sh --run-id ${runProfile.runId} --chain-id $chainId"},
+          {"chain_id":"$chainId","surface":"aws_creator_cloudwatch","query_hint":"infra/scripts/aws-pass4-mobile-collector.sh --run-id ${runProfile.runId} --chain-id $chainId"},
+          {"chain_id":"$chainId","surface":"aws_exitbridge_cloudwatch","region":"${runProfile.awsExitBridgeRegion ?: "from_run_profile"}","query_hint":"infra/scripts/aws-pass4-mobile-collector.sh --run-id ${runProfile.runId} --chain-id $chainId"}
         ]
         """.trimIndent()
+
+    private fun runProfileEvidenceContext(): String =
+        JsonText.objectWithFields(
+            mapOf(
+                "profile" to runProfile.profile,
+                "run_id" to runProfile.runId,
+                "endpoint_map_id" to JsonText.stringField(runProfile.rawJson, "endpoint_map_id"),
+                "evidence_bucket" to runProfile.evidenceBucket,
+                "evidence_prefix" to runProfile.evidencePrefix,
+                "aws_exitbridge_region" to runProfile.awsExitBridgeRegion,
+            ),
+        )
 
     private fun sampleHostSeedPayload(): String {
         val expires = System.currentTimeMillis() + 86_400_000
@@ -674,5 +778,8 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_HOST_QR_SCAN = 13014
         private const val REQUEST_S3_GRANT_QR_SCAN = 13015
+        private const val REQUEST_RUN_PROFILE_QR_SCAN = 13016
+        private const val REQUEST_RUN_PROFILE_DOCUMENT = 13017
+        private const val REQUEST_S3_GRANT_DOCUMENT = 13018
     }
 }

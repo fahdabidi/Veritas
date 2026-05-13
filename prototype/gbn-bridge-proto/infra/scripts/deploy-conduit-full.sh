@@ -17,6 +17,9 @@ DATABASE_INSTANCE_CLASS="${GBN_BRIDGE_DATABASE_INSTANCE_CLASS:-db.t3.micro}"
 DATABASE_ALLOCATED_STORAGE="${GBN_BRIDGE_DATABASE_ALLOCATED_STORAGE:-20}"
 POSTGRES_TLS_ACCEPT_INVALID_CERTS="${GBN_BRIDGE_POSTGRES_TLS_ACCEPT_INVALID_CERTS:-false}"
 AUTHORITY_INGRESS_CIDR="${GBN_BRIDGE_AUTHORITY_INGRESS_CIDR:-0.0.0.0/0}"
+RECEIVER_INGRESS_CIDR="${GBN_BRIDGE_RECEIVER_INGRESS_CIDR:-0.0.0.0/0}"
+CREATOR_BOOTSTRAP_INGRESS_CIDR="${GBN_BRIDGE_CREATOR_BOOTSTRAP_INGRESS_CIDR:-0.0.0.0/0}"
+CREATOR_BOOTSTRAP_PORT="${GBN_BRIDGE_CREATOR_BOOTSTRAP_PORT:-8082}"
 
 usage() {
   cat <<USAGE
@@ -39,6 +42,9 @@ Options:
   --database-allocated-storage GB
   --postgres-tls-accept-invalid-certs true|false
   --authority-ingress-cidr CIDR
+  --receiver-ingress-cidr CIDR
+  --creator-bootstrap-ingress-cidr CIDR
+  --creator-bootstrap-port PORT
 USAGE
 }
 
@@ -79,6 +85,9 @@ while [[ $# -gt 0 ]]; do
     --database-allocated-storage) DATABASE_ALLOCATED_STORAGE="$2"; shift 2 ;;
     --postgres-tls-accept-invalid-certs) POSTGRES_TLS_ACCEPT_INVALID_CERTS="$2"; shift 2 ;;
     --authority-ingress-cidr) AUTHORITY_INGRESS_CIDR="$2"; shift 2 ;;
+    --receiver-ingress-cidr) RECEIVER_INGRESS_CIDR="$2"; shift 2 ;;
+    --creator-bootstrap-ingress-cidr) CREATOR_BOOTSTRAP_INGRESS_CIDR="$2"; shift 2 ;;
+    --creator-bootstrap-port) CREATOR_BOOTSTRAP_PORT="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -126,6 +135,9 @@ aws cloudformation deploy \
     PublisherSigningKeySecretArn="$PUBLISHER_SIGNING_KEY_SECRET_ARN" \
     BridgeSigningSeedSecretArn="$BRIDGE_SIGNING_SEED_SECRET_ARN" \
     PublisherPublicKeyHex="$PUBLISHER_PUBLIC_KEY_HEX" \
-    AuthorityIngressCidr="$AUTHORITY_INGRESS_CIDR"
+    AuthorityIngressCidr="$AUTHORITY_INGRESS_CIDR" \
+    ReceiverIngressCidr="$RECEIVER_INGRESS_CIDR" \
+    CreatorBootstrapIngressCidr="$CREATOR_BOOTSTRAP_INGRESS_CIDR" \
+    CreatorBootstrapPort="$CREATOR_BOOTSTRAP_PORT"
 
 "$ROOT_DIR/infra/scripts/smoke-conduit-full.sh" --stack-name "$STACK_NAME" --region "$REGION"

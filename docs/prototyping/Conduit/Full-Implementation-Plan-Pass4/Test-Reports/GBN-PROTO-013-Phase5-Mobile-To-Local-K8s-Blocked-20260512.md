@@ -144,3 +144,17 @@ the physical phone run is:
 4. Provide a live `local_k8s_public` profile with reachable public endpoints.
 5. Run the physical Android phone validation with Wi-Fi disabled.
 6. Upload mobile evidence to S3 and collect local k8s traces/logs by ChainID.
+
+## Resolution Addendum - 2026-05-12
+
+This blocked local-k8s attempt was superseded by the AWS Phase 5 implementation path.
+The later repo-side implementation added:
+
+- `aws_public` Android/mobile FFI profile support;
+- AWS topology plan/up/verify/down scripts;
+- AWS mobile evidence collector;
+- HostCreator non-admin bootstrap hint endpoint;
+- live AWS run-profile and HostCreator QR artifact generation.
+
+The remaining Phase 5 work is now the physical-phone AWS validation run, not this local
+k8s public-ingress path.

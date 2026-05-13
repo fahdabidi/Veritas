@@ -1,7 +1,9 @@
 use std::env;
 use std::fs;
-use std::net::SocketAddr;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
@@ -117,6 +119,15 @@ fn run() -> Result<(), String> {
                 .unwrap_or(5),
         ),
     };
+    let _bootstrap_hint_handle = maybe_spawn_bootstrap_hint_server(
+        &actor_id,
+        &creator_public_key,
+        metadata
+            .ip_addr
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
+        metadata.creator_udp_punch_port.unwrap_or(443),
+    )?;
     let admin_server = AdminHttpServer::bind(
         admin_addr,
         AdminState::creator_with_config(metadata, local_dht.clone(), creator_config),
@@ -167,6 +178,155 @@ fn run() -> Result<(), String> {
     admin_server
         .serve_forever()
         .map_err(|error| error.to_string())
+}
+
+fn maybe_spawn_bootstrap_hint_server(
+    actor_id: &str,
+    public_key: &PublicKeyBytes,
+    fallback_host: String,
+    udp_punch_port: u16,
+) -> Result<Option<JoinHandle<()>>, String> {
+    let bind_addr = match env::var("GBN_BRIDGE_BOOTSTRAP_HINT_BIND_ADDR") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return Ok(None),
+    };
+    let bind_addr: SocketAddr = bind_addr.parse().map_err(|_| {
+        "GBN_BRIDGE_BOOTSTRAP_HINT_BIND_ADDR must be a valid socket address".to_string()
+    })?;
+    let public_host = env::var("GBN_BRIDGE_BOOTSTRAP_HINT_PUBLIC_HOST")
+        .or_else(|_| env::var("GBN_BRIDGE_INGRESS_HOST"))
+        .unwrap_or(fallback_host);
+    let public_port = env::var("GBN_BRIDGE_BOOTSTRAP_HINT_PUBLIC_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(bind_addr.port());
+    let run_id = env::var("GBN_PASS4_RUN_ID").unwrap_or_else(|_| "pass4-aws-public".to_string());
+    let actor_id = actor_id.to_string();
+    let public_key_bytes = public_key.0.clone();
+
+    let listener = TcpListener::bind(bind_addr)
+        .map_err(|error| format!("failed to bind bootstrap hint server: {error}"))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| format!("failed to read bootstrap hint bind addr: {error}"))?;
+    println!("creator-runner bootstrap hint listening on {local_addr}");
+
+    Ok(Some(thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let actor_id = actor_id.clone();
+                    let public_key_bytes = public_key_bytes.clone();
+                    let public_host = public_host.clone();
+                    let run_id = run_id.clone();
+                    thread::spawn(move || {
+                        if let Err(error) = handle_bootstrap_hint_connection(
+                            stream,
+                            &actor_id,
+                            &public_key_bytes,
+                            &public_host,
+                            public_port,
+                            udp_punch_port,
+                            &run_id,
+                        ) {
+                            eprintln!("bootstrap hint connection error: {error}");
+                        }
+                    });
+                }
+                Err(error) => eprintln!("bootstrap hint listener error: {error}"),
+            }
+        }
+    })))
+}
+
+fn handle_bootstrap_hint_connection(
+    mut stream: TcpStream,
+    actor_id: &str,
+    public_key: &[u8],
+    public_host: &str,
+    public_port: u16,
+    udp_punch_port: u16,
+    run_id: &str,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request_line = read_http_request_line(&mut stream)?;
+    let response = if request_line.starts_with("GET /healthz ") {
+        http_response(200, "OK", "text/plain; charset=utf-8", "ok\n")
+    } else if request_line.starts_with("GET /v1/mobile/bootstrap-dht-qr ") {
+        let now = now_ms();
+        let expires = now.saturating_add(3_600_000);
+        let publisher_sig = vec![1_u8; 64];
+        let body = serde_json::json!({
+            "schema_version": 1,
+            "chain_id": format!("{run_id}-host-seed"),
+            "run_id": run_id,
+            "host_creator_id": actor_id,
+            "host_creator_public_key_hex": bytes_to_hex(public_key),
+            "host_creator_entry": {
+                "node_id": actor_id,
+                "ip_addr": public_host,
+                "pub_key": public_key,
+                "udp_punch_port": udp_punch_port,
+                "entry_expiry_ms": expires,
+                "publisher_sig": publisher_sig,
+                "active": true
+            },
+            "host_creator_reachability": {
+                "reachability_class": "direct",
+                "capabilities": ["bootstrap_seed"]
+            },
+            "host_creator_bootstrap_endpoints": [{
+                "protocol": "http",
+                "host": public_host,
+                "port": public_port
+            }],
+            "issued_at_ms": now,
+            "expires_at_ms": expires,
+            "payload_hash": format!("sha256:{}", bytes_to_hex(&Sha256::digest(format!("{run_id}:{actor_id}:{now}").as_bytes()))),
+            "signature": "bootstrap-hint-endpoint"
+        })
+        .to_string();
+        http_response(200, "OK", "application/json", body)
+    } else {
+        http_response(404, "Not Found", "text/plain; charset=utf-8", "not found\n")
+    };
+    stream.write_all(&response)
+}
+
+fn read_http_request_line(stream: &mut TcpStream) -> std::io::Result<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 256];
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.windows(2).any(|window| window == b"\n") || buffer.len() > 8192 {
+            break;
+        }
+    }
+    let request = std::str::from_utf8(&buffer).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "request must be utf-8")
+    })?;
+    Ok(request.lines().next().unwrap_or_default().to_string())
+}
+
+fn http_response(
+    status_code: u16,
+    status_text: &str,
+    content_type: &str,
+    body: impl AsRef<str>,
+) -> Vec<u8> {
+    let body = body.as_ref().as_bytes();
+    let headers = format!(
+        "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut response = headers.into_bytes();
+    response.extend_from_slice(body);
+    response
 }
 
 fn socket_addr_display(addr: SocketAddr) -> String {

@@ -399,6 +399,10 @@ struct PublicEndpointProfile {
     profile: String,
     #[serde(default)]
     run_id: String,
+    #[serde(default)]
+    endpoint_map_id: String,
+    #[serde(default)]
+    aws_exitbridge_region: Option<String>,
     endpoints: Vec<PublicEndpointDescriptor>,
 }
 
@@ -815,7 +819,7 @@ impl MobileCreatorRuntime {
                 .iter()
                 .filter(|entry| entry.active)
                 .count(),
-            source: "local_k8s_public_endpoint_profile".to_string(),
+            source: self.config.network_profile.clone(),
         })
     }
 
@@ -1075,12 +1079,13 @@ impl MobileCreatorRuntime {
     ) -> MobileResult<(PublisherDhtEntry, Vec<BridgeDhtEntry>)> {
         let raw = self.config.endpoint_config_json.as_deref().ok_or_else(|| {
             MobileRuntimeError::Config(
-                "local_k8s_public profile requires endpoint_config_json".to_string(),
+                "public mobile profile requires endpoint_config_json".to_string(),
             )
         })?;
         let profile: PublicEndpointProfile = serde_json::from_str(raw)?;
         if profile.profile != "local_k8s_public"
             && profile.profile != "hybrid_local_publisher_aws_bridges"
+            && profile.profile != "aws_public"
         {
             return Err(MobileRuntimeError::Config(format!(
                 "Phase 5 bootstrap requires public profile, got `{}`",
@@ -1146,7 +1151,13 @@ impl MobileCreatorRuntime {
             chain_id,
             "mobile_public_endpoint_profile_loaded",
             "public_profile_dht_entries",
-            json!({"run_id": profile.run_id, "bridge_count": bridges.len()}),
+            json!({
+                "run_id": profile.run_id,
+                "endpoint_map_id": profile.endpoint_map_id,
+                "profile": profile.profile,
+                "aws_exitbridge_region": profile.aws_exitbridge_region,
+                "bridge_count": bridges.len()
+            }),
         )?;
         Ok((publisher_entry, bridges))
     }
@@ -1179,11 +1190,33 @@ impl MobileCreatorRuntime {
     }
 
     fn redacted_run_profile(&self) -> Value {
+        let profile_context = self
+            .config
+            .endpoint_config_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .map(|value| {
+                let endpoint_count = value
+                    .get("endpoints")
+                    .and_then(Value::as_array)
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                json!({
+                    "profile": value.get("profile").and_then(Value::as_str),
+                    "run_id": value.get("run_id").and_then(Value::as_str),
+                    "endpoint_map_id": value.get("endpoint_map_id").and_then(Value::as_str),
+                    "aws_exitbridge_region": value.get("aws_exitbridge_region").and_then(Value::as_str),
+                    "endpoint_count": endpoint_count,
+                    "evidence_bucket_present": value.get("evidence_bucket").and_then(Value::as_str).is_some(),
+                    "evidence_prefix_present": value.get("evidence_prefix").and_then(Value::as_str).is_some(),
+                })
+            });
         json!({
             "network_profile": self.config.network_profile,
             "log_level": self.config.log_level,
             "endpoint_config_present": self.config.endpoint_config_json.is_some(),
             "publisher_public_key_present": self.config.publisher_public_key_hex.is_some(),
+            "profile_context": profile_context,
         })
     }
 
@@ -1288,7 +1321,10 @@ impl MobileIdentity {
 
 fn validate_network_profile(value: &str) -> MobileResult<()> {
     match value {
-        "offline_test" | "local_k8s_public" | "hybrid_local_publisher_aws_bridges" => Ok(()),
+        "offline_test"
+        | "local_k8s_public"
+        | "hybrid_local_publisher_aws_bridges"
+        | "aws_public" => Ok(()),
         other => Err(MobileRuntimeError::Config(format!(
             "unsupported network_profile `{other}`"
         ))),
@@ -1626,26 +1662,26 @@ fn remote_queries(chain_ids: &[String]) -> Vec<RemoteTraceQuery> {
     for chain_id in chain_ids {
         queries.push(RemoteTraceQuery {
             chain_id: chain_id.clone(),
-            surface: "local_k8s_publisher_authority".to_string(),
-            region: None,
+            surface: "aws_publisher_authority_cloudwatch".to_string(),
+            region: Some("from_run_profile".to_string()),
             query_hint: format!(
-                "kubectl logs deploy/publisher-authority -n veritas | grep {chain_id}"
+                "infra/scripts/aws-pass4-mobile-collector.sh --chain-id {chain_id} --require-chain-id"
             ),
         });
         queries.push(RemoteTraceQuery {
             chain_id: chain_id.clone(),
-            surface: "local_k8s_publisher_receiver".to_string(),
-            region: None,
+            surface: "aws_publisher_receiver_cloudwatch".to_string(),
+            region: Some("from_run_profile".to_string()),
             query_hint: format!(
-                "kubectl logs deploy/publisher-receiver -n veritas | grep {chain_id}"
+                "infra/scripts/aws-pass4-mobile-collector.sh --chain-id {chain_id} --require-chain-id"
             ),
         });
         queries.push(RemoteTraceQuery {
             chain_id: chain_id.clone(),
-            surface: "local_k8s_exitbridges".to_string(),
-            region: None,
+            surface: "aws_hostcreator_cloudwatch".to_string(),
+            region: Some("from_run_profile".to_string()),
             query_hint: format!(
-                "kubectl logs statefulset/exit-bridge -n veritas --all-containers | grep {chain_id}"
+                "infra/scripts/aws-pass4-mobile-collector.sh --chain-id {chain_id} --require-chain-id"
             ),
         });
         queries.push(RemoteTraceQuery {

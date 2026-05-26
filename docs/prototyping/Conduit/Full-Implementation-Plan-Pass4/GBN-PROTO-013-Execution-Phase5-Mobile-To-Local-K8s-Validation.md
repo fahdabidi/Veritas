@@ -157,6 +157,7 @@ The Phase 5 AWS runbook uses these implemented scripts:
 
 ```text
 prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-plan.sh
+prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-prereqs.sh
 prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-up.sh
 prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-verify.sh
 prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-down.sh
@@ -174,6 +175,8 @@ prototype/gbn-bridge-proto/infra/scripts/aws-smoke-creator-exec.sh
 
 - deploy or discover AWS Publisher authority, Publisher receiver, HostCreator, and
   ExitBridge protocol endpoints;
+- discover deploy prerequisites from AWS CLI-visible VPC, subnet, ECR, and Secrets
+  Manager resources, while keeping explicit CLI/env overrides available;
 - emit `target/pass4-aws-public/$RUN_ID/aws_public_endpoint_map.json`;
 - emit `target/pass4-aws-public/$RUN_ID/run-profile.aws-public.live.json`;
 - emit `infra/pass4/aws/run-profile.aws-public.live.json` for local inspection;
@@ -293,6 +296,7 @@ Add or adapt AWS operator tooling for the full Phase 5 topology:
 
 ```text
 prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-plan.sh
+prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-prereqs.sh
 prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-up.sh
 prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-verify.sh
 prototype/gbn-bridge-proto/infra/scripts/aws-pass4-full-topology-down.sh
@@ -302,7 +306,9 @@ prototype/gbn-bridge-proto/infra/scripts/aws-pass4-mobile-collector.sh
 Expected behavior:
 
 - guard for WSL2 Ubuntu;
-- require explicit AWS account and region inputs;
+- require explicit AWS region input and record AWS account identity;
+- discover VPC/subnet/ECR/Secrets prerequisites from AWS CLI-visible resources, with
+  explicit CLI/env overrides for any ambiguous value;
 - print estimated cost/resource count before deploy;
 - deploy Publisher authority/receiver, HostCreator, and ExitBridge services/tasks;
 - assign or discover stable public endpoints per protocol actor;
@@ -588,20 +594,35 @@ export AWS_ARTIFACT_DIR="target/pass4-aws-public/$RUN_ID"
 export EVIDENCE_BUCKET="veritas-pass4-mobile-evidence"
 export EVIDENCE_PREFIX="mobile-evidence/$RUN_ID"
 
-# Fill these from your AWS account/VPC/ECR/Secrets Manager setup.
+mkdir -p "$AWS_ARTIFACT_DIR"
+printf '%s\n' "$RUN_ID" | tee "$AWS_ARTIFACT_DIR/run_id.txt"
+```
+
+The Phase 5 AWS helper attempts to discover deployment prerequisites from AWS after the
+supporting account resources exist:
+
+- default VPC, public service subnets, and database subnets;
+- latest ECR images from `gbn-conduit-full-authority`, `gbn-conduit-full-receiver`,
+  `gbn-conduit-full-bridge`, and `gbn-conduit-full-creator`;
+- likely Publisher signing-key and bridge signing-seed Secret ARNs from Secrets Manager;
+- Publisher public key from a readable `publisher_public_key_hex`/`public_key_hex`
+  field, a dedicated public-key secret, or optional local Ed25519 derivation if Python
+  `cryptography` is installed and the signing seed is readable.
+
+If discovery picks the wrong resource, override only that value with an environment
+variable or the matching `aws-pass4-full-topology-up.sh` argument:
+
+```bash
 export VPC_ID="<vpc-id>"
 export SERVICE_SUBNET_IDS="<subnet-a>,<subnet-b>"
 export DATABASE_SUBNET_IDS="<db-subnet-a>,<db-subnet-b>"
-export AUTHORITY_IMAGE="<account>.dkr.ecr.$AWS_REGION_PHASE5.amazonaws.com/gbn-publisher-authority:<tag>"
-export RECEIVER_IMAGE="<account>.dkr.ecr.$AWS_REGION_PHASE5.amazonaws.com/gbn-publisher-receiver:<tag>"
-export BRIDGE_IMAGE="<account>.dkr.ecr.$AWS_REGION_PHASE5.amazonaws.com/gbn-exit-bridge:<tag>"
-export CREATOR_IMAGE="<account>.dkr.ecr.$AWS_REGION_PHASE5.amazonaws.com/gbn-creator-runner:<tag>"
+export AUTHORITY_IMAGE="<authority-image-uri>"
+export RECEIVER_IMAGE="<receiver-image-uri>"
+export BRIDGE_IMAGE="<bridge-image-uri>"
+export CREATOR_IMAGE="<creator-image-uri>"
 export PUBLISHER_SIGNING_KEY_SECRET_ARN="<publisher-signing-key-secret-arn>"
 export BRIDGE_SIGNING_SEED_SECRET_ARN="<bridge-signing-seed-secret-arn>"
 export PUBLISHER_PUBLIC_KEY_HEX="<64-hex-char-publisher-public-key>"
-
-mkdir -p "$AWS_ARTIFACT_DIR"
-printf '%s\n' "$RUN_ID" | tee "$AWS_ARTIFACT_DIR/run_id.txt"
 ```
 
 Confirm AWS identity before provisioning:
@@ -680,7 +701,7 @@ The generated live profile must contain:
 - no Publisher DHT, Publisher public key, Seed ExitBridge DHT, bridge catalog, private
   address, or admin endpoint preload.
 
-### Step 4 - Plan AWS Resources
+### Step 4 - Plan AWS Resources And Discover Deploy Prerequisites
 
 ```bash
 infra/scripts/aws-pass4-full-topology-plan.sh \
@@ -688,11 +709,21 @@ infra/scripts/aws-pass4-full-topology-plan.sh \
   --stack-name "$STACK_NAME" \
   --region "$AWS_REGION_PHASE5" \
   --bridge-count "$BRIDGE_COUNT" \
+  --discover-prereqs \
   --artifact-dir "$AWS_ARTIFACT_DIR" \
   | tee "$AWS_ARTIFACT_DIR/aws-plan.log"
+
+infra/scripts/aws-pass4-full-topology-prereqs.sh \
+  --run-id "$RUN_ID" \
+  --stack-name "$STACK_NAME" \
+  --region "$AWS_REGION_PHASE5" \
+  --artifact-dir "$AWS_ARTIFACT_DIR" \
+  | tee "$AWS_ARTIFACT_DIR/aws-prereqs.log"
+
+cat "$AWS_ARTIFACT_DIR/aws-deploy-prerequisites.json"
 ```
 
-Review the plan output before continuing. The plan must show:
+Review the plan and prerequisite output before continuing. The plan must show:
 
 - Publisher authority/receiver resources;
 - HostCreator resource;
@@ -701,6 +732,10 @@ Review the plan output before continuing. The plan must show:
 - private admin access only;
 - CloudWatch log groups/streams;
 - estimated cost/resource count.
+
+The prerequisite output must show `"ok": true`. If any item is listed in `missing`, either
+create the missing AWS prerequisite or export the override value shown in Step 0 before
+running Step 5.
 
 ### Step 5 - Deploy AWS Public Topology
 
@@ -712,17 +747,17 @@ infra/scripts/aws-pass4-full-topology-up.sh \
   --environment "$ENVIRONMENT_NAME" \
   --bridge-count "$BRIDGE_COUNT" \
   --artifact-dir "$AWS_ARTIFACT_DIR" \
-  --vpc-id "$VPC_ID" \
-  --service-subnet-ids "$SERVICE_SUBNET_IDS" \
-  --database-subnet-ids "$DATABASE_SUBNET_IDS" \
-  --authority-image "$AUTHORITY_IMAGE" \
-  --receiver-image "$RECEIVER_IMAGE" \
-  --bridge-image "$BRIDGE_IMAGE" \
-  --creator-image "$CREATOR_IMAGE" \
-  --publisher-signing-key-secret-arn "$PUBLISHER_SIGNING_KEY_SECRET_ARN" \
-  --bridge-signing-seed-secret-arn "$BRIDGE_SIGNING_SEED_SECRET_ARN" \
-  --publisher-public-key-hex "$PUBLISHER_PUBLIC_KEY_HEX" \
+  --evidence-bucket "$EVIDENCE_BUCKET" \
+  --evidence-prefix "$EVIDENCE_PREFIX" \
   | tee "$AWS_ARTIFACT_DIR/aws-up.log"
+```
+
+The deploy helper resolves VPC/subnets/ECR images/Secrets/public key using this order:
+explicit CLI argument, environment variable, then AWS discovery. It writes the exact
+resolved values and sources to:
+
+```text
+target/pass4-aws-public/$RUN_ID/aws-deploy-prerequisites.json
 ```
 
 If the stack is already deployed and you only need to regenerate the live profile/QR
@@ -993,13 +1028,20 @@ infra/scripts/aws-pass4-full-topology-plan.sh \
   --stack-name "$STACK_NAME" \
   --region "$AWS_REGION_PHASE5" \
   --bridge-count 3 \
+  --discover-prereqs \
   --artifact-dir "target/pass4-aws-public/$RUN_ID"
 
-infra/scripts/aws-pass4-full-topology-up.sh \
-  --discover-existing \
+infra/scripts/aws-pass4-full-topology-prereqs.sh \
   --run-id "$RUN_ID" \
   --stack-name "$STACK_NAME" \
   --region "$AWS_REGION_PHASE5" \
+  --artifact-dir "target/pass4-aws-public/$RUN_ID"
+
+infra/scripts/aws-pass4-full-topology-up.sh \
+  --run-id "$RUN_ID" \
+  --stack-name "$STACK_NAME" \
+  --region "$AWS_REGION_PHASE5" \
+  --bridge-count 3 \
   --artifact-dir "target/pass4-aws-public/$RUN_ID"
 
 infra/scripts/aws-pass4-full-topology-verify.sh \

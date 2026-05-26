@@ -31,6 +31,53 @@ DEFAULT_RECEIVER_PORT = 8081
 DEFAULT_BRIDGE_PORT = 443
 DEFAULT_CREATOR_BOOTSTRAP_PORT = 8082
 ADMIN_PORT = 9090
+DEPLOY_PREREQS_SCHEMA = "veritas.pass4.aws_public_deploy_prereqs.v1"
+DEPLOY_PREREQ_ENV = {
+    "vpc_id": "VPC_ID",
+    "service_subnet_ids": "SERVICE_SUBNET_IDS",
+    "database_subnet_ids": "DATABASE_SUBNET_IDS",
+    "authority_image": "AUTHORITY_IMAGE",
+    "receiver_image": "RECEIVER_IMAGE",
+    "bridge_image": "BRIDGE_IMAGE",
+    "creator_image": "CREATOR_IMAGE",
+    "publisher_signing_key_secret_arn": "PUBLISHER_SIGNING_KEY_SECRET_ARN",
+    "bridge_signing_seed_secret_arn": "BRIDGE_SIGNING_SEED_SECRET_ARN",
+    "publisher_public_key_hex": "PUBLISHER_PUBLIC_KEY_HEX",
+}
+ECR_REPO_CANDIDATES = {
+    "authority_image": [
+        "gbn-conduit-full-authority",
+        "gbn-publisher-authority",
+        "publisher-authority",
+    ],
+    "receiver_image": [
+        "gbn-conduit-full-receiver",
+        "gbn-publisher-receiver",
+        "publisher-receiver",
+    ],
+    "bridge_image": [
+        "gbn-conduit-full-bridge",
+        "gbn-exit-bridge",
+        "exit-bridge",
+    ],
+    "creator_image": [
+        "gbn-conduit-full-creator",
+        "gbn-creator-runner",
+        "creator-runner",
+    ],
+}
+PUBLIC_KEY_FIELDS = [
+    "publisher_public_key_hex",
+    "public_key_hex",
+    "publisher_public_key",
+    "public_key",
+    "GBN_BRIDGE_PUBLISHER_PUBLIC_KEY_HEX",
+]
+SIGNING_KEY_FIELDS = [
+    "publisher_signing_key_hex",
+    "signing_key_hex",
+    "GBN_BRIDGE_PUBLISHER_SIGNING_KEY_HEX",
+]
 
 
 def now_ms() -> int:
@@ -74,6 +121,330 @@ def aws_text(region: str, args: list[str]) -> str:
 def require_aws() -> None:
     if not shutil.which("aws"):
         raise SystemExit("required command not found: aws")
+
+
+def is_hex_32(value: str) -> bool:
+    value = value.strip()
+    if len(value) != 64:
+        return False
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return False
+    return True
+
+
+def value_from_arg_or_env(args: argparse.Namespace, name: str) -> tuple[str | None, str | None]:
+    value = getattr(args, name, None)
+    if value:
+        return str(value), "cli"
+    env_name = DEPLOY_PREREQ_ENV[name]
+    value = os.environ.get(env_name)
+    if value:
+        return value, f"env:{env_name}"
+    return None, None
+
+
+def optional_aws_json(region: str, args: list[str], warnings: list[str]) -> Any | None:
+    try:
+        return aws_json(region, args)
+    except SystemExit as error:
+        warnings.append(str(error))
+        return None
+
+
+def try_aws_json(region: str, args: list[str]) -> Any | None:
+    result = run(["aws", "--region", region, *args, "--output", "json"], check=False)
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+
+
+def discover_account_id(region: str, warnings: list[str]) -> str | None:
+    response = optional_aws_json(region, ["sts", "get-caller-identity"], warnings)
+    if not response:
+        return None
+    return response.get("Account")
+
+
+def discover_vpc(region: str, warnings: list[str]) -> tuple[str | None, str | None]:
+    response = optional_aws_json(
+        region,
+        ["ec2", "describe-vpcs", "--filters", "Name=isDefault,Values=true"],
+        warnings,
+    )
+    vpcs = (response or {}).get("Vpcs", [])
+    if vpcs:
+        return vpcs[0].get("VpcId"), "aws:ec2.default_vpc"
+    response = optional_aws_json(region, ["ec2", "describe-vpcs"], warnings)
+    vpcs = sorted((response or {}).get("Vpcs", []), key=lambda item: item.get("VpcId", ""))
+    if vpcs:
+        return vpcs[0].get("VpcId"), "aws:ec2.first_vpc"
+    return None, None
+
+
+def select_subnet_ids(subnets: list[dict[str, Any]], *, prefer_public: bool) -> list[str]:
+    filtered = [
+        item
+        for item in subnets
+        if bool(item.get("MapPublicIpOnLaunch")) is prefer_public and item.get("SubnetId")
+    ]
+    if len(filtered) < 2:
+        filtered = [item for item in subnets if item.get("SubnetId")]
+    filtered = sorted(filtered, key=lambda item: (item.get("AvailabilityZone", ""), item.get("SubnetId", "")))
+    by_az: dict[str, dict[str, Any]] = {}
+    for subnet in filtered:
+        by_az.setdefault(subnet.get("AvailabilityZone", ""), subnet)
+    selected = list(by_az.values())[:2]
+    if len(selected) < 2:
+        selected = filtered[:2]
+    return [str(item["SubnetId"]) for item in selected]
+
+
+def discover_subnet_sets(region: str, vpc_id: str, warnings: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    response = optional_aws_json(
+        region,
+        ["ec2", "describe-subnets", "--filters", f"Name=vpc-id,Values={vpc_id}"],
+        warnings,
+    )
+    subnets = (response or {}).get("Subnets", [])
+    public_ids = select_subnet_ids(subnets, prefer_public=True)
+    private_ids = select_subnet_ids(subnets, prefer_public=False)
+    values: dict[str, tuple[str | None, str | None]] = {
+        "service_subnet_ids": (",".join(public_ids), "aws:ec2.public_subnets") if len(public_ids) >= 2 else (None, None),
+        "database_subnet_ids": (",".join(private_ids), "aws:ec2.private_subnets") if len(private_ids) >= 2 else (None, None),
+    }
+    if values["database_subnet_ids"][0] is None and len(public_ids) >= 2:
+        values["database_subnet_ids"] = (",".join(public_ids), "aws:ec2.public_subnets_fallback")
+    return values
+
+
+def discover_latest_ecr_image(region: str, repo_candidates: list[str], warnings: list[str]) -> tuple[str | None, str | None]:
+    for repo in repo_candidates:
+        repository = try_aws_json(region, ["ecr", "describe-repositories", "--repository-names", repo])
+        repositories = (repository or {}).get("repositories", [])
+        if not repositories:
+            continue
+        images = optional_aws_json(region, ["ecr", "describe-images", "--repository-name", repo], warnings)
+        image_details = [
+            item for item in (images or {}).get("imageDetails", []) if item.get("imageTags")
+        ]
+        if not image_details:
+            warnings.append(f"ECR repository {repo} exists but has no tagged images.")
+            continue
+        image_details.sort(key=lambda item: str(item.get("imagePushedAt", "")), reverse=True)
+        preferred = next((item for item in image_details if "latest" in item.get("imageTags", [])), image_details[0])
+        tags = sorted(preferred.get("imageTags", []), key=lambda tag: (tag != "latest", tag))
+        image_uri = f"{repositories[0]['repositoryUri']}:{tags[0]}"
+        return image_uri, f"aws:ecr:{repo}:{tags[0]}"
+    return None, None
+
+
+def list_secrets(region: str, warnings: list[str]) -> list[dict[str, Any]]:
+    secrets: list[dict[str, Any]] = []
+    token: str | None = None
+    while True:
+        command = ["secretsmanager", "list-secrets", "--max-results", "100"]
+        if token:
+            command.extend(["--next-token", token])
+        response = optional_aws_json(region, command, warnings)
+        if not response:
+            return secrets
+        secrets.extend(response.get("SecretList", []))
+        token = response.get("NextToken")
+        if not token:
+            return secrets
+
+
+def secret_text(secret: dict[str, Any]) -> str:
+    return f"{secret.get('Name', '')} {secret.get('ARN', '')}".lower()
+
+
+def choose_secret_arn(
+    secrets: list[dict[str, Any]],
+    candidates: list[tuple[str, ...]],
+    *,
+    exclude: tuple[str, ...] = (),
+) -> tuple[str | None, str | None]:
+    scored: list[tuple[int, str, str]] = []
+    for secret in secrets:
+        text = secret_text(secret)
+        if any(term in text for term in exclude):
+            continue
+        for index, terms in enumerate(candidates):
+            if all(term in text for term in terms):
+                score = 100 - index
+                if "pass4" in text or "conduit-full" in text:
+                    score += 10
+                scored.append((score, secret.get("Name", ""), secret.get("ARN", "")))
+                break
+    scored.sort(reverse=True)
+    if scored and scored[0][2]:
+        return scored[0][2], f"aws:secretsmanager:{scored[0][1]}"
+    return None, None
+
+
+def read_secret_payload(region: str, secret_id: str, warnings: list[str]) -> Any | None:
+    response = optional_aws_json(region, ["secretsmanager", "get-secret-value", "--secret-id", secret_id], warnings)
+    if not response:
+        return None
+    raw = response.get("SecretString")
+    if not raw and response.get("SecretBinary"):
+        try:
+            raw = base64.b64decode(response["SecretBinary"]).decode("utf-8")
+        except Exception:
+            return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.strip()
+
+
+def field_from_secret_payload(payload: Any, fields: list[str], *, allow_plain_hex: bool = False) -> str | None:
+    if isinstance(payload, str):
+        return payload.strip() if allow_plain_hex and is_hex_32(payload.strip()) else None
+    if not isinstance(payload, dict):
+        return None
+    for field in fields:
+        value = payload.get(field)
+        if isinstance(value, str) and is_hex_32(value.strip()):
+            return value.strip()
+    return None
+
+
+def derive_ed25519_public_from_seed(seed_hex: str, warnings: list[str]) -> str | None:
+    if not is_hex_32(seed_hex):
+        return None
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except Exception as error:
+        warnings.append(
+            "Publisher signing secret is readable, but Python cryptography is unavailable; "
+            f"cannot derive publisher public key automatically ({error})."
+        )
+        return None
+    try:
+        public = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex)).public_key()
+        return public.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        ).hex()
+    except Exception as error:
+        warnings.append(f"Failed to derive publisher public key from signing secret: {error}")
+        return None
+
+
+def resolve_deploy_prereqs(args: argparse.Namespace, *, auto_discover: bool = True) -> dict[str, Any]:
+    warnings: list[str] = []
+    values: dict[str, str | None] = {}
+    sources: dict[str, str] = {}
+    for name in DEPLOY_PREREQ_ENV:
+        value, source = value_from_arg_or_env(args, name)
+        values[name] = value
+        if value and source:
+            sources[name] = source
+
+    if auto_discover:
+        account_id = discover_account_id(args.region, warnings)
+        if account_id:
+            sources["aws_account_id"] = f"aws:sts:{account_id}"
+        if not values["vpc_id"]:
+            value, source = discover_vpc(args.region, warnings)
+            if value:
+                values["vpc_id"] = value
+                sources["vpc_id"] = source or "aws:ec2"
+        if values["vpc_id"] and (not values["service_subnet_ids"] or not values["database_subnet_ids"]):
+            subnet_sets = discover_subnet_sets(args.region, values["vpc_id"], warnings)
+            for name, (value, source) in subnet_sets.items():
+                if value and not values[name]:
+                    values[name] = value
+                    sources[name] = source or "aws:ec2.subnets"
+        for name, candidates in ECR_REPO_CANDIDATES.items():
+            if values[name]:
+                continue
+            value, source = discover_latest_ecr_image(args.region, candidates, warnings)
+            if value:
+                values[name] = value
+                sources[name] = source or "aws:ecr"
+
+        secrets = list_secrets(args.region, warnings)
+        if secrets:
+            if not values["publisher_signing_key_secret_arn"]:
+                value, source = choose_secret_arn(
+                    secrets,
+                    [("publisher", "signing"), ("publisher", "sign"), ("publisher", "key")],
+                    exclude=("public",),
+                )
+                if value:
+                    values["publisher_signing_key_secret_arn"] = value
+                    sources["publisher_signing_key_secret_arn"] = source or "aws:secretsmanager"
+            if not values["bridge_signing_seed_secret_arn"]:
+                value, source = choose_secret_arn(
+                    secrets,
+                    [("bridge", "signing", "seed"), ("bridge", "seed"), ("bridge", "signing"), ("bridge", "key")],
+                    exclude=("public",),
+                )
+                if value:
+                    values["bridge_signing_seed_secret_arn"] = value
+                    sources["bridge_signing_seed_secret_arn"] = source or "aws:secretsmanager"
+            if not values["publisher_public_key_hex"]:
+                public_arn, public_source = choose_secret_arn(
+                    secrets,
+                    [("publisher", "public", "key"), ("publisher", "trust"), ("publisher", "public")],
+                )
+                if public_arn:
+                    payload = read_secret_payload(args.region, public_arn, warnings)
+                    value = field_from_secret_payload(payload, PUBLIC_KEY_FIELDS, allow_plain_hex=True)
+                    if value:
+                        values["publisher_public_key_hex"] = value
+                        sources["publisher_public_key_hex"] = public_source or "aws:secretsmanager"
+
+        signing_arn = values.get("publisher_signing_key_secret_arn")
+        if signing_arn and not values["publisher_public_key_hex"]:
+            payload = read_secret_payload(args.region, signing_arn, warnings)
+            value = field_from_secret_payload(payload, PUBLIC_KEY_FIELDS)
+            if value:
+                values["publisher_public_key_hex"] = value
+                sources["publisher_public_key_hex"] = "aws:secretsmanager.publisher_signing_secret.public_field"
+            else:
+                seed = field_from_secret_payload(payload, SIGNING_KEY_FIELDS, allow_plain_hex=True)
+                if seed:
+                    derived = derive_ed25519_public_from_seed(seed, warnings)
+                    if derived:
+                        values["publisher_public_key_hex"] = derived
+                        sources["publisher_public_key_hex"] = "aws:secretsmanager.publisher_signing_secret.derived"
+
+    missing = [name for name, value in values.items() if not value]
+    summary = {
+        "schema": DEPLOY_PREREQS_SCHEMA,
+        "run_id": args.run_id,
+        "region": args.region,
+        "ok": not missing,
+        "auto_discover": auto_discover,
+        "values": values,
+        "sources": sources,
+        "missing": missing,
+        "warnings": warnings,
+        "notes": [
+            "CLI args override environment variables; environment variables override AWS discovery.",
+            "Secret values are never written to this artifact; only ARNs and public key material are recorded.",
+            "If publisher_public_key_hex cannot be discovered, store it in a Secrets Manager field named publisher_public_key_hex or pass PUBLISHER_PUBLIC_KEY_HEX.",
+        ],
+    }
+    return summary
+
+
+def write_prereq_summary(args: argparse.Namespace, summary: dict[str, Any]) -> Path:
+    out_dir = artifact_dir(args)
+    path = out_dir / "aws-deploy-prerequisites.json"
+    write_json(path, summary)
+    return path
 
 
 def artifact_dir(args: argparse.Namespace) -> Path:
@@ -450,6 +821,11 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_plan(args: argparse.Namespace) -> None:
     out_dir = artifact_dir(args)
+    prereqs = None
+    if args.discover_prereqs:
+        require_aws()
+        prereqs = resolve_deploy_prereqs(args, auto_discover=not args.no_auto_discover_prereqs)
+        write_prereq_summary(args, prereqs)
     plan = {
         "schema": "veritas.pass4.aws_public_plan.v1",
         "run_id": args.run_id,
@@ -469,7 +845,7 @@ def command_plan(args: argparse.Namespace) -> None:
             "aws-pass4-full-topology-verify.sh",
             "aws-pass4-mobile-collector.sh",
         ],
-        "required_aws_inputs": [
+        "deploy_inputs": [
             "vpc-id",
             "service-subnet-ids",
             "database-subnet-ids",
@@ -481,29 +857,35 @@ def command_plan(args: argparse.Namespace) -> None:
             "bridge-signing-seed-secret-arn",
             "publisher-public-key-hex",
         ],
+        "deploy_input_resolution": "aws-pass4-full-topology-up.sh resolves these from CLI args, environment variables, or AWS discovery.",
+        "prerequisites": prereqs,
     }
     write_json(out_dir / "aws-public-plan.json", plan)
     print(json.dumps(plan, indent=2, sort_keys=True))
 
 
+def command_prereqs(args: argparse.Namespace) -> None:
+    require_aws()
+    summary = resolve_deploy_prereqs(args, auto_discover=not args.no_auto_discover_prereqs)
+    write_prereq_summary(args, summary)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    if not summary["ok"]:
+        raise SystemExit(1)
+
+
 def command_up(args: argparse.Namespace) -> None:
     require_aws()
     if not args.discover_existing:
-        required = [
-            "vpc_id",
-            "service_subnet_ids",
-            "database_subnet_ids",
-            "authority_image",
-            "receiver_image",
-            "bridge_image",
-            "creator_image",
-            "publisher_signing_key_secret_arn",
-            "bridge_signing_seed_secret_arn",
-            "publisher_public_key_hex",
-        ]
-        missing = [name.replace("_", "-") for name in required if not getattr(args, name)]
+        prereqs = resolve_deploy_prereqs(args, auto_discover=not args.no_auto_discover_prereqs)
+        prereq_path = write_prereq_summary(args, prereqs)
+        missing = [name.replace("_", "-") for name in prereqs["missing"]]
         if missing:
-            raise SystemExit("missing required deploy args: " + ", ".join(missing))
+            raise SystemExit(
+                "missing required deploy args after env/AWS discovery: "
+                + ", ".join(missing)
+                + f"\nSee {prereq_path}"
+            )
+        resolved = prereqs["values"]
         deploy = [
             str(SCRIPT_DIR / "deploy-conduit-full.sh"),
             "--stack-name",
@@ -513,25 +895,25 @@ def command_up(args: argparse.Namespace) -> None:
             "--environment",
             args.environment,
             "--vpc-id",
-            args.vpc_id,
+            resolved["vpc_id"],
             "--service-subnet-ids",
-            args.service_subnet_ids,
+            resolved["service_subnet_ids"],
             "--database-subnet-ids",
-            args.database_subnet_ids,
+            resolved["database_subnet_ids"],
             "--authority-image",
-            args.authority_image,
+            resolved["authority_image"],
             "--receiver-image",
-            args.receiver_image,
+            resolved["receiver_image"],
             "--bridge-image",
-            args.bridge_image,
+            resolved["bridge_image"],
             "--creator-image",
-            args.creator_image,
+            resolved["creator_image"],
             "--publisher-signing-key-secret-arn",
-            args.publisher_signing_key_secret_arn,
+            resolved["publisher_signing_key_secret_arn"],
             "--bridge-signing-seed-secret-arn",
-            args.bridge_signing_seed_secret_arn,
+            resolved["bridge_signing_seed_secret_arn"],
             "--publisher-public-key-hex",
-            args.publisher_public_key_hex,
+            resolved["publisher_public_key_hex"],
             "--desired-bridge-count",
             str(args.bridge_count),
             "--authority-port",
@@ -744,14 +1126,39 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--creator-bootstrap-port", type=int, default=DEFAULT_CREATOR_BOOTSTRAP_PORT)
 
 
+def add_deploy_prereq_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--vpc-id")
+    parser.add_argument("--service-subnet-ids")
+    parser.add_argument("--database-subnet-ids")
+    parser.add_argument("--authority-image")
+    parser.add_argument("--receiver-image")
+    parser.add_argument("--bridge-image")
+    parser.add_argument("--creator-image")
+    parser.add_argument("--publisher-signing-key-secret-arn")
+    parser.add_argument("--bridge-signing-seed-secret-arn")
+    parser.add_argument("--publisher-public-key-hex")
+    parser.add_argument(
+        "--no-auto-discover-prereqs",
+        action="store_true",
+        help="Use only CLI args and environment variables for deploy prerequisites.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
 
     plan = sub.add_parser("plan")
     add_common(plan)
+    add_deploy_prereq_args(plan)
     plan.add_argument("--bridge-count", type=int, default=3)
+    plan.add_argument("--discover-prereqs", action="store_true")
     plan.set_defaults(func=command_plan)
+
+    prereqs = sub.add_parser("prereqs")
+    add_common(prereqs)
+    add_deploy_prereq_args(prereqs)
+    prereqs.set_defaults(func=command_prereqs)
 
     up = sub.add_parser("up")
     add_common(up)
@@ -762,16 +1169,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--evidence-prefix")
     up.add_argument("--mobile-ingress-cidr", default=os.environ.get("PASS4_MOBILE_INGRESS_CIDR", "0.0.0.0/0"))
     up.add_argument("--discover-existing", action="store_true")
-    up.add_argument("--vpc-id")
-    up.add_argument("--service-subnet-ids")
-    up.add_argument("--database-subnet-ids")
-    up.add_argument("--authority-image")
-    up.add_argument("--receiver-image")
-    up.add_argument("--bridge-image")
-    up.add_argument("--creator-image")
-    up.add_argument("--publisher-signing-key-secret-arn")
-    up.add_argument("--bridge-signing-seed-secret-arn")
-    up.add_argument("--publisher-public-key-hex")
+    add_deploy_prereq_args(up)
     up.set_defaults(func=command_up)
 
     verify = sub.add_parser("verify")

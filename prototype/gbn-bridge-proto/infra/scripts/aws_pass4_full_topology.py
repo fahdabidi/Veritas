@@ -924,6 +924,8 @@ def command_up(args: argparse.Namespace) -> None:
             str(args.bridge_udp_port),
             "--creator-bootstrap-port",
             str(args.creator_bootstrap_port),
+            "--postgres-tls-accept-invalid-certs",
+            args.postgres_tls_accept_invalid_certs,
             "--authority-ingress-cidr",
             args.mobile_ingress_cidr,
             "--receiver-ingress-cidr",
@@ -1168,6 +1170,10 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--evidence-bucket", default=os.environ.get("PASS4_MOBILE_EVIDENCE_BUCKET", DEFAULT_BUCKET))
     up.add_argument("--evidence-prefix")
     up.add_argument("--mobile-ingress-cidr", default=os.environ.get("PASS4_MOBILE_INGRESS_CIDR", "0.0.0.0/0"))
+    up.add_argument(
+        "--postgres-tls-accept-invalid-certs",
+        default=os.environ.get("GBN_BRIDGE_POSTGRES_TLS_ACCEPT_INVALID_CERTS", "true"),
+    )
     up.add_argument("--discover-existing", action="store_true")
     add_deploy_prereq_args(up)
     up.set_defaults(func=command_up)

@@ -589,6 +589,7 @@ export AWS_REGION_PHASE5="ca-central-1"
 export STACK_NAME="gbn-conduit-full-pass4"
 export ENVIRONMENT_NAME="pass4"
 export BRIDGE_COUNT="3"
+export BRIDGE_UDP_PORT="4443"
 export AWS_PROFILE_CONFIG="infra/pass4/aws/run-profile.aws-public.live.json"
 export AWS_ARTIFACT_DIR="target/pass4-aws-public/$RUN_ID"
 export EVIDENCE_BUCKET="veritas-pass4-mobile-evidence"
@@ -701,6 +702,13 @@ The generated live profile must contain:
 - no Publisher DHT, Publisher public key, Seed ExitBridge DHT, bridge catalog, private
   address, or admin endpoint preload.
 
+Phase 5 uses UDP `4443` for ExitBridge public ingress by default. The original AWS
+shape used UDP `443`, but the bridge container runs as the non-root `veritas` user and
+Fargate did not honor file capabilities for binding a privileged UDP port. The
+validation requirement is a real public mobile-network path, not a specific privileged
+port, so the stack, security group, generated mobile profile, and verifier must all use
+`BRIDGE_UDP_PORT`.
+
 ### Step 4 - Plan AWS Resources And Discover Deploy Prerequisites
 
 ```bash
@@ -746,6 +754,7 @@ infra/scripts/aws-pass4-full-topology-up.sh \
   --region "$AWS_REGION_PHASE5" \
   --environment "$ENVIRONMENT_NAME" \
   --bridge-count "$BRIDGE_COUNT" \
+  --bridge-udp-port "$BRIDGE_UDP_PORT" \
   --artifact-dir "$AWS_ARTIFACT_DIR" \
   --evidence-bucket "$EVIDENCE_BUCKET" \
   --evidence-prefix "$EVIDENCE_PREFIX" \
@@ -770,6 +779,7 @@ infra/scripts/aws-pass4-full-topology-up.sh \
   --stack-name "$STACK_NAME" \
   --region "$AWS_REGION_PHASE5" \
   --bridge-count "$BRIDGE_COUNT" \
+  --bridge-udp-port "$BRIDGE_UDP_PORT" \
   --artifact-dir "$AWS_ARTIFACT_DIR" \
   | tee "$AWS_ARTIFACT_DIR/aws-discover.log"
 ```
@@ -803,6 +813,7 @@ infra/scripts/aws-pass4-full-topology-verify.sh \
   --run-id "$RUN_ID" \
   --stack-name "$STACK_NAME" \
   --region "$AWS_REGION_PHASE5" \
+  --bridge-udp-port "$BRIDGE_UDP_PORT" \
   --artifact-dir "$AWS_ARTIFACT_DIR" \
   | tee "$AWS_ARTIFACT_DIR/aws-verify.log"
 ```

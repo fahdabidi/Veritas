@@ -19,12 +19,13 @@ LABEL org.opencontainers.image.title="veritas-exit-bridge" \
     veritas.component="exit-bridge" \
     veritas.build.version="${VERITAS_BUILD_VERSION}"
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 10001 veritas
-USER veritas
 WORKDIR /app
 COPY --from=builder /workspace/target/release/exit-bridge /usr/local/bin/exit-bridge
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/exit-bridge
+USER veritas
 ENV GBN_BRIDGE_ROLE=exit-bridge \
     GBN_BRIDGE_RUN_MODE=serve \
     GBN_BRIDGE_PUNCH_PORT=443 \

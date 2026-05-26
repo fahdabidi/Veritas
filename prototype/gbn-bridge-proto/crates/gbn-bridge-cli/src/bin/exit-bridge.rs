@@ -34,6 +34,7 @@ const DEFAULT_CONTROL_URL: &str = "ws://127.0.0.1:8080/v1/bridge/control";
 const DEFAULT_NODE_ID: &str = "exit-bridge";
 const DEFAULT_INGRESS_HOST: &str = "127.0.0.1";
 const STARTUP_RETRY_TIMEOUT_MS: u64 = 120_000;
+const ECS_METADATA_RETRY_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_SIGNING_KEY_HEX: &str = "11\
 11\
 11\
@@ -1005,6 +1006,10 @@ impl BridgeServiceConfig {
 struct EcsTaskMetadata {
     #[serde(rename = "TaskARN")]
     task_arn: Option<String>,
+    #[serde(rename = "ContainerARN")]
+    container_arn: Option<String>,
+    #[serde(rename = "Networks", default)]
+    networks: Vec<EcsNetworkMetadata>,
     #[serde(rename = "Containers", default)]
     containers: Vec<EcsContainerMetadata>,
 }
@@ -1025,18 +1030,27 @@ impl EcsTaskMetadata {
     fn default_node_id(&self) -> String {
         self.task_arn
             .as_ref()
+            .or(self.container_arn.as_ref())
             .and_then(|arn| arn.rsplit('/').next())
             .map(|task_id| format!("exit-bridge-{task_id}"))
             .unwrap_or_else(|| DEFAULT_NODE_ID.to_string())
     }
 
     fn primary_ipv4(&self) -> Option<String> {
-        self.containers
+        self.networks
             .iter()
-            .flat_map(|container| container.networks.iter())
+            .chain(
+                self.containers
+                    .iter()
+                    .flat_map(|container| container.networks.iter()),
+            )
             .flat_map(|network| network.ipv4_addresses.iter())
             .find(|address| !address.is_empty())
             .cloned()
+    }
+
+    fn has_identity_and_network(&self) -> bool {
+        (self.task_arn.is_some() || self.container_arn.is_some()) && self.primary_ipv4().is_some()
     }
 }
 
@@ -1047,7 +1061,38 @@ fn load_ecs_task_metadata() -> io::Result<EcsTaskMetadata> {
             "ECS_CONTAINER_METADATA_URI_V4 is required for auto bridge metadata",
         )
     })?;
-    let endpoint = parse_http_endpoint(&(base_url.trim_end_matches('/').to_string() + "/task"))?;
+    let base_url = base_url.trim_end_matches('/');
+    let endpoints = [
+        parse_http_endpoint(&format!("{base_url}/task"))?,
+        parse_http_endpoint(base_url)?,
+    ];
+    let started_at_ms = now_ms();
+    loop {
+        let mut last_error = None;
+        for endpoint in &endpoints {
+            match load_ecs_task_metadata_once(endpoint) {
+                Ok(metadata) => return Ok(metadata),
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        let error =
+            last_error.unwrap_or_else(|| io::Error::other("no ECS metadata endpoints attempted"));
+        if now_ms().saturating_sub(started_at_ms) >= ECS_METADATA_RETRY_TIMEOUT_MS {
+            let kind = error.kind();
+            return Err(io::Error::new(
+                kind,
+                format!("ECS task metadata unavailable after retry: {error}"),
+            ));
+        }
+        eprintln!("exit-bridge waiting for ECS task metadata: {error}");
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn load_ecs_task_metadata_once(endpoint: &ParsedHttpEndpoint) -> io::Result<EcsTaskMetadata> {
     let address = resolve_endpoint(&endpoint.host, endpoint.port)?;
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1063,12 +1108,26 @@ fn load_ecs_task_metadata() -> io::Result<EcsTaskMetadata> {
     stream.read_to_end(&mut response)?;
     let body = extract_http_body(&response)?;
     let body = decode_chunked_body(body).unwrap_or_else(|| body.to_vec());
-    serde_json::from_slice(&body).map_err(|error| {
+    if body.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty ECS task metadata payload",
+        ));
+    }
+    let metadata = serde_json::from_slice::<EcsTaskMetadata>(&body).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("invalid ECS task metadata payload: {error}"),
         )
-    })
+    })?;
+    if metadata.has_identity_and_network() {
+        Ok(metadata)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ECS metadata payload is missing task/container identity or primary IPv4 address",
+        ))
+    }
 }
 
 #[derive(Debug)]

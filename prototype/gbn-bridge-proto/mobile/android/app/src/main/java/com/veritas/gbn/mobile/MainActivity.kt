@@ -84,7 +84,7 @@ class MainActivity : Activity() {
             data?.data?.let { importS3GrantDocument(it) }
             return
         }
-        val payload = data?.getStringExtra("SCAN_RESULT").orEmpty()
+        val payload = data?.getStringExtra(QrScannerActivity.EXTRA_QR_PAYLOAD).orEmpty()
         if (payload.isBlank()) return
         when (requestCode) {
             REQUEST_RUN_PROFILE_QR_SCAN -> importRunProfileQrPayload(payload)
@@ -173,9 +173,7 @@ class MainActivity : Activity() {
             applyRunProfileJson(runProfileInput.text.toString())
         })
         root.addView(button("RunProfileQRReader", "Run Profile QR Reader") {
-            val intent = Intent("com.google.zxing.client.android.SCAN").putExtra("SCAN_MODE", "QR_CODE_MODE")
-            runCatching { startActivityForResult(intent, REQUEST_RUN_PROFILE_QR_SCAN) }
-                .onFailure { show("No external QR scanner found. Use Import Run Profile Document or paste the profile JSON.") }
+            startQrScanner(REQUEST_RUN_PROFILE_QR_SCAN, "Run Profile QR")
         })
         root.addView(button("ImportRunProfileDocument", "Import Run Profile Document") {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -214,10 +212,8 @@ class MainActivity : Activity() {
         hostSeedInput = multiLine(sampleHostSeedPayload(), "HostCreatorDHTQRPayload")
         root.addView(hostSeedInput)
         root.addView(button("HostCreatorDHTQRReader", "HostCreator DHT QR Reader") {
-            eventLog.appendAction(findAction("HostCreatorDHTQRReader"), nextChainId("qr"), "external_scanner_requested")
-            val intent = Intent("com.google.zxing.client.android.SCAN").putExtra("SCAN_MODE", "QR_CODE_MODE")
-            runCatching { startActivityForResult(intent, REQUEST_HOST_QR_SCAN) }
-                .onFailure { show("No external QR scanner found in emulator. Paste or file-import the QR payload above.") }
+            eventLog.appendAction(findAction("HostCreatorDHTQRReader"), nextChainId("qr"), "internal_scanner_requested")
+            startQrScanner(REQUEST_HOST_QR_SCAN, "HostCreator DHT QR")
         })
         root.addView(button("PreviewBootstrapDHTQR", "Preview Host Seed") {
             previewHostSeed()
@@ -285,9 +281,7 @@ class MainActivity : Activity() {
             importS3GrantFromDeviceFile()
         })
         root.addView(button("EvidenceGrantQRReader", "Evidence Grant QR Reader") {
-            val intent = Intent("com.google.zxing.client.android.SCAN").putExtra("SCAN_MODE", "QR_CODE_MODE")
-            runCatching { startActivityForResult(intent, REQUEST_S3_GRANT_QR_SCAN) }
-                .onFailure { show("No external QR scanner found. Use Android Files/share import fallback, or emulator adb grant import.") }
+            startQrScanner(REQUEST_S3_GRANT_QR_SCAN, "S3 Evidence Grant QR")
         })
         root.addView(button("ImportS3GrantDocument", "Import S3 Grant Document") {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -498,6 +492,14 @@ class MainActivity : Activity() {
             val config = EvidenceUploadConfig.parse(rawJson)
             uploadGrantInput.setText(rawJson)
             show("Imported S3 evidence grant from ${grantFile.absolutePath}\nobject_key=${config.objectKey}\nexpires_at_ms=${config.expiresAtMs ?: 0}")
+        }.onFailure { showError(it) }
+    }
+
+    private fun startQrScanner(requestCode: Int, title: String) {
+        runCatching {
+            val intent = Intent(this, QrScannerActivity::class.java)
+                .putExtra(QrScannerActivity.EXTRA_SCANNER_TITLE, title)
+            startActivityForResult(intent, requestCode)
         }.onFailure { showError(it) }
     }
 

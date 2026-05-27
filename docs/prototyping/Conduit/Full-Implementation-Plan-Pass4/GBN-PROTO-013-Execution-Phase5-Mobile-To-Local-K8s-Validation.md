@@ -1,7 +1,7 @@
 # GBN-PROTO-013 - Execution Phase 5 - Mobile To AWS Public Internet Validation
 
 **Status:** Repo-side implementation complete; physical-phone AWS validation pending
-**Last Updated:** 2026-05-12
+**Last Updated:** 2026-05-26
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 **Depends On:** Phases 1-4 complete
 
@@ -137,6 +137,8 @@ Required before running Phase 5:
   it does not expose admin surfaces publicly.
 - AWS endpoint map is generated from live AWS resources, not examples or placeholders.
 - HostCreator QR seed is generated from the live AWS endpoint map.
+- Android app embeds its own camera QR scanner; Phase 5 must not depend on an external
+  barcode scanner app.
 - S3 evidence bucket and short-lived upload grant are prepared.
 - Phone has cellular service; canonical run disables Wi-Fi.
 
@@ -216,6 +218,9 @@ The Android validation app now supports:
 - `RunProfileConfig` adds `PROFILE_AWS_PUBLIC = "aws_public"` and allows it in
   `allowedProfiles`.
 - `MainActivity` shows `aws_public` in the Network Profile selector.
+- `RunProfileQRReader`, `HostCreatorDHTQRReader`, and `EvidenceGrantQRReader` launch the
+  app's embedded CameraX/ML Kit scanner and do not rely on `com.google.zxing` or any
+  other external scanner application.
 - `RunProfileQRReader` supports raw and chunked AWS run-profile QR payloads.
 - `Import Run Profile Document` supports standalone-phone file import.
 - `Evidence Grant QR Reader` and `Import S3 Grant Document` support standalone-phone S3
@@ -357,9 +362,14 @@ The Android app must support the AWS validation profile.
 Required app changes or configuration:
 
 - add/select `aws_public` network profile;
-- import `run-profile.aws-public.live.json` through `RunProfileQRReader`, document picker,
-  or share intent; adb-only import is a lab fallback and not valid for standalone phone
-  sign-off;
+- import `run-profile.aws-public.live.json` through the embedded `RunProfileQRReader`,
+  document picker, or share intent; adb-only import is a lab fallback and not valid for
+  standalone phone sign-off;
+- request camera permission inside the app and show a clear document-import fallback if
+  permission is denied;
+- scan run-profile chunks, HostCreator seed QR, and S3 evidence grant chunks using the
+  same embedded QR scanner activity;
+- never require installing a third-party QR or barcode scanner app for Phase 5 sign-off;
 - gate `BootstrapNewCreator`, `SendDummy`, and `SendUpload` on runtime/profile/seed
   state/onboarding/session state;
 - canonical run has Wi-Fi disabled and cellular/mobile path available;
@@ -414,7 +424,8 @@ The canonical grant import path is:
 
 1. The workstation generates a short-lived S3 `PUT` grant JSON.
 2. The workstation renders the grant as one or more QR payloads.
-3. The phone scans the QR payloads from the workstation screen.
+3. The phone scans the QR payloads from the workstation screen with the app's embedded
+   CameraX/ML Kit scanner.
 4. The app reconstructs and validates the complete grant.
 5. The app stores the grant in app-private state and uses it for evidence upload.
 
@@ -451,6 +462,10 @@ Fallbacks:
 - Android share intent into the app;
 - adb file import for emulator/lab only.
 
+Third-party QR scanner installation is not an accepted Phase 5 dependency. If the
+embedded camera scanner cannot run, the report must record that as an app defect or use a
+document-import fallback explicitly labeled non-canonical.
+
 ---
 
 ## Mobile Run Flow
@@ -463,7 +478,7 @@ Fallbacks:
 4. Select `aws_public`.
 5. Import the live AWS public run profile.
 6. Start runtime.
-7. Scan the AWS HostCreator QR with `HostCreatorDHTQRReader`.
+7. Scan the AWS HostCreator QR with the embedded `HostCreatorDHTQRReader`.
 8. Confirm HostCreator id, public-key fingerprint, AWS public endpoint, region, expiry,
    payload hash, and ChainID.
 9. Import the seed.
@@ -828,7 +843,7 @@ Display the AWS HostCreator QR and run-profile import QR on the workstation:
 explorer.exe "$(wslpath -w "$AWS_ARTIFACT_DIR")"
 ```
 
-Open these files for phone scanning:
+Open these files for phone scanning with the app's embedded QR scanner:
 
 ```text
 hostcreator_bootstrap_qr.png
@@ -897,9 +912,10 @@ On the physical Android phone:
 2. Confirm mobile/cellular data is active.
 3. Launch `GBN Mobile Creator`.
 4. Select `aws_public`.
-5. Import the AWS run profile with `RunProfileQRReader` or document/share fallback.
+5. Import the AWS run profile with the embedded `RunProfileQRReader` or document/share
+   fallback.
 6. Tap `Start Runtime`.
-7. Scan `hostcreator_bootstrap_qr.png` with `HostCreatorDHTQRReader`.
+7. Scan `hostcreator_bootstrap_qr.png` with the embedded `HostCreatorDHTQRReader`.
 8. Confirm HostCreator id, public-key fingerprint, AWS endpoint, region, expiry, payload
    hash, and ChainID.
 9. Tap `Import Host Seed`.
@@ -912,7 +928,7 @@ On the physical Android phone:
 16. Trigger forced bridge/lane failure through the AWS operator script or planned manual
    bridge task stop.
 17. Run `SendDummy` or `SendUpload` again; save the failover ChainID.
-18. Scan every S3 evidence grant QR chunk with `EvidenceGrantQRReader`.
+18. Scan every S3 evidence grant QR chunk with the embedded `EvidenceGrantQRReader`.
 19. Tap `Export Evidence`.
 20. Tap `Upload Evidence To S3`.
 21. Record the displayed S3 object key, ETag, bundle SHA-256, and file count.
@@ -1103,6 +1119,8 @@ Add tests for:
   cluster-local names, admin ports, and expired descriptors;
 - AWS deployment plan excludes public admin listeners;
 - app supports `aws_public` without preloading Publisher/bridge bootstrap state;
+- embedded QR scanner activity requests camera permission, decodes QR payloads, returns
+  payloads to `MainActivity`, and preserves document import fallbacks;
 - app refuses bootstrap when Wi-Fi/cellular requirement is not satisfied for canonical
   validation mode;
 - app refuses `BootstrapNewCreator` before HostCreator seed import;
@@ -1121,6 +1139,7 @@ Add tests for:
 - AWS collector fails if CloudWatch evidence is absent for selected actors;
 - S3 grant chunk reconstruction accepts out-of-order QR chunks and rejects hash mismatch,
   duplicate mismatch, expired grants, and grants carrying raw long-lived AWS credentials.
+- no QR import path depends on an external scanner intent or installed third-party app.
 
 Run:
 
@@ -1145,6 +1164,8 @@ cd mobile/android
 - Public endpoints are unique or explicitly mapped per actor so selected bridge identity
   is traceable.
 - Public admin access is denied.
+- Android QR import is implemented in-app with CameraX/ML Kit and does not require any
+  external QR scanner.
 - Android `EvidenceGrantQRReader` can import a chunked S3 grant without adb or typing.
 - Mobile FFI implements `bootstrapNewCreator`, `sendDummy`, and `sendUpload`.
 - Android `aws_public`, `BootstrapNewCreator`, `SendDummy`, and `SendUpload` controls are

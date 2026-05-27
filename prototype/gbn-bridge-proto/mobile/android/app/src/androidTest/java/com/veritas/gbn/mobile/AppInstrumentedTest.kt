@@ -40,6 +40,7 @@ class AppInstrumentedTest {
     @Test
     fun testMainActivityClassIsAvailable() {
         assertNotNull(MainActivity::class.java)
+        assertNotNull(QrScannerActivity::class.java)
     }
 
     @Test

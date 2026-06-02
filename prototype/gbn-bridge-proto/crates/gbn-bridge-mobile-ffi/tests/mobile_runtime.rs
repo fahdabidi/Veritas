@@ -285,7 +285,7 @@ fn synthetic_upload_trace_filter_and_evidence_export_work() {
 }
 
 #[test]
-fn phase5_public_operations_update_local_dht_and_emit_results() {
+fn phase5_public_operations_update_local_dht_but_require_network_acks() {
     let root = temp_root("phase5");
     let runtime = MobileCreatorRuntime::new(aws_public_config(&root, "mobile-phase5")).unwrap();
     let payload = host_seed(now_ms() + 60_000);
@@ -306,15 +306,14 @@ fn phase5_public_operations_update_local_dht_and_emit_results() {
     assert_eq!(bootstrap.bridge_count, 2);
     assert!(runtime.local_dht().publisher_entry.is_some());
 
-    let dummy = runtime
+    let dummy_error = runtime
         .send_dummy(SendDummyRequest {
             chain_id: Some("phase5-dummy-chain".to_string()),
             size_bytes: 128,
             force_bridge_failure: true,
         })
-        .unwrap();
-    assert_eq!(dummy.route_source, "local_dht");
-    assert!(dummy.ciphertext_only_at_bridge);
+        .unwrap_err();
+    assert_eq!(dummy_error.code(), "runtime_error");
 
     let summary = runtime
         .build_synthetic_upload_session(BuildSyntheticUploadRequest {
@@ -324,16 +323,15 @@ fn phase5_public_operations_update_local_dht_and_emit_results() {
             sanitization_profile: "phase5-unit".to_string(),
         })
         .unwrap();
-    let uploaded = runtime
+    let upload_error = runtime
         .send_upload(SendUploadRequest {
             chain_id: Some("phase5-upload-send".to_string()),
             session_id: Some(summary.session_id),
             target_lane_count: 2,
             force_lane_failure: vec!["exit-bridge-0".to_string()],
         })
-        .unwrap();
-    assert_eq!(uploaded.completed_chunks, uploaded.total_chunks);
-    assert!(!uploaded.lanes_used.is_empty());
+        .unwrap_err();
+    assert_eq!(upload_error.code(), "runtime_error");
 }
 
 #[test]

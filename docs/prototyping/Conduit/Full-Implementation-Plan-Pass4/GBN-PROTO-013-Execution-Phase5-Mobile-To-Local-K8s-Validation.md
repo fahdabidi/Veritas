@@ -1,7 +1,7 @@
 # GBN-PROTO-013 - Execution Phase 5 - Mobile To AWS Public Internet Validation
 
-**Status:** Repo-side implementation complete; physical-phone AWS validation pending
-**Last Updated:** 2026-05-26
+**Status:** Blocked after physical-phone execution - S3 evidence uploaded, AWS protocol correlation missing
+**Last Updated:** 2026-05-31
 **Parent Plan:** [GBN-PROTO-013](GBN-PROTO-013-Conduit-Mobile-Creator-Public-Internet-Validation-Execution-Plan.md)
 **Depends On:** Phases 1-4 complete
 
@@ -150,8 +150,11 @@ the live run starts.
 
 ## Repo-Side Implementation Status
 
-The repo-side Phase 5 gaps are implemented. The remaining Phase 5 gate is the live
-physical-phone validation against a deployed AWS topology using the runbook below.
+The repo-side Phase 5 operator tooling and Android evidence path are implemented enough to
+run a physical-phone validation against AWS. The 2026-05-31 run exposed a remaining
+implementation blocker: the mobile FFI currently completes bootstrap, SendDummy, and
+SendUpload from imported/local DHT state without transmitting those operations to the AWS
+protocol endpoints. Phase 5 is therefore blocked, not complete.
 
 ### AWS Infrastructure Scripts
 
@@ -236,20 +239,108 @@ The Android validation app now supports:
 
 ### Rust/Mobile Runtime Changes
 
-The Rust/mobile runtime now accepts the `aws_public` profile and enables the Phase 5
-creator operations against the imported live endpoint descriptors:
+The Rust/mobile runtime accepts the `aws_public` profile and exposes the Phase 5 creator
+operations against imported endpoint descriptors, but the current FFI behavior is local and
+synthetic:
 
 - `bootstrapNewCreator` requires an imported HostCreator DHT seed and an AWS public
   endpoint profile, then persists Publisher and ExitBridge DHT entries derived from the
-  live AWS descriptors.
-- `sendDummy` dispatches through an active ExitBridge route selected from mobile local
-  DHT.
-- `sendUpload` dispatches upload lanes/chunks over active ExitBridge entries.
+  AWS descriptors.
+- `sendDummy` selects an active ExitBridge route from mobile local DHT and records a local
+  successful result.
+- `sendUpload` selects upload lanes/chunks from active mobile local DHT entries and records
+  local completion.
 - `exportEvidence` includes operation results, selected AWS bridge ids, ChainIDs,
   DHT snapshots, and CloudWatch query hints.
 - `creator-runner` retains local-only admin binding and adds a separate non-admin
   HostCreator bootstrap hint endpoint for AWS Phase 5.
 - Existing `creator-runner` HTTP/admin APIs remain backward compatible with Pass 3.
+
+Required before Phase 5 sign-off: replace the local/synthetic mobile FFI completion path
+with live mobile-to-AWS protocol transport for `bootstrapNewCreator`, `sendDummy`, and
+`sendUpload`, and prove the resulting ChainIDs in AWS CloudWatch.
+
+---
+
+## 2026-05-31 Physical-Phone Execution Results
+
+Run metadata:
+
+- Run id: `pass4-phase5-aws-20260531T194440Z`.
+- AWS stack: `gbn-conduit-full-pass4`.
+- AWS topology region: `ca-central-1`.
+- Evidence bucket: `veritas-pass4-mobile-evidence` in `us-east-1`.
+- Phone: Samsung `SM-S911U1`, Android SDK `36`, `arm64-v8a`.
+- App build: `0.1.0-pass4-phase5-debug`.
+
+S3 evidence path:
+
+- Final uploaded object:
+  `s3://veritas-pass4-mobile-evidence/mobile-evidence/pass4-phase5-aws-20260531T194440Z/mobile-bundle-phone-20260531T234156Z.zip`.
+- Phone upload output: `ETag="06bafb301acf21139f6f6a45abae3021"`.
+- Workstation `head-object` verification:
+  `LastModified=2026-05-31T23:44:03+00:00`, `ContentLength=13659`,
+  `ContentType=application/zip`, `ServerSideEncryption=AES256`.
+- Workstation hash verification:
+  `sha256=21b11bf00a8561b14e1bc10c4d87ece0d06a21af1c34f5d706a517ec39915fd0`.
+- Evidence unpack path:
+  `target/pass4-aws-public/pass4-phase5-aws-20260531T194440Z/s3-phone-20260531T234156Z/unpacked/`.
+- Bundle contents include `evidence.json`, `events.jsonl`, `trace_events.jsonl`,
+  `local_dht.json`, `node_metadata.json`, `host_creator_seed.redacted.json`,
+  `upload_sessions.json`, `endpoint_config.redacted.json`, `device_context.json`,
+  `network_context.json`, `app_build.json`, `rust_build.json`, `chain_ids.txt`,
+  `remote_trace_queries.json`, `manifest.sha256.json`, `bootstrap_result.json`,
+  `send_dummy_result.json`, `upload_session_result.json`, `send_upload_result.json`,
+  and `aws_endpoint_map_context.json`.
+
+Observed mobile ChainIDs:
+
+```text
+phase3-evidence-1780271031362
+phase3-bootstrap-1780267469642
+phase3-dummy-1780267647140
+phase3-upload-1780270583202
+phase3-send-upload-1780270607385
+c6726ce6269b48dd5508cf465614c7e8
+```
+
+AWS endpoint evidence in the bundle:
+
+- Publisher authority: `16.52.175.245:8080`.
+- Publisher receiver: `15.157.59.117:8081`.
+- HostCreator bootstrap: `35.183.121.112:8082`.
+- ExitBridge 01: `35.182.174.110:4443`.
+- ExitBridge 02: `35.183.123.182:4443`.
+- ExitBridge 03: `15.157.63.200:4443`.
+- Local DHT reached `self_onboarding_state=onboarded` with three active bridge entries and
+  `current_bootstrap_session.chain_id=phase3-bootstrap-1780267469642`.
+
+Collector result:
+
+- Collector artifact:
+  `target/pass4-aws-public/pass4-phase5-aws-20260531T194440Z/collector-phone-20260531T234156Z/aws-mobile-collection.json`.
+- Wide-window collector artifact:
+  `target/pass4-aws-public/pass4-phase5-aws-20260531T194440Z/collector-phone-20260531T234156Z-wide/aws-mobile-collection.json`.
+- Both collector runs reported zero matching CloudWatch events for authority, receiver,
+  HostCreator, and bridge logs for the mobile ChainIDs, so `ok=false`.
+
+Execution caveats:
+
+- The uploaded bundle's `network_context.json` reports `active_transport_type=wifi`.
+  A canonical Phase 5 rerun must capture Wi-Fi disabled and cellular active.
+- The uploaded bundle was produced before the latest Android parser fix; several native
+  result files include a wrapper trailer after the JSON body. The Android code now strips
+  FFI wrapper bodies correctly and unit tests cover object, array, and string bodies.
+- The S3 QR grant flow is confirmed when a fresh one-time grant is used. Grants generated
+  from temporary `ASIA...` AWS credentials cannot outlive the underlying AWS session even
+  when the presigned URL expiry is set to 24 hours. Generate the one-time S3 PUT grant
+  immediately before the phone upload, sign it for the bucket's real region
+  (`us-east-1`), and do not reuse it.
+- Forced failover/churn evidence was not completed in this run.
+
+Conclusion: Phase 5 has a valid physical-phone S3 evidence handoff, but the live AWS
+protocol path is not proven. The blocking implementation work is live mobile FFI transport
+plus a rerun that produces matching CloudWatch ChainID evidence.
 
 ---
 

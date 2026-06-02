@@ -3,6 +3,7 @@ package com.veritas.gbn.mobile
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
@@ -54,6 +55,8 @@ class MainActivity : Activity() {
     private var lastHostSeedPayload: String? = null
     private var lastUploadResult: String = "{}"
     private var lastBootstrapResult: String = "{}"
+    private var lastDummyResult: String = "{}"
+    private var lastUploadSendResult: String = "{}"
     private var lastEvidence: EvidenceBundleResult? = null
     private var syncingProfileSelection = false
     private val s3GrantQrAssembler = S3GrantQrAssembler()
@@ -62,6 +65,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         eventLog = AppEventLog(File(cacheDir, "app-events/events.jsonl"))
+        loadPersistedValidationState()
         requestPhase3Permissions()
         setContentView(buildUi())
         refreshStatus("App initialized")
@@ -148,11 +152,16 @@ class MainActivity : Activity() {
                 ),
             )
             setTag("NetworkProfileSelector")
+            val initialProfileIndex = (0 until adapter.count)
+                .firstOrNull { adapter.getItem(it).toString() == selectedProfile }
+                ?: 0
+            setSelection(initialProfileIndex, false)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     selectedProfile = parent?.getItemAtPosition(position).toString()
                     if (!syncingProfileSelection) {
                         runProfile = RunProfileConfig.default(selectedProfile)
+                        persistRunProfile()
                         if (::runProfileInput.isInitialized) {
                             runProfileInput.setText(runProfile.rawJson)
                         }
@@ -165,7 +174,7 @@ class MainActivity : Activity() {
         }
         root.addView(profileSpinner)
         runProfileInput = multiLine(
-            RunProfileConfig.default(RunProfileConfig.PROFILE_LOCAL_K8S_PUBLIC).rawJson,
+            runProfile.rawJson,
             "RunProfileConfigInput",
         )
         root.addView(runProfileInput)
@@ -196,7 +205,14 @@ class MainActivity : Activity() {
         })
         root.addView(button("RuntimeMetrics", "Runtime Metrics") {
             val events = eventLog.readText().lineSequence().filter { it.isNotBlank() }.count()
-            show("runtime_running=${runtime != null}\napp_events=$events\nlast_upload=${lastUploadResult.take(240)}")
+            show(
+                "runtime_running=${runtime != null}\n" +
+                    "app_events=$events\n" +
+                    "last_bootstrap=${lastBootstrapResult.take(180)}\n" +
+                    "last_dummy=${lastDummyResult.take(180)}\n" +
+                    "last_upload_build=${lastUploadResult.take(180)}\n" +
+                    "last_upload_send=${lastUploadSendResult.take(180)}",
+            )
         })
     }
 
@@ -229,11 +245,7 @@ class MainActivity : Activity() {
     private fun addUploadScreen(root: LinearLayout) {
         root.addView(section("Upload"))
         root.addView(button("BuildUploadSession", "Build Synthetic Upload Session") {
-            callRuntime("BuildUploadSession") { runtime ->
-                val chainId = nextChainId("upload")
-                val request = """{"chain_id":"$chainId","size_bytes":1048576,"chunk_size":65536,"sanitization_profile":"phase3-emulator"}"""
-                runtime.buildSyntheticUploadSession(request).also { lastUploadResult = it }
-            }
+            buildUploadSession()
         })
         root.addView(button("SessionFrameSummary", "Session Frame Summary") {
             show("Last upload session:\n$lastUploadResult")
@@ -264,15 +276,7 @@ class MainActivity : Activity() {
     private fun addEvidenceScreen(root: LinearLayout) {
         root.addView(section("Evidence"))
         uploadGrantInput = multiLine(
-            """
-            {
-              "upload_mode": "s3_presigned_put",
-              "bucket": "veritas-pass4-mobile-evidence",
-              "object_key": "mobile-evidence/pass4-phase3-emulator/mobile-chain/mobile-bundle.zip",
-              "presigned_put_url": "",
-              "expires_at_ms": 0
-            }
-            """.trimIndent(),
+            persistedString(PREF_S3_GRANT_JSON) ?: defaultS3GrantJson(),
             "S3EvidenceUploadGrant",
         )
         root.addView(uploadGrantInput)
@@ -326,10 +330,7 @@ class MainActivity : Activity() {
                     "RefreshBridgeCatalog" -> callRuntime("RefreshBridgeCatalog") { it.refreshBridgeCatalog() }
                     "HostCreatorDHTQRReader" -> previewHostSeed()
                     "BootstrapNewCreator" -> bootstrapNewCreator()
-                    "BuildUploadSession" -> callRuntime("BuildUploadSession") { runtime ->
-                        val chainId = nextChainId("upload")
-                        runtime.buildSyntheticUploadSession("""{"chain_id":"$chainId","size_bytes":4096,"chunk_size":1024,"sanitization_profile":"phase3-button"}""")
-                    }
+                    "BuildUploadSession" -> buildUploadSession(sizeBytes = 4096, chunkSize = 1024, sanitizationProfile = "phase3-button")
                     "SendDummy" -> sendDummy()
                     "SendUpload" -> sendUpload()
                     "SessionFrameSummary" -> show(lastUploadResult)
@@ -377,6 +378,7 @@ class MainActivity : Activity() {
             val appPreview = HostSeedGuard.preview(payload)
             callRuntime("PreviewBootstrapDHTQR") { it.previewBootstrapDhtQr(payload) }
             lastHostSeedPayload = payload
+            persistString(PREF_LAST_HOST_SEED_PAYLOAD, payload)
             show(appPreview.toDisplay())
         }.onFailure { showError(it) }
     }
@@ -387,6 +389,7 @@ class MainActivity : Activity() {
             HostSeedGuard.preview(payload)
             callRuntime("ImportHostCreatorDHTSeed") { it.importHostCreatorDhtSeed(payload) }
             lastHostSeedPayload = payload
+            persistString(PREF_LAST_HOST_SEED_PAYLOAD, payload)
         }.onFailure { showError(it) }
     }
 
@@ -399,6 +402,27 @@ class MainActivity : Activity() {
             val chainId = nextChainId("bootstrap")
             runtime.bootstrapNewCreator("""{"chain_id":"$chainId"}""").also {
                 lastBootstrapResult = it
+                persistString(PREF_LAST_BOOTSTRAP_RESULT, it)
+                chainFilterInput.setText(chainId)
+            }
+        }
+    }
+
+    private fun buildUploadSession(
+        sizeBytes: Int = 1_048_576,
+        chunkSize: Int = 65_536,
+        sanitizationProfile: String = "phase3-emulator",
+    ) {
+        phase5PrerequisiteError(requireOnboarded = true)?.let {
+            show("BuildUploadSession disabled: $it")
+            return
+        }
+        callRuntime("BuildUploadSession") { runtime ->
+            val chainId = nextChainId("upload")
+            val request = """{"chain_id":"$chainId","size_bytes":$sizeBytes,"chunk_size":$chunkSize,"sanitization_profile":${JsonText.quote(sanitizationProfile)}}"""
+            runtime.buildSyntheticUploadSession(request).also {
+                lastUploadResult = it
+                persistString(PREF_LAST_UPLOAD_RESULT, it)
                 chainFilterInput.setText(chainId)
             }
         }
@@ -412,6 +436,8 @@ class MainActivity : Activity() {
         callRuntime("SendDummy") { runtime ->
             val chainId = nextChainId("dummy")
             runtime.sendDummy("""{"chain_id":"$chainId","size_bytes":256}""").also {
+                lastDummyResult = it
+                persistString(PREF_LAST_DUMMY_RESULT, it)
                 chainFilterInput.setText(chainId)
             }
         }
@@ -427,6 +453,8 @@ class MainActivity : Activity() {
             val sessionId = jsonStringField(lastUploadResult, "session_id")
             val sessionField = sessionId?.let { ""","session_id":${JsonText.quote(it)}""" }.orEmpty()
             runtime.sendUpload("""{"chain_id":"$chainId"$sessionField,"target_lane_count":3}""").also {
+                lastUploadSendResult = it
+                persistString(PREF_LAST_UPLOAD_SEND_RESULT, it)
                 chainFilterInput.setText(chainId)
             }
         }
@@ -442,14 +470,18 @@ class MainActivity : Activity() {
             "local_dht.json" to (runtime?.localDht() ?: "{}"),
             "node_metadata.json" to (runtime?.nodeMetadata() ?: "{}"),
             "host_creator_seed.redacted.json" to (lastHostSeedPayload?.let { HostSeedGuard.redacted(it) } ?: "{}"),
+            "bootstrap_result.json" to lastBootstrapResult,
+            "send_dummy_result.json" to lastDummyResult,
             "upload_sessions.json" to lastUploadResult,
+            "upload_session_result.json" to lastUploadResult,
+            "send_upload_result.json" to lastUploadSendResult,
             "endpoint_config.redacted.json" to runProfile.rawJson,
             "aws_endpoint_map_context.json" to runProfileEvidenceContext(),
             "device_context.json" to DeviceContext.deviceJson(this),
             "network_context.json" to DeviceContext.networkJson(this, "Pass 4 mobile validation"),
             "app_build.json" to DeviceContext.appBuildJson(),
             "rust_build.json" to DeviceContext.rustBuildJson(),
-            "chain_ids.txt" to listOf(chainId, jsonStringField(lastBootstrapResult, "chain_id")).filterNotNull().joinToString("\n"),
+            "chain_ids.txt" to collectedEvidenceChainIds(chainId).joinToString("\n"),
             "remote_trace_queries.json" to runtimeTraceQueries(chainId),
         )
         val result = EvidenceBundleWriter.writeBundle(
@@ -465,7 +497,7 @@ class MainActivity : Activity() {
 
     private fun uploadEvidenceToS3() {
         runCatching {
-            val evidence = lastEvidence ?: exportEvidence()
+            val evidence = exportEvidence()
             val uploadConfig = EvidenceUploadConfig.parse(uploadGrantInput.text.toString())
             show("Uploading evidence to S3...\ns3://${uploadConfig.bucket}/${uploadConfig.objectKey}")
             Thread {
@@ -491,6 +523,7 @@ class MainActivity : Activity() {
             val rawJson = grantFile.readText()
             val config = EvidenceUploadConfig.parse(rawJson)
             uploadGrantInput.setText(rawJson)
+            persistString(PREF_S3_GRANT_JSON, rawJson)
             show("Imported S3 evidence grant from ${grantFile.absolutePath}\nobject_key=${config.objectKey}\nexpires_at_ms=${config.expiresAtMs ?: 0}")
         }.onFailure { showError(it) }
     }
@@ -508,6 +541,7 @@ class MainActivity : Activity() {
             val result = s3GrantQrAssembler.accept(payload)
             if (result.complete && result.grantJson != null) {
                 uploadGrantInput.setText(result.grantJson)
+                persistString(PREF_S3_GRANT_JSON, result.grantJson)
             }
             show(result.message)
         }.onFailure { showError(it) }
@@ -519,6 +553,7 @@ class MainActivity : Activity() {
                 ?: throw IllegalArgumentException("S3 grant document could not be opened")
             val config = EvidenceUploadConfig.parse(rawJson)
             uploadGrantInput.setText(rawJson)
+            persistString(PREF_S3_GRANT_JSON, rawJson)
             show("Imported S3 evidence grant document\nobject_key=${config.objectKey}\nexpires_at_ms=${config.expiresAtMs ?: 0}")
         }.onFailure { showError(it) }
     }
@@ -571,6 +606,7 @@ class MainActivity : Activity() {
             selectedProfile = runProfile.profile
             runProfileInput.setText(runProfile.rawJson)
             syncProfileSpinner()
+            persistRunProfile()
             eventLog.appendEvent("run_profile_imported", nextChainId("profile"), runProfile.profile)
             show("Imported run profile ${runProfile.runId}; profile=${runProfile.profile}")
         }.onFailure { showError(it) }
@@ -596,6 +632,7 @@ class MainActivity : Activity() {
                 selectedProfile = runProfile.profile
                 runProfileInput.setText(result.profileJson)
                 syncProfileSpinner()
+                persistRunProfile()
                 eventLog.appendEvent("run_profile_imported", nextChainId("profile"), runProfile.profile)
             }
             show(result.message)
@@ -633,6 +670,59 @@ class MainActivity : Activity() {
             .find(json)
             ?.groupValues
             ?.get(1)
+
+    private fun loadPersistedValidationState() {
+        persistedString(PREF_RUN_PROFILE_JSON)?.let { rawJson ->
+            runCatching {
+                runProfile = RunProfileConfig.parse(rawJson)
+                selectedProfile = runProfile.profile
+            }
+        }
+        persistedString(PREF_LAST_HOST_SEED_PAYLOAD)?.let { lastHostSeedPayload = it }
+        lastBootstrapResult = persistedString(PREF_LAST_BOOTSTRAP_RESULT) ?: "{}"
+        lastDummyResult = persistedString(PREF_LAST_DUMMY_RESULT) ?: "{}"
+        lastUploadResult = persistedString(PREF_LAST_UPLOAD_RESULT) ?: "{}"
+        lastUploadSendResult = persistedString(PREF_LAST_UPLOAD_SEND_RESULT) ?: "{}"
+    }
+
+    private fun persistRunProfile() {
+        persistString(PREF_RUN_PROFILE_JSON, runProfile.rawJson)
+    }
+
+    private fun persistString(key: String, value: String) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(key, value)
+            .apply()
+    }
+
+    private fun persistedString(key: String): String? =
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(key, null)
+
+    private fun collectedEvidenceChainIds(exportChainId: String): List<String> =
+        listOf(
+            exportChainId,
+            jsonStringField(lastBootstrapResult, "chain_id"),
+            jsonStringField(lastDummyResult, "chain_id"),
+            jsonStringField(lastUploadResult, "chain_id"),
+            jsonStringField(lastUploadSendResult, "chain_id"),
+            jsonStringField(lastUploadResult, "session_id"),
+            jsonStringField(lastUploadSendResult, "session_id"),
+        )
+            .filterNotNull()
+            .filter { it.isNotBlank() }
+            .distinct()
+
+    private fun defaultS3GrantJson(): String =
+        """
+        {
+          "upload_mode": "s3_presigned_put",
+          "bucket": "veritas-pass4-mobile-evidence",
+          "object_key": "mobile-evidence/pass4-phase3-emulator/mobile-chain/mobile-bundle.zip",
+          "presigned_put_url": "",
+          "expires_at_ms": 0
+        }
+        """.trimIndent()
 
     private fun startForeground(chainId: String, operation: String) {
         val intent = Intent(this, CreatorForegroundService::class.java)
@@ -783,5 +873,13 @@ class MainActivity : Activity() {
         private const val REQUEST_RUN_PROFILE_QR_SCAN = 13016
         private const val REQUEST_RUN_PROFILE_DOCUMENT = 13017
         private const val REQUEST_S3_GRANT_DOCUMENT = 13018
+        private const val PREFS_NAME = "pass4_validation_state"
+        private const val PREF_RUN_PROFILE_JSON = "run_profile_json"
+        private const val PREF_S3_GRANT_JSON = "s3_grant_json"
+        private const val PREF_LAST_HOST_SEED_PAYLOAD = "last_host_seed_payload"
+        private const val PREF_LAST_BOOTSTRAP_RESULT = "last_bootstrap_result"
+        private const val PREF_LAST_DUMMY_RESULT = "last_dummy_result"
+        private const val PREF_LAST_UPLOAD_RESULT = "last_upload_result"
+        private const val PREF_LAST_UPLOAD_SEND_RESULT = "last_upload_send_result"
     }
 }

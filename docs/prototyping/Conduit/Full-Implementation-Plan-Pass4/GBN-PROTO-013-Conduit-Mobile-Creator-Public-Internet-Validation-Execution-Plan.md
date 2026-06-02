@@ -1,8 +1,8 @@
 # GBN-PROTO-013 - Conduit Mobile Creator Public Internet Validation Execution Plan (Pass 4)
 
 **Document ID:** GBN-PROTO-013
-**Status:** Pending
-**Last Updated:** 2026-05-12
+**Status:** In Progress - Phase 5 physical-phone evidence uploaded; AWS protocol correlation blocked
+**Last Updated:** 2026-05-31
 **Related Docs:**
 [GBN-ARCH-001-V2 Media Creation Network](../../../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md),
 [GBN-PROTO-012 Pass 3 Architecture-Correct Bootstrap](../Full-Implementation-Plan-Pass3/GBN-PROTO-012-Conduit-Architecture-Correct-Bootstrap-Execution-Plan.md),
@@ -178,11 +178,34 @@ Expected result:
 | 8 | Mobile To AWS Geo Validation | `[ ]` |
 | 9 | Reports, Operators, And Acceptance | `[ ]` |
 | Smoke 1 | Mobile Runtime | `[x]` |
-| Smoke 2 | Mobile AWS Public Path | `[ ]` |
+| Smoke 2 | Mobile AWS Public Path | `[/]` |
 | Smoke 3 | Mobile AWS Geo Path | `[ ]` |
 | Smoke 4 | Mobile Churn / Failover | `[ ]` |
 
 Each phase must update this status tracker when completed.
+
+### 2026-05-31 Phase 5 Execution Update
+
+Physical-phone execution reached the S3 evidence handoff but did not satisfy the full AWS
+public-path gate.
+
+- Run id: `pass4-phase5-aws-20260531T194440Z`.
+- AWS stack: `gbn-conduit-full-pass4` in `ca-central-1`.
+- Evidence bucket: `veritas-pass4-mobile-evidence` in `us-east-1`.
+- Android evidence upload succeeded to
+  `s3://veritas-pass4-mobile-evidence/mobile-evidence/pass4-phase5-aws-20260531T194440Z/mobile-bundle-phone-20260531T234156Z.zip`.
+- Workstation verification confirmed `ContentLength=13659`,
+  `ETag="06bafb301acf21139f6f6a45abae3021"`, `ContentType=application/zip`, and
+  `sha256=21b11bf00a8561b14e1bc10c4d87ece0d06a21af1c34f5d706a517ec39915fd0`.
+- The mobile bundle contains AWS endpoint-map context, HostCreator seed, local DHT,
+  bootstrap, SendDummy, upload-session, SendUpload, and S3 upload evidence files.
+- AWS collector runs over both narrow and widened windows returned zero matching
+  CloudWatch events for the required mobile ChainIDs. Phase 5 is therefore not complete.
+- Root cause in the current implementation: `gbn-bridge-mobile-ffi` synthesizes
+  `bootstrapNewCreator`, `sendDummy`, and `sendUpload` success from imported/local DHT state
+  instead of transmitting those operations to the AWS protocol endpoints. The next Phase 5
+  implementation step is to replace that local/synthetic FFI path with live mobile-to-AWS
+  protocol transport, then rerun the physical-phone validation.
 
 ---
 

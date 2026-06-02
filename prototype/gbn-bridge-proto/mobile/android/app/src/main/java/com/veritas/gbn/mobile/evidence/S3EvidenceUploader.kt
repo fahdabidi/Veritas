@@ -27,12 +27,20 @@ object S3EvidenceUploader {
             doOutput = true
             setRequestProperty("Content-Type", "application/zip")
             setRequestProperty("Content-Length", zipFile.length().toString())
+            setFixedLengthStreamingMode(zipFile.length())
         }
         zipFile.inputStream().use { input ->
             connection.outputStream.use { output -> input.copyTo(output) }
         }
         val code = connection.responseCode
-        require(code in 200..299) { "S3 upload failed with HTTP $code" }
+        require(code in 200..299) {
+            val errorBody = connection.errorStream
+                ?.bufferedReader()
+                ?.use { it.readText() }
+                ?.take(500)
+                .orEmpty()
+            "S3 upload failed with HTTP $code ${errorBody}".trim()
+        }
         return EvidenceUploadResult(
             bucket = config.bucket,
             objectKey = config.objectKey,

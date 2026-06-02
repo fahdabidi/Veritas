@@ -72,7 +72,8 @@ object MobileJson {
         }
         val bodyIndex = responseJson.indexOf(""""body":""")
         return if (bodyIndex >= 0) {
-            responseJson.substring(bodyIndex + 7, responseJson.lastIndexOf('}'))
+            val bodyStart = responseJson.skipWhitespace(bodyIndex + 7)
+            responseJson.substring(bodyStart, responseJson.jsonValueEnd(bodyStart))
         } else {
             responseJson
         }
@@ -105,4 +106,64 @@ object MobileJson {
             }
             append('"')
         }
+
+    private fun String.skipWhitespace(start: Int): Int {
+        var index = start
+        while (index < length && this[index].isWhitespace()) index++
+        return index
+    }
+
+    private fun String.jsonValueEnd(start: Int): Int {
+        require(start in indices) { "missing body value in $this" }
+        return when (this[start]) {
+            '{', '[' -> compositeJsonValueEnd(start)
+            '"' -> quotedJsonValueEnd(start)
+            else -> primitiveJsonValueEnd(start)
+        }
+    }
+
+    private fun String.compositeJsonValueEnd(start: Int): Int {
+        var depth = 0
+        var inString = false
+        var escaping = false
+        for (index in start until length) {
+            val ch = this[index]
+            if (inString) {
+                when {
+                    escaping -> escaping = false
+                    ch == '\\' -> escaping = true
+                    ch == '"' -> inString = false
+                }
+                continue
+            }
+            when (ch) {
+                '"' -> inString = true
+                '{', '[' -> depth++
+                '}', ']' -> {
+                    depth--
+                    if (depth == 0) return index + 1
+                }
+            }
+        }
+        error("unterminated JSON body in $this")
+    }
+
+    private fun String.quotedJsonValueEnd(start: Int): Int {
+        var escaping = false
+        for (index in start + 1 until length) {
+            val ch = this[index]
+            when {
+                escaping -> escaping = false
+                ch == '\\' -> escaping = true
+                ch == '"' -> return index + 1
+            }
+        }
+        error("unterminated quoted JSON body in $this")
+    }
+
+    private fun String.primitiveJsonValueEnd(start: Int): Int {
+        var index = start
+        while (index < length && this[index] != ',' && this[index] != '}') index++
+        return index
+    }
 }

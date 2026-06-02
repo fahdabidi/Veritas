@@ -41,14 +41,13 @@ class S3GrantQrAssembler {
             ?: throw IllegalArgumentException("S3 grant chunk requires data")
         require(chunkIndex in 1..chunkCount) { "S3 grant chunk index is out of range" }
 
+        if (grantId != null && !matchesActiveGrant(chunkGrantId, chunkCount, chunkSha)) {
+            clear()
+        }
         if (grantId == null) {
             grantId = chunkGrantId
             expectedCount = chunkCount
             expectedSha256 = chunkSha
-        } else {
-            require(grantId == chunkGrantId) { "S3 grant chunk grant_id mismatch" }
-            require(expectedCount == chunkCount) { "S3 grant chunk count mismatch" }
-            require(expectedSha256 == chunkSha) { "S3 grant chunk sha256 mismatch" }
         }
 
         val paddedData = encodedData + "=".repeat((4 - encodedData.length % 4) % 4)
@@ -69,14 +68,20 @@ class S3GrantQrAssembler {
             chunks[index] ?: throw IllegalArgumentException("S3 grant chunk $index missing")
         }
         val actualSha = sha256(grantJson)
-        require(actualSha == expectedSha256) { "S3 grant reconstructed SHA-256 mismatch" }
-        val config = EvidenceUploadConfig.parse(grantJson, nowMs)
-        clear()
-        return S3GrantQrImportResult(
-            complete = true,
-            message = "Imported S3 grant object_key=${config.objectKey} expires_at_ms=${config.expiresAtMs ?: 0}",
-            grantJson = grantJson,
-        )
+        if (actualSha != expectedSha256) {
+            clear()
+            throw IllegalArgumentException("S3 grant reconstructed SHA-256 mismatch")
+        }
+        try {
+            val config = EvidenceUploadConfig.parse(grantJson, nowMs)
+            return S3GrantQrImportResult(
+                complete = true,
+                message = "Imported S3 grant object_key=${config.objectKey} expires_at_ms=${config.expiresAtMs ?: 0}",
+                grantJson = grantJson,
+            )
+        } finally {
+            clear()
+        }
     }
 
     fun clear() {
@@ -90,4 +95,7 @@ class S3GrantQrAssembler {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
     }
+
+    private fun matchesActiveGrant(chunkGrantId: String, chunkCount: Int, chunkSha: String): Boolean =
+        grantId == chunkGrantId && expectedCount == chunkCount && expectedSha256 == chunkSha
 }

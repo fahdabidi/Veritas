@@ -35,6 +35,41 @@ class S3GrantQrAssemblerTest {
     }
 
     @Test
+    fun clearsExpiredChunkAssemblyBeforeNextGrant() {
+        val expired = grantJson(expiresAtMs = 900)
+        val fresh = grantJson(expiresAtMs = 3000)
+        val freshChunks = chunks(fresh, size = twoChunkSize(fresh))
+        val assembler = S3GrantQrAssembler()
+
+        assertTrue(
+            runCatching {
+                assembler.accept(chunks(expired, size = expired.length).single(), nowMs = 1000)
+            }.isFailure,
+        )
+
+        assertFalse(assembler.accept(freshChunks[0], nowMs = 1000).complete)
+        val imported = assembler.accept(freshChunks[1], nowMs = 1000)
+        assertTrue(imported.complete)
+        assertEquals(fresh, imported.grantJson)
+    }
+
+    @Test
+    fun startsNewAssemblyWhenGrantIdentityChanges() {
+        val oldGrant = grantJson(expiresAtMs = 3000)
+        val freshGrant = grantJson(expiresAtMs = 4000)
+        val oldChunks = chunks(oldGrant, size = twoChunkSize(oldGrant))
+        val freshChunks = chunks(freshGrant, size = twoChunkSize(freshGrant))
+        val assembler = S3GrantQrAssembler()
+
+        assertFalse(assembler.accept(oldChunks[0], nowMs = 1000).complete)
+        assertFalse(assembler.accept(freshChunks[0], nowMs = 1000).complete)
+        val imported = assembler.accept(freshChunks[1], nowMs = 1000)
+
+        assertTrue(imported.complete)
+        assertEquals(freshGrant, imported.grantJson)
+    }
+
+    @Test
     fun rejectsDuplicateChunkMismatchAndRawCredentialGrant() {
         val grant = grantJson(expiresAtMs = 3000)
         val chunks = chunks(grant, size = grant.length / 2)
@@ -81,6 +116,8 @@ class S3GrantQrAssemblerTest {
             }
             """.trimIndent()
         }
+
+    private fun twoChunkSize(value: String): Int = (value.length + 1) / 2
 
     private fun sha256(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))

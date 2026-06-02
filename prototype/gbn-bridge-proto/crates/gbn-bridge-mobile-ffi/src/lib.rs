@@ -6,12 +6,12 @@ use std::os::raw::c_char;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use gbn_bridge_creator::{
-    build_upload_session_to_disk, list_upload_sessions, BuildUploadSessionOptions, LocalDhtStore,
-    ResetCreatorStateResponse, SanitizerFormatHint, UploadSessionSummary,
+    build_upload_session_to_disk, list_upload_sessions, BuildUploadSessionOptions, CreatorClient,
+    LocalDhtStore, ResetCreatorStateResponse, SanitizerFormatHint, UploadSessionSummary,
 };
 use gbn_bridge_protocol::{
     encryption_identity_from_signing_key, publisher_identity, BootstrapSession, BridgeDhtEntry,
@@ -95,6 +95,12 @@ impl From<gbn_bridge_creator::LocalDhtError> for MobileRuntimeError {
 
 impl From<gbn_bridge_creator::SessionBuildError> for MobileRuntimeError {
     fn from(value: gbn_bridge_creator::SessionBuildError) -> Self {
+        Self::Runtime(value.to_string())
+    }
+}
+
+impl From<gbn_bridge_creator::CreatorError> for MobileRuntimeError {
+    fn from(value: gbn_bridge_creator::CreatorError) -> Self {
         Self::Runtime(value.to_string())
     }
 }
@@ -840,6 +846,44 @@ impl MobileCreatorRuntime {
             .iter()
             .map(|entry| entry.bridge_id.clone())
             .collect::<Vec<_>>();
+        let payload = deterministic_payload(request.size_bytes, &chain_id);
+        let payload_sha256 = sha256_hex(&payload);
+        if self.public_network_dispatch_enabled() {
+            let sent = self.creator_client_for_table(&table)?.send_dummy_from_local_dht(
+                &self.local_dht,
+                request.size_bytes,
+                request.force_bridge_failure,
+                Some(chain_id.clone()),
+                Some(&payload),
+            )?;
+            self.emit(
+                &sent.chain_id,
+                "creator_send_dummy_completed",
+                "send_dummy",
+                json!({
+                    "route_source": sent.route_source,
+                    "assigned_bridge_id": sent.assigned_bridge_id,
+                    "ciphertext_only_at_bridge": sent.ciphertext_only_at_bridge,
+                    "force_bridge_failure": request.force_bridge_failure,
+                    "payload_sha256": payload_sha256,
+                    "elapsed_ms": sent.elapsed_ms,
+                }),
+            )?;
+            return Ok(MobileSendDummyResult {
+                chain_id: sent.chain_id,
+                actor_id: sent.actor_id,
+                route_source: sent.route_source,
+                candidate_bridge_ids: sent.candidate_bridge_ids,
+                selected_bridge_ids: sent.selected_bridge_ids,
+                assigned_bridge_id: sent.assigned_bridge_id,
+                encryption_envelope: sent.encryption_envelope,
+                ciphertext_only_at_bridge: sent.ciphertext_only_at_bridge,
+                frames: sent.frames,
+                payload_size_bytes: request.size_bytes,
+                payload_sha256,
+                force_bridge_failure_used: sent.force_bridge_failure_used,
+            });
+        }
         let selected = if request.force_bridge_failure && candidates.len() > 1 {
             let failed_bridge_id = candidates[0].bridge_id.clone();
             if let Some(entry) = table
@@ -858,8 +902,6 @@ impl MobileCreatorRuntime {
         } else {
             candidates[0].clone()
         };
-        let payload = deterministic_payload(request.size_bytes, &chain_id);
-        let payload_sha256 = sha256_hex(&payload);
         self.emit(
             &chain_id,
             "creator_send_dummy_completed",
@@ -926,6 +968,54 @@ impl MobileCreatorRuntime {
             return Err(MobileRuntimeError::Runtime(
                 "mobile local DHT has no active eligible upload lanes".to_string(),
             ));
+        }
+        if self.public_network_dispatch_enabled() {
+            let sent = self.creator_client_for_table(&table)?.send_upload_session_from_local_dht(
+                &self.local_dht,
+                &self.state_dir,
+                &selected_session_id,
+                request.target_lane_count.max(1),
+                15_000,
+                20_000,
+                300_000,
+                request.force_lane_failure.clone(),
+                Some(chain_id.clone()),
+            )?;
+            let session_status = serde_json::to_value(&sent.session_status)?
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            if session_status != "completed" {
+                return Err(MobileRuntimeError::Runtime(format!(
+                    "upload session dispatch did not complete: status={session_status}; completed_chunks={}/{}",
+                    sent.completed_chunks, sent.total_chunks
+                )));
+            }
+            self.emit(
+                &sent.chain_id,
+                "creator_upload_session_sent",
+                "send_upload",
+                json!({
+                    "session_id": sent.session_id,
+                    "lanes_used": sent.lanes_used,
+                    "total_chunks": sent.total_chunks,
+                    "completed_chunks": sent.completed_chunks,
+                    "ciphertext_only_at_bridge": sent.ciphertext_only_at_bridge,
+                    "elapsed_ms": sent.elapsed_ms,
+                }),
+            )?;
+            return Ok(MobileSendUploadResult {
+                session_id: sent.session_id,
+                chain_id: sent.chain_id,
+                session_status,
+                total_chunks: sent.total_chunks,
+                completed_chunks: sent.completed_chunks,
+                lanes_used: sent.lanes_used,
+                lane_count_at_first_dispatch: sent.lane_count_at_first_dispatch,
+                lane_count_at_completion: sent.lane_count_at_completion,
+                ciphertext_only_at_bridge: sent.ciphertext_only_at_bridge,
+                force_lane_failure_used: sent.force_lane_failure_used,
+            });
         }
         self.emit(
             &chain_id,
@@ -1037,6 +1127,35 @@ impl MobileCreatorRuntime {
             json!({"code": "not_implemented"}),
         )?;
         Err(MobileRuntimeError::NotImplemented(operation.to_string()))
+    }
+
+    fn public_network_dispatch_enabled(&self) -> bool {
+        self.config.network_profile != "offline_test"
+    }
+
+    fn creator_client_for_table(&self, table: &LocalDiscoveryTable) -> MobileResult<CreatorClient> {
+        let publisher_pub = self.publisher_trust_root(table)?;
+        Ok(CreatorClient::new(
+            self.identity.creator_id.clone(),
+            self.identity.signing_key()?,
+            publisher_pub,
+        )
+        .with_timeout(Duration::from_secs(15)))
+    }
+
+    fn publisher_trust_root(&self, table: &LocalDiscoveryTable) -> MobileResult<PublicKeyBytes> {
+        if let Some(value) = &self.config.publisher_public_key_hex {
+            return Ok(PublicKeyBytes(decode_hex(value)?));
+        }
+        table
+            .publisher_entry
+            .as_ref()
+            .map(|entry| entry.pub_key.clone())
+            .ok_or_else(|| {
+                MobileRuntimeError::Runtime(
+                    "mobile local DHT is missing a trusted Publisher entry".to_string(),
+                )
+            })
     }
 
     fn ensure_offline_test_publisher(&self, chain_id: &str) -> MobileResult<()> {

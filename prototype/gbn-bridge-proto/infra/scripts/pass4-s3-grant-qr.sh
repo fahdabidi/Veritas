@@ -72,7 +72,9 @@ sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 grant_id = (
     str(grant.get("object_key", "mobile-evidence"))
     .replace("/", "-")
-    .replace(".", "-")[:96]
+    .replace(".", "-")[:79]
+    + "-"
+    + sha[:16]
 )
 chunks = [
     canonical[idx : idx + chunk_size]
